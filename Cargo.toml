@@ -1,0 +1,13 @@
+[package]
+name = "core"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[lib]
+# The package is named `core` at the user's direction. The Rust library target
+# avoids colliding with Rust's built-in `core` crate in downstream imports.
+name = "nizaam_core"

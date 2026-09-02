@@ -18,7 +18,7 @@ Implementation began with an existing Cargo library skeleton at `core/` containi
 | - | ---- | ----- | ------ |
 | 0 | Workspace and library foundation | 0 | verified |
 | 1 | Identity, result primitives, operation model | 1 | verified |
-| 2 | Universal Contract Layer | 2 | not started |
+| 2 | Universal Contract Layer | 2 | verified |
 | 3 | Error System foundation | 3 | not started |
 | 4 | Logging System foundation | 4 | not started |
 | 5 | Context execution infrastructure | 5 | not started |
@@ -130,6 +130,8 @@ Deadline, cancellation, security context, and provenance context receive their b
 
 ### Phase 2: Universal Contract Layer
 
+**Status: verified**
+
 #### Goal
 
 Establish the versioned, domain agnostic language used for communication between engines.
@@ -138,6 +140,20 @@ Establish the versioned, domain agnostic language used for communication between
 
 Add contract and payload descriptors; schema, version, interaction, requirements, and execution metadata; universal request, response, and message envelope types; and structural validation, compatibility, and payload encoding and decoding mechanisms.
 
+#### What got built
+
+Implemented the public `contracts` module and exposed its deliberate Phase 2 surface through the prelude. Contract descriptors now carry validated contract and capability identities, contract and schema versions, interaction type, and payload media type. Shared metadata now carries sender and target engine identities, optional engine instance identities, capability and minimum version requirements, and execution hints.
+
+Universal message envelopes now preserve message identity, the existing operation context, contract metadata, and an opaque encoded payload. Universal request and response wrappers distinguish request and response interactions, and responses carry the existing technical status primitive.
+
+Payload meaning remains outside Core. `EncodedPayload` stores the descriptor and bytes, while `PayloadCodec` provides the encoding and decoding boundary and `RawPayloadCodec` supports already encoded engine payloads without adding a serialization dependency. Compatibility checks compare contract identity, capability identity, interaction, media type, and version. Structural validation checks payload presence, capability requirements, descriptor consistency, and request or response interaction.
+
+The standalone crate manifest was also corrected to remove invalid inherited workspace fields, allowing local Cargo validation.
+
+#### Verification
+
+`cargo fmt --all`, `cargo test`, and `cargo clippy --all-targets -- -D warnings` pass from `core/`. The test suite covers descriptor construction and rejection, metadata, compatibility, request validation, opaque payload round trips, and public prelude usage.
+
 #### Boundary
 
 Core understands the envelope and contract metadata. Each engine continues to own its actual capability payload types and semantic validation.
@@ -145,6 +161,18 @@ Core understands the envelope and contract metadata. Each engine continues to ow
 #### Done when
 
 An engine can describe and structurally validate a versioned request or response without Core learning its domain meaning.
+
+#### Checklist
+
+- [x] Implement contract and payload descriptors
+- [x] Implement schema and contract version metadata
+- [x] Implement interaction, requirements, and execution metadata
+- [x] Implement universal message envelope, request, and response types
+- [x] Implement opaque payload encoding and decoding boundary
+- [x] Implement structural validation and compatibility checks
+- [x] Preserve engine ownership of payload semantics
+- [x] Add unit and public integration coverage
+- [x] Verify formatting, tests, and Clippy
 
 ### Phase 3: Error System foundation
 
@@ -433,8 +461,8 @@ None currently. Concrete trait signatures, provider choices, serialization, asyn
 
 ## Current State
 
-Phase 0 and Phase 1 are implemented. The crate has no binary target or `src/main.rs`; it has no dependencies on Nizaam engines or domain semantics. Compilation, tests, and Clippy pass; formatting the private module scaffold remains outstanding.
+Phase 0, Phase 1, and Phase 2 are implemented. The crate has no binary target or `src/main.rs`; it has no dependencies on Nizaam engines or domain semantics. Compilation, tests, and Clippy pass.
 
 ## Next Step
 
-Implement Phase 2, the Universal Contract Layer: contract and payload descriptors, schema/version metadata, universal envelope/request/response, compatibility, and structural validation. Preserve engine ownership of actual capability payload semantics.
+Implement Phase 3, the Error System foundation. Preserve the separation between technical error handling and the already implemented universal contract layer.

@@ -25,7 +25,15 @@ pub fn compare_contracts(
         return Compatibility::Incompatible;
     }
 
-    compare_versions(&required.version, &offered.version)
+    let contract_compatibility = compare_versions(&required.version, &offered.version);
+    if contract_compatibility != Compatibility::Compatible {
+        return contract_compatibility;
+    }
+
+    compare_versions(
+        required.payload.schema_version(),
+        offered.payload.schema_version(),
+    )
 }
 
 #[cfg(test)]
@@ -40,6 +48,39 @@ mod tests {
         );
         assert_eq!(
             compare_versions(&Version::new(1, 0, 0), &Version::new(2, 0, 0)),
+            Compatibility::Incompatible
+        );
+    }
+
+    #[test]
+    fn contracts_reject_incompatible_payload_schema_major_versions() {
+        let required_payload = crate::contracts::descriptor::PayloadDescriptor::new(
+            "application/json",
+            Version::new(1, 0, 0),
+        )
+        .unwrap();
+        let offered_payload = crate::contracts::descriptor::PayloadDescriptor::new(
+            "application/json",
+            Version::new(2, 0, 0),
+        )
+        .unwrap();
+        let required = ContractDescriptor::new(
+            crate::identity::ContractId::new("lookup").unwrap(),
+            crate::identity::CapabilityId::new("lookup").unwrap(),
+            Version::new(1, 0, 0),
+            crate::contracts::descriptor::Interaction::Request,
+            required_payload,
+        );
+        let offered = ContractDescriptor::new(
+            required.contract_id.clone(),
+            required.capability_id.clone(),
+            required.version.clone(),
+            required.interaction,
+            offered_payload,
+        );
+
+        assert_eq!(
+            compare_contracts(&required, &offered),
             Compatibility::Incompatible
         );
     }

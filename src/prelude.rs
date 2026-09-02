@@ -1,4 +1,4 @@
-//! The intentionally small set of Phase 1 types convenient for engine users.
+//! The intentionally small set of Phase 1 and Phase 2 types convenient for engine users.
 
 pub use crate::contracts::{
     ContractDescriptor, ContractMetadata, EncodedPayload, ExecutionMetadata, Interaction,

@@ -1,5 +1,6 @@
 use core::fmt;
 
+use crate::contracts::compatibility::compare_versions;
 use crate::contracts::descriptor::Interaction;
 use crate::contracts::envelope::MessageEnvelope;
 use crate::contracts::request::UniversalRequest;
@@ -11,6 +12,7 @@ pub enum ValidationError {
     EmptyPayload,
     InteractionMismatch,
     CapabilityRequirementMismatch,
+    MinimumContractVersionMismatch,
     PayloadDescriptorMismatch,
 }
 
@@ -21,6 +23,9 @@ impl fmt::Display for ValidationError {
             Self::InteractionMismatch => "the envelope interaction does not match its message kind",
             Self::CapabilityRequirementMismatch => {
                 "the required capability does not match the contract"
+            }
+            Self::MinimumContractVersionMismatch => {
+                "the contract version does not meet the minimum required version"
             }
             Self::PayloadDescriptorMismatch => {
                 "the payload descriptor does not match the contract descriptor"
@@ -41,6 +46,13 @@ pub fn validate_envelope(envelope: &MessageEnvelope) -> Result<(), ValidationErr
         && capability != &envelope.metadata.descriptor.capability_id
     {
         return Err(ValidationError::CapabilityRequirementMismatch);
+    }
+
+    if let Some(minimum_version) = &envelope.metadata.requirements.minimum_contract_version
+        && compare_versions(minimum_version, &envelope.metadata.descriptor.version)
+            != crate::status::Compatibility::Compatible
+    {
+        return Err(ValidationError::MinimumContractVersionMismatch);
     }
 
     if envelope.payload.descriptor() != &envelope.metadata.descriptor.payload {
@@ -106,5 +118,41 @@ mod tests {
         );
 
         assert_eq!(validate_request(&UniversalRequest::new(envelope)), Ok(()));
+    }
+
+    #[test]
+    fn request_rejects_a_contract_below_the_minimum_required_version() {
+        let descriptor = ContractDescriptor::new(
+            ContractId::new("lookup.request").unwrap(),
+            CapabilityId::new("lookup").unwrap(),
+            Version::new(1, 2, 0),
+            Interaction::Request,
+            PayloadDescriptor::new("application/octet-stream", Version::new(1, 0, 0)).unwrap(),
+        );
+        let metadata = ContractMetadata::new(
+            descriptor.clone(),
+            Participants::new(
+                EngineId::new("caller").unwrap(),
+                EngineId::new("provider").unwrap(),
+            ),
+        )
+        .with_requirements(
+            crate::contracts::metadata::RequirementsMetadata::none()
+                .requiring_contract_version(Version::new(1, 3, 0)),
+        );
+        let envelope = MessageEnvelope::new(
+            MessageId::new("message-2").unwrap(),
+            OperationContext::new(Operation::new(
+                OperationId::new("operation-2").unwrap(),
+                CorrelationId::new("correlation-2").unwrap(),
+            )),
+            metadata,
+            EncodedPayload::new(descriptor.payload, b"payload".to_vec()),
+        );
+
+        assert_eq!(
+            validate_request(&UniversalRequest::new(envelope)),
+            Err(ValidationError::MinimumContractVersionMismatch)
+        );
     }
 }

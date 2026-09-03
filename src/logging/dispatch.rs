@@ -1,3 +1,4 @@
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 
@@ -27,6 +28,7 @@ enum DispatchMessage {
 pub(crate) struct LogDispatcher {
     sender: mpsc::SyncSender<DispatchMessage>,
     subscribers: Arc<Mutex<Vec<Arc<dyn LogSink>>>>,
+    lifecycle: Mutex<bool>,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -43,9 +45,18 @@ impl LogDispatcher {
             while let Ok(message) = receiver.recv() {
                 match message {
                     DispatchMessage::Event(event) => {
-                        if let Ok(subscribers) = worker_subscribers.lock() {
-                            for subscriber in subscribers.iter() {
+                        let subscribers = worker_subscribers
+                            .lock()
+                            .map(|subscribers| subscribers.clone())
+                            .unwrap_or_default();
+                        for subscriber in subscribers {
+                            let result = catch_unwind(AssertUnwindSafe(|| {
                                 subscriber.publish(&event);
+                            }));
+                            if result.is_err()
+                                && let Ok(mut registered) = worker_subscribers.lock()
+                            {
+                                registered.retain(|candidate| !Arc::ptr_eq(candidate, &subscriber));
                             }
                         }
                     }
@@ -57,6 +68,7 @@ impl LogDispatcher {
         Ok(Arc::new(Self {
             sender,
             subscribers,
+            lifecycle: Mutex::new(false),
             worker: Mutex::new(Some(worker)),
         }))
     }
@@ -68,6 +80,13 @@ impl LogDispatcher {
     }
 
     pub(crate) fn submit(&self, event: LogEvent) -> Result<DispatchOutcome, DispatchError> {
+        let _lifecycle = self
+            .lifecycle
+            .lock()
+            .map_err(|_| DispatchError::WorkerPanicked)?;
+        if *_lifecycle {
+            return Err(DispatchError::Closed);
+        }
         match self
             .sender
             .try_send(DispatchMessage::Event(Box::new(event)))
@@ -89,7 +108,16 @@ impl LogDispatcher {
     }
 
     pub(crate) fn shutdown(&self) -> Result<(), DispatchError> {
+        let mut lifecycle = self
+            .lifecycle
+            .lock()
+            .map_err(|_| DispatchError::WorkerPanicked)?;
+        if *lifecycle {
+            return Ok(());
+        }
+        *lifecycle = true;
         let _ = self.sender.send(DispatchMessage::Stop);
+        drop(lifecycle);
         let worker = self
             .worker
             .lock()

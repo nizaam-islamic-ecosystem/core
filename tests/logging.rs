@@ -1,4 +1,6 @@
-use std::sync::{Arc, mpsc};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier, Weak, mpsc};
+use std::thread;
 
 use nizaam_core::prelude::*;
 
@@ -7,6 +9,32 @@ struct ChannelSink(mpsc::Sender<LogEvent>);
 impl LogSink for ChannelSink {
     fn publish(&self, event: &LogEvent) {
         self.0.send(event.clone()).unwrap();
+    }
+}
+
+struct ReentrantSink {
+    system: Weak<LoggingSystem>,
+    subscribed: AtomicBool,
+    sender: mpsc::Sender<LogEvent>,
+}
+
+impl LogSink for ReentrantSink {
+    fn publish(&self, event: &LogEvent) {
+        self.sender.send(event.clone()).unwrap();
+        if !self.subscribed.swap(true, Ordering::SeqCst) {
+            if let Some(system) = self.system.upgrade() {
+                let (sender, _) = mpsc::channel();
+                system.subscribe(Arc::new(ChannelSink(sender)));
+            }
+        }
+    }
+}
+
+struct PanickingSink;
+
+impl LogSink for PanickingSink {
+    fn publish(&self, _event: &LogEvent) {
+        panic!("test sink failure");
     }
 }
 
@@ -152,4 +180,101 @@ fn instance_rejects_events_from_another_scope() {
 
     assert_eq!(instance.publish(event), Err(InstanceError::ScopeMismatch));
     system.shutdown().unwrap();
+}
+
+#[test]
+fn sink_can_subscribe_during_publish_without_deadlocking() {
+    let system = Arc::new(LoggingSystem::new(4).unwrap());
+    let (sender, receiver) = mpsc::channel();
+    system.subscribe(Arc::new(ReentrantSink {
+        system: Arc::downgrade(&system),
+        subscribed: AtomicBool::new(false),
+        sender,
+    }));
+    let instance = system.instance(LogScope::Global, LogSource::ControlPlane);
+    let event = LogEvent::new(
+        MessageId::new("event-8").unwrap(),
+        LogLevel::Info,
+        LogSource::ControlPlane,
+        LogScope::Global,
+        "router",
+        LogContext::new(operation_context()),
+        "reentrant subscription",
+        LogEventType::Diagnostic,
+    )
+    .unwrap();
+
+    instance.publish(event).unwrap();
+    assert_eq!(receiver.recv().unwrap().event_id.as_str(), "event-8");
+    system.shutdown().unwrap();
+}
+
+#[test]
+fn panicking_sink_is_removed_and_later_sinks_still_receive_events() {
+    let system = LoggingSystem::new(4).unwrap();
+    let (sender, receiver) = mpsc::channel();
+    system.subscribe(Arc::new(PanickingSink));
+    system.subscribe(Arc::new(ChannelSink(sender)));
+    let instance = system.instance(LogScope::Global, LogSource::ControlPlane);
+
+    for event_id in ["event-9", "event-10"] {
+        let event = LogEvent::new(
+            MessageId::new(event_id).unwrap(),
+            LogLevel::Info,
+            LogSource::ControlPlane,
+            LogScope::Global,
+            "router",
+            LogContext::new(operation_context()),
+            "panic isolation",
+            LogEventType::Diagnostic,
+        )
+        .unwrap();
+        instance.publish(event).unwrap();
+    }
+
+    assert_eq!(receiver.recv().unwrap().event_id.as_str(), "event-9");
+    assert_eq!(receiver.recv().unwrap().event_id.as_str(), "event-10");
+    system.shutdown().unwrap();
+}
+
+#[test]
+fn shutdown_preserves_events_accepted_before_shutdown() {
+    let system = Arc::new(LoggingSystem::new(4).unwrap());
+    let (sender, receiver) = mpsc::channel();
+    system.subscribe(Arc::new(ChannelSink(sender)));
+    let instance = system.instance(LogScope::Global, LogSource::ControlPlane);
+    let barrier = Arc::new(Barrier::new(2));
+    let publisher_barrier = Arc::clone(&barrier);
+    let publisher = thread::spawn(move || {
+        publisher_barrier.wait();
+        instance.publish(
+            LogEvent::new(
+                MessageId::new("event-11").unwrap(),
+                LogLevel::Info,
+                LogSource::ControlPlane,
+                LogScope::Global,
+                "router",
+                LogContext::new(operation_context()),
+                "concurrent publish",
+                LogEventType::Diagnostic,
+            )
+            .unwrap(),
+        )
+    });
+    let shutdown_barrier = Arc::clone(&barrier);
+    let shutdown_system = Arc::clone(&system);
+    let shutdown = thread::spawn(move || {
+        shutdown_barrier.wait();
+        shutdown_system.shutdown()
+    });
+
+    let publish_result = publisher.join().unwrap();
+    shutdown.join().unwrap().unwrap();
+    match publish_result {
+        Ok(DispatchOutcome::Queued) => {
+            assert_eq!(receiver.recv().unwrap().event_id.as_str(), "event-11");
+        }
+        Err(InstanceError::Dispatch(DispatchError::Closed)) => {}
+        result => panic!("unexpected publish result: {result:?}"),
+    }
 }

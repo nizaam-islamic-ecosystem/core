@@ -1,6 +1,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use super::{LogEvent, LogLevel, LogSink};
 
@@ -37,6 +38,7 @@ pub(crate) struct LogDispatcher {
 struct Lifecycle {
     shutting_down: bool,
     active_publishers: usize,
+    stopped: bool,
 }
 
 impl LogDispatcher {
@@ -51,8 +53,10 @@ impl LogDispatcher {
         let worker_lifecycle = Arc::new(Mutex::new(Lifecycle {
             shutting_down: false,
             active_publishers: 0,
+            stopped: false,
         }));
         let lifecycle_changed = Arc::new(Condvar::new());
+        let worker_lifecycle_changed = Arc::clone(&lifecycle_changed);
         let worker_lifecycle_state = Arc::clone(&worker_lifecycle);
         let worker = thread::spawn(move || {
             let dispatch_event = |event: Box<LogEvent>| {
@@ -82,11 +86,32 @@ impl LogDispatcher {
                     .map(|lifecycle| lifecycle.shutting_down)
                     .unwrap_or(true);
                 if shutting_down {
-                    while let Ok(DispatchMessage::Event(event)) = receiver.try_recv() {
-                        dispatch_event(event);
+                    loop {
+                        let active_publishers = worker_lifecycle_state
+                            .lock()
+                            .map(|lifecycle| lifecycle.active_publishers)
+                            .unwrap_or(0);
+                        if active_publishers == 0 {
+                            while let Ok(DispatchMessage::Event(event)) = receiver.try_recv() {
+                                dispatch_event(event);
+                            }
+                            break;
+                        }
+
+                        match receiver.recv_timeout(Duration::from_millis(10)) {
+                            Ok(DispatchMessage::Event(event)) => dispatch_event(event),
+                            Ok(DispatchMessage::Stop) => break,
+                            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        }
                     }
                     break;
                 }
+            }
+
+            if let Ok(mut lifecycle) = worker_lifecycle_state.lock() {
+                lifecycle.stopped = true;
+                worker_lifecycle_changed.notify_all();
             }
         });
 
@@ -151,6 +176,14 @@ impl LogDispatcher {
             .lock()
             .map_err(|_| DispatchError::WorkerPanicked)?;
         if lifecycle.shutting_down {
+            if thread::current().id() != self.worker_id {
+                while !lifecycle.stopped {
+                    lifecycle = self
+                        .lifecycle_changed
+                        .wait(lifecycle)
+                        .map_err(|_| DispatchError::WorkerPanicked)?;
+                }
+            }
             return Ok(());
         }
         lifecycle.shutting_down = true;

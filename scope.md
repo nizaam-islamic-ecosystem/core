@@ -496,6 +496,11 @@ Both engine categories can demonstrate use of Core without violating the frozen 
 - One crate with internal modules is the current implementation choice. Future crate splitting is not authorized without a demonstrated architectural reason.
 - Core contains mechanisms and contracts, never Nizaam engine domain semantics.
 - The Control Plane will be communication focused and implemented only in Phase 15.
+- The Error System is a first class Core system and remains independent from Logging, transport, persistence, and domain payload semantics.
+- Error codes use validated namespaces with explicit ownership, so Core and each engine can define distinct error families without collisions.
+- Error definitions must be registered in the Error Catalog before an error occurrence can be reported.
+- The global error structure is strict and shared, while engines may define their own error codes and messages within that structure.
+- Error definitions describe error meaning, while Error Events record runtime occurrences with their execution context.
 - Logging uses one structured event contract. Global and local logging are scoped instances of one shared system.
 - Logging dispatch is bounded and asynchronous. Debug and info events may be dropped under pressure, while warning, error, and audit events wait for queue capacity.
 - Logging consumers implement the shared `LogSink` contract. Core does not select a persistence provider, user interface, or observability vendor.

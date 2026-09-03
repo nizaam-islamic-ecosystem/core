@@ -30,6 +30,8 @@ It does **not** provide domain meaning.
 * [Project Status](#project-status)
 * [Source of Truth](#source-of-truth)
 
+---
+
 ## Document Status
 
 This README describes the finalized architectural direction of Nizaam Core.

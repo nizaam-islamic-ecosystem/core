@@ -6,14 +6,23 @@ use super::CancellationToken;
 #[derive(Debug)]
 pub struct BackgroundTasks {
     cancellation: CancellationToken,
-    handles: Mutex<Vec<JoinHandle<()>>>,
+    state: Mutex<BackgroundState>,
 }
+
+#[derive(Debug, Default)]
+struct BackgroundState {
+    closed: bool,
+    handles: Vec<JoinHandle<()>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SpawnError;
 
 impl BackgroundTasks {
     pub fn new(cancellation: CancellationToken) -> Self {
         Self {
             cancellation,
-            handles: Mutex::new(Vec::new()),
+            state: Mutex::new(BackgroundState::default()),
         }
     }
 
@@ -21,25 +30,47 @@ impl BackgroundTasks {
         &self.cancellation
     }
 
-    pub fn spawn<F>(&self, task: F)
+    pub fn spawn<F>(&self, task: F) -> Result<(), SpawnError>
     where
         F: FnOnce(CancellationToken) + Send + 'static,
     {
+        let mut state = self.state.lock().expect("background task lock poisoned");
+        if state.closed {
+            return Err(SpawnError);
+        }
         let token = self.cancellation.child_token();
         let handle = std::thread::spawn(move || task(token));
-        self.handles
-            .lock()
-            .expect("background task lock poisoned")
-            .push(handle);
+        state.handles.push(handle);
+        Ok(())
     }
 
     pub fn shutdown(&self) {
-        self.cancellation.cancel();
-        let handles =
-            std::mem::take(&mut *self.handles.lock().expect("background task lock poisoned"));
+        let handles = {
+            let mut state = self.state.lock().expect("background task lock poisoned");
+            if state.closed {
+                return;
+            }
+            state.closed = true;
+            self.cancellation.cancel();
+            std::mem::take(&mut state.handles)
+        };
+        let mut panic_payload = None;
         for handle in handles {
-            handle.join().expect("background task panicked");
+            if let Err(payload) = handle.join() {
+                panic_payload.get_or_insert(payload);
+            }
         }
+        if let Some(payload) = panic_payload {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    #[cfg(test)]
+    fn is_closed(&self) -> bool {
+        self.state
+            .lock()
+            .expect("background task lock poisoned")
+            .closed
     }
 }
 
@@ -55,14 +86,25 @@ mod tests {
         let stopped = Arc::new(Mutex::new(false));
         let stopped_by_task = stopped.clone();
 
-        tasks.spawn(move |cancellation| {
-            while !cancellation.is_cancelled() {
-                std::thread::yield_now();
-            }
-            *stopped_by_task.lock().unwrap() = true;
-        });
+        tasks
+            .spawn(move |cancellation| {
+                while !cancellation.is_cancelled() {
+                    std::thread::yield_now();
+                }
+                *stopped_by_task.lock().unwrap() = true;
+            })
+            .unwrap();
         tasks.shutdown();
 
         assert!(*stopped.lock().unwrap());
+    }
+
+    #[test]
+    fn shutdown_rejects_late_tasks() {
+        let tasks = BackgroundTasks::new(CancellationToken::new());
+        tasks.shutdown();
+
+        assert_eq!(tasks.spawn(|_| {}), Err(super::SpawnError));
+        assert!(tasks.is_closed());
     }
 }

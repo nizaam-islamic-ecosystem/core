@@ -70,8 +70,8 @@ pub struct Deadline(Instant);
 
 impl Deadline {
     /// Creates a deadline relative to the current instant.
-    pub fn from_now(duration: Duration) -> Self {
-        Self(Instant::now() + duration)
+    pub fn from_now(duration: Duration) -> Option<Self> {
+        Instant::now().checked_add(duration).map(Self)
     }
 
     /// Creates a deadline at an absolute instant.
@@ -261,7 +261,7 @@ mod tests {
 
     #[test]
     fn deadline_reports_remaining_time_and_expiration() {
-        let deadline = Deadline::from_now(Duration::from_millis(20));
+        let deadline = Deadline::from_now(Duration::from_millis(20)).unwrap();
 
         assert!(!deadline.is_expired());
         assert!(deadline.remaining() <= Duration::from_millis(20));
@@ -273,9 +273,14 @@ mod tests {
     }
 
     #[test]
+    fn deadline_rejects_unrepresentable_relative_duration() {
+        assert!(Deadline::from_now(Duration::MAX).is_none());
+    }
+
+    #[test]
     fn child_deadline_cannot_extend_parent_deadline() {
-        let parent = Deadline::from_now(Duration::from_millis(10));
-        let requested_child = Deadline::from_now(Duration::from_secs(1));
+        let parent = Deadline::from_now(Duration::from_millis(10)).unwrap();
+        let requested_child = Deadline::from_now(Duration::from_secs(1)).unwrap();
 
         assert_eq!(parent.min_with(requested_child), parent);
     }
@@ -287,7 +292,7 @@ mod tests {
             CorrelationId::new("correlation-1").unwrap(),
         );
         let parent = EngineContext::new(OperationContext::new(operation))
-            .with_deadline(Deadline::from_now(Duration::from_secs(1)))
+            .with_deadline(Deadline::from_now(Duration::from_secs(1)).unwrap())
             .with_security(SecurityContext::new())
             .with_provenance(ProvenanceContext::new());
         let child = parent.child();
@@ -312,7 +317,7 @@ mod tests {
             CorrelationId::new("correlation-2").unwrap(),
         );
         let context = EngineContext::new(OperationContext::new(operation))
-            .with_deadline(Deadline::from_now(Duration::ZERO));
+            .with_deadline(Deadline::from_now(Duration::ZERO).unwrap());
         let definition = ErrorDefinition::new(
             ErrorCode::new("CORE.EXECUTION.001").unwrap(),
             ErrorOwner::new("CORE").unwrap(),

@@ -59,6 +59,12 @@ impl EngineRuntime {
     }
 }
 
+impl Drop for EngineRuntime {
+    fn drop(&mut self) {
+        self.background.shutdown();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::EngineRuntime;
@@ -74,5 +80,25 @@ mod tests {
 
         assert_eq!(runtime.state(), LifecycleState::Stopped);
         assert!(runtime.shutdown_token().is_cancelled());
+    }
+
+    #[test]
+    fn dropping_engine_runtime_cancels_and_joins_background_work() {
+        let stopped = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let stopped_by_task = stopped.clone();
+        {
+            let runtime = EngineRuntime::new();
+            runtime
+                .background_tasks()
+                .spawn(move |cancellation| {
+                    while !cancellation.is_cancelled() {
+                        std::thread::yield_now();
+                    }
+                    *stopped_by_task.lock().unwrap() = true;
+                })
+                .unwrap();
+        }
+
+        assert!(*stopped.lock().unwrap());
     }
 }

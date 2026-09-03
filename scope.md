@@ -14,26 +14,26 @@ Implementation began with an existing Cargo library skeleton at `core/` containi
 
 ## At a glance
 
-| # | Area | Phase | Status |
-| - | ---- | ----- | ------ |
-| 0 | Workspace and library foundation | 0 | verified |
-| 1 | Identity, result primitives, operation model | 1 | verified |
-| 2 | Universal Contract Layer | 2 | verified |
-| 3 | Error System foundation | 3 | verified |
-| 4 | Logging System foundation | 4 | verified |
-| 5 | Context execution infrastructure | 5 | verified |
-| 6 | Capability System | 6 | not started |
-| 7 | Transport and universal client/server | 7 | not started |
-| 8 | Engine Runtime | 8 | not started |
-| 9 | Middleware and Security | 9 | not started |
-| 10 | Artifact and Provenance | 10 | not started |
-| 11 | Observability, Health, Configuration | 11 | not started |
-| 12 | Streaming, Concurrency, Background Tasks | 12 | not started |
-| 13 | Retry and Idempotency | 13 | not started |
-| 14 | Internal Events | 14 | not started |
-| 15 | Control Plane | 15 | not started |
-| 16 | Engine SDK | 16 | not started |
-| 17 | Testing and Conformance hardening | 17 | not started |
+| #  | Area                                         | Phase | Status      |
+| -- | -------------------------------------------- | ----- | ----------- |
+| 0  | Workspace and library foundation             | 0     | verified    |
+| 1  | Identity, result primitives, operation model | 1     | verified    |
+| 2  | Universal Contract Layer                     | 2     | verified    |
+| 3  | Error System foundation                      | 3     | verified    |
+| 4  | Logging System foundation                    | 4     | verified    |
+| 5  | Context execution infrastructure             | 5     | verified    |
+| 6  | Capability System                            | 6     | not started |
+| 7  | Transport and universal client/server        | 7     | not started |
+| 8  | Engine Runtime                               | 8     | not started |
+| 9  | Middleware and Security                      | 9     | not started |
+| 10 | Artifact and Provenance                      | 10    | not started |
+| 11 | Observability, Health, Configuration         | 11    | not started |
+| 12 | Streaming, Concurrency, Background Tasks     | 12    | not started |
+| 13 | Retry and Idempotency                        | 13    | not started |
+| 14 | Internal Events                              | 14    | not started |
+| 15 | Control Plane                                | 15    | not started |
+| 16 | Engine SDK                                   | 16    | not started |
+| 17 | Testing and Conformance hardening            | 17    | not started |
 
 Testing is continuous. Phase 17 is the final integration and conformance hardening phase, not the first point at which tests are written.
 
@@ -57,90 +57,146 @@ core/
 
 The phase modules for contracts, errors, logging, capability, transport, runtime, security, artifacts, provenance, observability, health, configuration, middleware, streaming, retry, idempotency, events, Control Plane, SDK, and conformance also exist as private scaffolding under `src/`. Their presence records the approved structure only. It does not mark their phases as implemented or make their APIs public before the relevant phase has behavior and tests.
 
-## Implementation Phases
+# Implementation Phases
 
-### Phase 0: Workspace foundation
+## Phase 0: Workspace foundation
 
-#### Goal
+### Goal
 
 Establish one Core library crate at the center of the dependency graph without introducing engine dependencies or a binary target.
 
-#### Decided
+### Decided
 
 Keep one `core` Cargo package with a `nizaam_core` library target in the existing `core/` directory. Concrete future crate splitting remains open and requires an architectural reason.
 
-#### What got built
+### What got built
 
 Root Cargo workspace configuration, preserved `core/src/lib.rs` as the library root, the approved private module scaffold, and a concise crate README.
 
-#### Verification
+### Files and Folders
+
+**Workspace / package files**
+
+* `Cargo.toml`
+* `Cargo.lock`
+* `core/Cargo.toml`
+
+**Core library files**
+
+* `core/src/lib.rs`
+
+**Documentation**
+
+* `core/README.md`
+* `core/scope.md`
+
+**Structural requirement**
+
+* No `core/src/main.rs`
+* No binary target
+
+### Verification
 
 `cargo check --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings` pass. `cargo fmt --all --check` currently reports formatting in the private module scaffold and is still to be corrected.
 
-#### Corrections
+### Corrections
 
 The Cargo package remains `core`. Its library target is `nizaam_core` so downstream Rust code does not collide with Rust's standard `core` crate.
 
-#### Remaining work
+### Remaining work
 
 No binary target is planned. Future workspace members are deliberately deferred until their architecture exists.
 
-#### Checklist
+### Checklist
 
-- [x] Inspect and preserve the existing Cargo library project
-- [x] Create root workspace configuration
-- [x] Keep `src/lib.rs` as crate root
-- [x] Avoid `src/main.rs` and binary targets
-- [x] Verify workspace checks
+* [x] Inspect and preserve the existing Cargo library project
+* [x] Create root workspace configuration
+* [x] Keep `src/lib.rs` as crate root
+* [x] Avoid `src/main.rs` and binary targets
+* [x] Verify workspace checks
 
-### Phase 1: Absolute Core foundations
+---
 
-#### Goal
+## Phase 1: Absolute Core foundations
+
+### Goal
 
 Provide strongly typed identity, shared outcome primitives, and a minimal operation model on which later Core systems can depend.
 
-#### Decided
+### Decided
 
 All Core identities are distinct newtypes around validated text. They are intentionally not interchangeable. Error and artifact primitives are references only: their owning systems will define their detailed semantics in later phases.
 
-#### What got built
+### What got built
 
 `identity` defines `MessageId`, `OperationId`, `CorrelationId`, `EngineId`, `EngineInstanceId`, `CapabilityId`, `ContractId`, `PlanId`, `NodeId`, `AttemptId`, and `ArtifactId`. `status` defines `Status`, `Retryability`, `Compatibility`, `ErrorReference`, and `ArtifactReference`. `operation` defines `Operation` and `OperationContext`, including parent, plan, node, and attempt identity. `prelude` exposes the intentionally small Phase 1 public surface.
 
-#### Verification
+### Files and Folders
+
+**Identity**
+
+* `src/identity/mod.rs`
+* `src/identity/message.rs`
+* `src/identity/operation.rs`
+* `src/identity/engine.rs`
+* `src/identity/capability.rs`
+* `src/identity/contract.rs`
+* `src/identity/artifact.rs`
+* `src/identity/plan.rs`
+
+**Status / shared primitives**
+
+* `src/status.rs`
+
+**Operation foundation**
+
+* `src/operation/mod.rs`
+* `src/operation/context.rs`
+
+**Public ergonomic surface**
+
+* `src/prelude.rs`
+
+**Tests**
+
+* `tests/foundations.rs`
+
+### Verification
 
 `cargo check --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings` pass. Five tests pass: four unit tests and one integration test. `cargo fmt --all --check` remains outstanding for the private module scaffold.
 
-#### Corrections
+### Corrections
 
 None.
 
-#### Remaining work
+### Remaining work
 
 Deadline, cancellation, security context, and provenance context receive their behavior in the later context, security, and provenance phases. No placeholder semantic systems were invented here.
 
-#### Checklist
+### Checklist
 
-- [x] Implement distinct identity types
-- [x] Reject empty identity values
-- [x] Implement outcome and compatibility primitives
-- [x] Implement operation and attempt context foundations
-- [x] Add unit and public API integration coverage
-- [x] Verify Rust checks
+* [x] Implement distinct identity types
+* [x] Reject empty identity values
+* [x] Implement outcome and compatibility primitives
+* [x] Implement operation and attempt context foundations
+* [x] Add unit and public API integration coverage
+* [x] Verify Rust checks
 
-### Phase 2: Universal Contract Layer
+---
+
+## Phase 2: Universal Contract Layer
 
 **Status: verified**
 
-#### Goal
+### Goal
 
 Establish the versioned, domain agnostic language used for communication between engines.
 
-#### Planned implementation
+### Planned implementation
 
 Add contract and payload descriptors; schema, version, interaction, requirements, and execution metadata; universal request, response, and message envelope types; and structural validation, compatibility, and payload encoding and decoding mechanisms.
 
-#### What got built
+### What got built
 
 Implemented the public `contracts` module and exposed its deliberate Phase 2 surface through the prelude. Contract descriptors now carry validated contract and capability identities, contract and schema versions, interaction type, and payload media type. Shared metadata now carries sender and target engine identities, optional engine instance identities, capability and minimum version requirements, and execution hints.
 
@@ -150,406 +206,920 @@ Payload meaning remains outside Core. `EncodedPayload` stores the descriptor and
 
 The standalone crate manifest was also corrected to remove invalid inherited workspace fields, allowing local Cargo validation.
 
-#### Verification
+### Files and Folders
+
+**Contracts**
+
+* `src/contracts/mod.rs`
+* `src/contracts/descriptor.rs`
+* `src/contracts/metadata.rs`
+* `src/contracts/envelope.rs`
+* `src/contracts/request.rs`
+* `src/contracts/response.rs`
+* `src/contracts/compatibility.rs`
+* `src/contracts/validation.rs`
+
+**Public surface**
+
+* `src/prelude.rs`
+
+**Tests**
+
+* `tests/contracts/`
+* `tests/foundations.rs`
+
+### Verification
 
 `cargo fmt --all`, `cargo test`, and `cargo clippy --all-targets -- -D warnings` pass from `core/`. The test suite covers descriptor construction and rejection, metadata, compatibility, request validation, opaque payload round trips, and public prelude usage.
 
-#### Boundary
+### Boundary
 
 Core understands the envelope and contract metadata. Each engine continues to own its actual capability payload types and semantic validation.
 
-#### Done when
+### Done when
 
 An engine can describe and structurally validate a versioned request or response without Core learning its domain meaning.
 
-#### Checklist
+### Checklist
 
-- [x] Implement contract and payload descriptors
-- [x] Implement schema and contract version metadata
-- [x] Implement interaction, requirements, and execution metadata
-- [x] Implement universal message envelope, request, and response types
-- [x] Implement opaque payload encoding and decoding boundary
-- [x] Implement structural validation and compatibility checks
-- [x] Preserve engine ownership of payload semantics
-- [x] Add unit and public integration coverage
-- [x] Verify formatting, tests, and Clippy
+* [x] Implement contract and payload descriptors
+* [x] Implement schema and contract version metadata
+* [x] Implement interaction, requirements, and execution metadata
+* [x] Implement universal message envelope, request, and response types
+* [x] Implement opaque payload encoding and decoding boundary
+* [x] Implement structural validation and compatibility checks
+* [x] Preserve engine ownership of payload semantics
+* [x] Add unit and public integration coverage
+* [x] Verify formatting, tests, and Clippy
 
-### Phase 3: Error System foundation
+---
+
+## Phase 3: Error System foundation
 
 **Status: verified**
 
-#### Goal
+### Goal
 
 Give every later Core component one strict technical error model.
 
-#### Planned implementation
+### Planned implementation
 
 Add error definitions and occurrences, global errors, error classes, severity, retryability, codes, context, references, catalog registration, and validation. Engine specific error definitions remain namespaced extensions of the global contract.
 
-#### What got built
+### What got built
 
 Implemented the public, first-class `error` module with validated namespaced `ErrorCode`, `ErrorOwner`, and `ErrorDefinition` types; shared error classification and severity; and reuse of the existing `Retryability` and `ErrorReference` primitives. The Error System now validates definition ownership, registers definitions in an in-process catalog, rejects duplicates, and requires registration before reporting an occurrence.
 
 `GlobalError` carries the definition's code, owner, version, class, severity, retryability, message, solution reference, operation context, structured diagnostic details, and cause reference. `ErrorEvent` separates a runtime occurrence from its static catalog definition. `ErrorSystem` and scoped `ErrorSystemInstance` provide synchronous registration and reporting without taking ownership of Logging, transport, persistence, or domain payload semantics.
 
-#### Boundary
+### Files and Folders
+
+**Error System**
+
+* `src/error/mod.rs`
+* `src/error/catalog.rs`
+* `src/error/definition.rs`
+* `src/error/event.rs`
+* `src/error/reference.rs`
+* `src/error/system.rs`
+* `src/error/validation.rs`
+
+**Shared dependencies**
+
+* `src/status.rs`
+* `src/identity/`
+
+**Tests**
+
+* `tests/errors.rs`
+* `tests/errors/`
+
+### Boundary
 
 Error and Logging are peer systems. Logging does not own Error, and Error does not own Logging.
 
-#### Verification
+### Verification
 
 The focused public API tests in `tests/errors.rs` cover registration, contextual reporting, cause preservation, structured diagnostics, and rejection of unregistered definitions. The complete Core test, formatting, compilation, and Clippy checks pass from `core/`.
 
-#### Done when
+### Done when
 
 Later Core mechanisms can return validated, referenceable errors through a shared contract.
 
-#### Checklist
+### Checklist
 
-- [x] Implement validated namespaced error codes and ownership
-- [x] Implement definitions, classes, severity, version, retryability, and guidance
-- [x] Implement global errors, events, context, causes, and diagnostic details
-- [x] Implement catalog registration, duplicate rejection, and lookup
-- [x] Require registered definitions for occurrence reporting
-- [x] Preserve existing `ErrorReference` and `Retryability` contracts
-- [x] Add unit and public integration coverage
-- [x] Verify formatting, tests, compilation, and Clippy
+* [x] Implement validated namespaced error codes and ownership
+* [x] Implement definitions, classes, severity, version, retryability, and guidance
+* [x] Implement global errors, events, context, causes, and diagnostic details
+* [x] Implement catalog registration, duplicate rejection, and lookup
+* [x] Require registered definitions for occurrence reporting
+* [x] Preserve existing `ErrorReference` and `Retryability` contracts
+* [x] Add unit and public integration coverage
+* [x] Verify formatting, tests, compilation, and Clippy
 
-### Phase 4: Logging System foundation
+---
+
+## Phase 4: Logging System foundation
 
 **Status: verified**
 
-#### Goal
+### Goal
 
 Provide structured, asynchronous, reusable logging for both global and engine local use.
 
-#### Planned implementation
+### Planned implementation
 
 Add log context, events, levels, event types, scopes, sources, producer validation, buffering, dispatch, subscribers, sinks, and logging instances. Global and local logging are scopes of the same system.
 
-#### What got built
+### What got built
 
 Implemented the public `logging` module and its prelude surface. Structured `LogEvent` values carry Core identities, operation context, level, event type, source, scope, status, error references, artifact references, and metadata. Validation rejects empty fields, invalid scope and source combinations, missing local engine context, and mismatched engine sources.
 
 `LoggingSystem` creates global and local `LoggingInstance` values over one shared dispatcher. `LogSink` supports multiple subscribers. Dispatch uses a bounded standard library channel and worker thread. Debug and info events may be dropped when the queue is full. Warning, error, and audit events wait for queue capacity. Shutdown is explicit and joins the worker.
 
-#### Verification
+### Files and Folders
 
-`cargo fmt --all`, `cargo test --all-targets`, and `cargo clippy --all-targets -- -D warnings` pass from `core/`. Six public logging tests cover event construction, context propagation, scope and source validation, subscriber fan out, instance enforcement, and shutdown.
+**Logging System**
 
-#### Boundary
+* `src/logging/mod.rs`
+* `src/logging/context.rs`
+* `src/logging/event.rs`
+* `src/logging/instance.rs`
+* `src/logging/system.rs`
+* `src/logging/dispatch.rs`
+* `src/logging/sink.rs`
+* `src/logging/validation.rs`
+
+**Public surface**
+
+* `src/prelude.rs`
+
+**Tests**
+
+* `tests/logging.rs`
+* `tests/logging/`
+
+### Boundary
 
 The logging mechanism is shared, while an engine retains ownership of its additional fields, consumers, and operational meaning.
 
-#### Done when
+### Done when
 
 Core and engines can produce typed log events that flow through the same validated fan out mechanism.
 
-#### Checklist
+### Checklist
 
-- [x] Implement typed log context and event contract
-- [x] Implement levels, event types, scopes, and sources
-- [x] Implement event and producer validation
-- [x] Implement bounded asynchronous buffering and dispatch
-- [x] Implement subscribers and sinks
-- [x] Implement global and local logging instances
-- [x] Add public integration coverage
-- [x] Verify formatting, tests, compilation, and Clippy
+* [x] Implement typed log context and event contract
+* [x] Implement levels, event types, scopes, and sources
+* [x] Implement event and producer validation
+* [x] Implement bounded asynchronous buffering and dispatch
+* [x] Implement subscribers and sinks
+* [x] Implement global and local logging instances
+* [x] Add public integration coverage
+* [x] Verify formatting, tests, compilation, and Clippy
 
-### Phase 5: Context execution infrastructure
+---
 
-#### Goal
+## Phase 5: Context execution infrastructure
+
+### Goal
 
 Make operation execution safe and consistent across engine boundaries.
 
-#### Planned implementation
+### Planned implementation
 
 Add cancellation tokens with parent, child, and shutdown propagation; deadlines and timeout handling; and the `EngineContext` composition of operation, correlation, cancellation, deadline, security, and provenance context.
 
-#### Boundary
+### Boundary
 
 Core propagates context. Engines decide what their domain work does when cancellation or expiration occurs.
 
-#### Done when
+### Done when
 
 Downstream work receives context rather than reconstructing it from transport metadata.
 
-#### What got built
+### What got built
 
 Implemented the public runtime context surface on the `phase-5-context-execution-infrastructure` branch. Core now provides thread safe cancellation tokens with parent and child propagation, absolute deadlines with expiration and remaining time checks, and provider neutral security and provenance context values. `EngineContext` composes these values with the existing `OperationContext` and derives child contexts without widening cancellation or deadlines.
 
 The runtime boundaries now also provide lifecycle transitions, context checked execution pipelines, cancellable task scopes, background task ownership and shutdown joining, and a minimal engine runtime owner. Provenance contexts support immutable derived attributes without selecting a storage provider. Expired contexts can translate through the existing shared Error contract.
 
-#### Verification
+### Files and Folders
+
+**Operation context**
+
+* `src/operation/mod.rs`
+* `src/operation/context.rs`
+* `src/operation/cancellation.rs`
+* `src/operation/deadline.rs`
+* `src/operation/state.rs`
+
+**Security context**
+
+* `src/security/mod.rs`
+* `src/security/context.rs`
+
+**Provenance context**
+
+* `src/provenance/mod.rs`
+* `src/provenance/context.rs`
+
+**Runtime boundaries implemented in Phase 5**
+
+* `src/runtime/mod.rs`
+* `src/runtime/engine.rs`
+* `src/runtime/lifecycle.rs`
+* `src/runtime/pipeline.rs`
+* `src/runtime/concurrency.rs`
+* `src/runtime/background.rs`
+
+**Shared error contract used by context**
+
+* `src/error/`
+
+**Public surface**
+
+* `src/prelude.rs`
+
+**Tests**
+
+* `tests/context.rs`
+* `tests/runtime/`
+* `tests/lifecycle/`
+
+### Verification
 
 `cargo fmt --all`, `cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo check --workspace` pass from `core/`. The suite covers 30 library tests and 17 integration and existing public tests, including cancellation propagation and isolation, deadline limiting, context composition, lifecycle transitions, pipeline ordering and cancellation, task scopes, background shutdown, engine shutdown, provenance derivation, and public consumer propagation.
 
-#### Checklist
+### Checklist
 
-- [x] Implement cancellation tokens and parent, child, and shutdown propagation
-- [x] Implement absolute deadlines, expiration, and remaining time checks
-- [x] Implement provider neutral security and provenance context values
-- [x] Implement `EngineContext` composition and child derivation
-- [x] Implement context checked execution pipeline behavior
-- [x] Implement lifecycle, task scope, background task, and engine runtime boundaries
-- [x] Translate expired contexts through the shared Error contract
-- [x] Add unit and public integration coverage
-- [x] Verify formatting, tests, compilation, and Clippy
+* [x] Implement cancellation tokens and parent, child, and shutdown propagation
+* [x] Implement absolute deadlines, expiration, and remaining time checks
+* [x] Implement provider neutral security and provenance context values
+* [x] Implement `EngineContext` composition and child derivation
+* [x] Implement context checked execution pipeline behavior
+* [x] Implement lifecycle, task scope, background task, and engine runtime boundaries
+* [x] Translate expired contexts through the shared Error contract
+* [x] Add unit and public integration coverage
+* [x] Verify formatting, tests, compilation, and Clippy
 
-#### Done
+### Done
 
 Downstream work receives trusted context from Core rather than reconstructing operation metadata from transport boundaries. Engines retain ownership of domain behavior after cancellation or expiration.
 
-### Phase 6: Capability System
+---
 
-#### Goal
+## Phase 6: Capability System
+
+### Goal
 
 Give engines a common way to expose, register, locate, and invoke capabilities.
 
-#### Planned implementation
+### Planned implementation
 
 Add capability definitions, registrations, a registry, handlers, and local dispatch.
 
-#### Boundary
+### Files and Folders
+
+**Capability System**
+
+* `src/capability/mod.rs`
+* `src/capability/definition.rs`
+* `src/capability/registry.rs`
+* `src/capability/handler.rs`
+* `src/capability/dispatch.rs`
+
+**Related identity**
+
+* `src/identity/capability.rs`
+
+**Related contracts**
+
+* `src/contracts/`
+
+**Public surface**
+
+* `src/prelude.rs`
+
+**Tests**
+
+* `tests/communication/`
+* `tests/contracts/`
+* `tests/runtime/`
+
+### Boundary
 
 Core provides the capability mechanism only. Capability names, typed requests, workflows, and results remain engine owned.
 
-#### Done when
+### Done when
 
 An engine can register a capability and Core can resolve its handler without interpreting its domain semantics.
 
-### Phase 7: Transport and universal client/server
+---
 
-#### Goal
+## Phase 7: Transport and universal client/server
+
+### Goal
 
 Connect the universal contracts and capability system through a shared communication boundary.
 
-#### Planned implementation
+### Planned implementation
 
 Add transport, connection, stream, request and response transmission abstractions, then the universal client and engine server surfaces. Typed capability clients build on the universal client rather than creating separate transport stacks.
 
-#### Boundary
+### Files and Folders
+
+**Transport**
+
+* `src/transport/mod.rs`
+* `src/transport/transport.rs`
+* `src/transport/connection.rs`
+* `src/transport/stream.rs`
+
+**Universal client**
+
+* `src/client/mod.rs`
+* `src/client/connection.rs`
+* `src/client/universal.rs`
+
+**Engine server**
+
+* `src/server/mod.rs`
+* `src/server/engine.rs`
+
+**Related contracts**
+
+* `src/contracts/`
+
+**Related capabilities**
+
+* `src/capability/`
+
+**Tests**
+
+* `tests/communication/`
+
+### Boundary
 
 Concrete transport and serialization choices remain implementation decisions. Engine payload meaning remains outside Core.
 
-#### Done when
+### Done when
 
 A typed engine client can send a universal request through an abstract transport to an engine server and receive a universal response.
 
-### Phase 8: Engine Runtime
+---
 
-#### Goal
+## Phase 8: Engine Runtime
+
+### Goal
 
 Provide the shared lifecycle and request execution infrastructure that every engine can use.
 
-#### Planned implementation
+### Planned implementation
 
 Add lifecycle progression from startup through configuration, dependencies, capabilities, registration, readiness, serving, draining, and stop. Integrate the request pipeline, capability dispatch, context, transport, cancellation, deadlines, health, and shutdown.
 
-#### Boundary
+### Files and Folders
+
+**Runtime**
+
+* `src/runtime/mod.rs`
+* `src/runtime/engine.rs`
+* `src/runtime/lifecycle.rs`
+* `src/runtime/pipeline.rs`
+* `src/runtime/concurrency.rs`
+* `src/runtime/background.rs`
+
+**Capability dispatch**
+
+* `src/capability/dispatch.rs`
+* `src/capability/handler.rs`
+* `src/capability/registry.rs`
+
+**Communication**
+
+* `src/client/`
+* `src/server/`
+* `src/transport/`
+
+**Context**
+
+* `src/operation/`
+* `src/security/context.rs`
+* `src/provenance/context.rs`
+
+**Tests**
+
+* `tests/runtime/`
+* `tests/lifecycle/`
+
+### Boundary
 
 The runtime owns execution infrastructure. Each engine owns the behavior of its capability handlers and internal workflow.
 
-#### Done when
+### Done when
 
 A minimal test engine can receive a request, dispatch a capability, and return a response through Core.
 
-### Phase 9: Middleware and Security
+---
 
-#### Goal
+## Phase 9: Middleware and Security
+
+### Goal
 
 Add the mandatory processing and security boundary around runtime requests.
 
-#### Planned implementation
+### Planned implementation
 
 Add the middleware chain for security, tracing, metrics, validation, contract resolution, dispatch, and response processing. Add security context, service identity, authentication and authorization integration points, and security context propagation.
 
-#### Boundary
+### Files and Folders
+
+**Middleware**
+
+* `src/middleware/mod.rs`
+* `src/middleware/chain.rs`
+* `src/middleware/stages.rs`
+
+**Security**
+
+* `src/security/mod.rs`
+* `src/security/context.rs`
+* `src/security/identity.rs`
+* `src/security/authentication.rs`
+* `src/security/authorization.rs`
+* `src/security/middleware.rs`
+
+**Runtime integration**
+
+* `src/runtime/pipeline.rs`
+* `src/runtime/engine.rs`
+
+**Tests**
+
+* `tests/security/`
+* `tests/runtime/`
+* `tests/conformance/`
+
+### Boundary
 
 Core supplies security mechanisms and enforced runtime boundaries. Engines retain capability and domain authorization rules.
 
-#### Done when
+### Done when
 
 Every runtime request passes the mandatory processing boundary with trusted context available to its handler.
 
-### Phase 10: Artifact and Provenance
+---
 
-#### Goal
+## Phase 10: Artifact and Provenance
+
+### Goal
 
 Make artifacts and execution history referenceable across engines.
 
-#### Planned implementation
+### Planned implementation
 
 Add artifact versions, references, access, publication, retrieval, validation, resolution, integrity, and lifecycle mechanisms. Add provenance for operations, attempts, engines, capabilities, messages, sources, versions, and execution.
 
-#### Boundary
+### Files and Folders
+
+**Artifacts**
+
+* `src/artifacts/mod.rs`
+* `src/artifacts/reference.rs`
+* `src/artifacts/access.rs`
+* `src/artifacts/integrity.rs`
+* `src/artifacts/lifecycle.rs`
+
+**Provenance**
+
+* `src/provenance/mod.rs`
+* `src/provenance/context.rs`
+
+**Related identity**
+
+* `src/identity/artifact.rs`
+* `src/identity/operation.rs`
+* `src/identity/engine.rs`
+* `src/identity/capability.rs`
+* `src/identity/message.rs`
+
+**Tests**
+
+* `tests/conformance/`
+* `tests/communication/`
+
+### Boundary
 
 Core manages artifact and provenance mechanisms, never the meaning or content of an engine's artifacts.
 
-#### Done when
+### Done when
 
 An engine can exchange artifact references and preserve execution provenance through Core contracts.
 
-### Phase 11: Observability, Health, and Configuration
+---
 
-#### Goal
+## Phase 11: Observability, Health, and Configuration
+
+### Goal
 
 Provide operational visibility, readiness, and typed runtime configuration.
 
-#### Planned implementation
+### Planned implementation
 
 Add metrics, tracing, correlation, telemetry, diagnostics hooks, liveness, readiness, capability readiness, dependency health, draining state, configuration loading, validation, environment integration, typed access, and runtime propagation.
 
-#### Boundary
+### Files and Folders
+
+**Observability**
+
+* `src/observability/mod.rs`
+* `src/observability/metrics.rs`
+* `src/observability/tracing.rs`
+* `src/observability/diagnostics.rs`
+
+**Health**
+
+* `src/health/mod.rs`
+* `src/health/liveness.rs`
+* `src/health/readiness.rs`
+* `src/health/dependency.rs`
+
+**Configuration**
+
+* `src/config/mod.rs`
+* `src/config/loader.rs`
+* `src/config/validation.rs`
+* `src/config/environment.rs`
+
+**Runtime integration**
+
+* `src/runtime/`
+
+**Tests**
+
+* `tests/runtime/`
+* `tests/conformance/`
+
+### Boundary
 
 Core provides shared protocols and plumbing. Engine specific health checks and configuration schemas remain engine owned.
 
-#### Done when
+### Done when
 
 An engine can expose its operating state and receive validated runtime configuration through common interfaces.
 
-### Phase 12: Streaming, Concurrency, and Background Tasks
+---
 
-#### Goal
+## Phase 12: Streaming, Concurrency, and Background Tasks
+
+### Goal
 
 Add the heavier runtime mechanisms after the base runtime is established.
 
-#### Planned implementation
+### Planned implementation
 
 Add streaming lifecycle, partial and final results, cancellation, and context propagation; bounded and resource aware task execution; and background task registration, startup, cancellation, shutdown, health participation, and resource accounting.
 
-#### Boundary
+### Files and Folders
+
+**Streaming**
+
+* `src/streaming/mod.rs`
+* `src/streaming/lifecycle.rs`
+* `src/streaming/messages.rs`
+
+**Runtime concurrency**
+
+* `src/runtime/concurrency.rs`
+
+**Background tasks**
+
+* `src/runtime/background.rs`
+
+**Runtime lifecycle**
+
+* `src/runtime/lifecycle.rs`
+* `src/runtime/engine.rs`
+
+**Context integration**
+
+* `src/operation/`
+* `src/security/context.rs`
+* `src/provenance/context.rs`
+
+**Tests**
+
+* `tests/runtime/`
+* `tests/lifecycle/`
+* `tests/communication/`
+
+### Boundary
 
 Core provides lifecycle safe mechanisms. Workload strategy and engine specific jobs remain local to each engine.
 
-#### Done when
+### Done when
 
 Streaming and background work participate in the same context, lifecycle, health, cancellation, and deadline rules as requests.
 
-### Phase 13: Retry and Idempotency
+---
 
-#### Goal
+## Phase 13: Retry and Idempotency
+
+### Goal
 
 Make safe repeat execution available once operation, error, and runtime foundations exist.
 
-#### Planned implementation
+### Planned implementation
 
 Add attempt tracking, retry execution, backoff, retryability, deadline and cancellation awareness, idempotency keys, duplicate detection, and safe retry support.
 
-#### Boundary
+### Files and Folders
+
+**Retry**
+
+* `src/retry/mod.rs`
+* `src/retry/policy.rs`
+* `src/retry/attempt.rs`
+* `src/retry/backoff.rs`
+
+**Idempotency**
+
+* `src/idempotency/mod.rs`
+* `src/idempotency/key.rs`
+
+**Related identity**
+
+* `src/identity/operation.rs`
+* `src/identity/plan.rs`
+
+**Related status/error**
+
+* `src/status.rs`
+* `src/error/`
+
+**Runtime integration**
+
+* `src/runtime/`
+
+**Tests**
+
+* `tests/runtime/`
+* `tests/communication/`
+* `tests/conformance/`
+
+### Boundary
 
 Core supplies the execution mechanism. Retry policy remains owned by the operation, plan node, or capability that requires it.
 
-#### Done when
+### Done when
 
 Core can distinguish duplicate work and execute an authorized retry without losing operation context.
 
-### Phase 14: Internal Events
+---
 
-#### Goal
+## Phase 14: Internal Events
+
+### Goal
 
 Provide a small reusable mechanism for internal engine events.
 
-#### Planned implementation
+### Planned implementation
 
 Add event identity, publishing, subscription, scope, delivery, cancellation, and lifecycle support.
 
-#### Boundary
+### Files and Folders
+
+**Events**
+
+* `src/events/mod.rs`
+* `src/events/event.rs`
+* `src/events/publisher.rs`
+* `src/events/subscriber.rs`
+
+**Context / lifecycle integration**
+
+* `src/operation/`
+* `src/runtime/`
+* `src/security/context.rs`
+
+**Tests**
+
+* `tests/runtime/`
+* `tests/conformance/`
+
+### Boundary
 
 This is optional infrastructure, not a required event driven architecture. Event definitions remain engine owned.
 
-#### Done when
+### Done when
 
 An engine can publish and consume scoped internal events through a lifecycle aware Core mechanism.
 
-### Phase 15: Control Plane
+---
 
-#### Goal
+## Phase 15: Control Plane
+
+### Goal
 
 Implement the frozen communication focused Global Platform Core after its required foundations are available.
 
-#### Planned implementation
+### Planned implementation
 
 Add request admission, protocol validation, contract, capability, and destination resolution, context propagation, request and response routing, communication lifecycle handling, and communication failure reporting.
 
-#### Boundary
+### Files and Folders
+
+**Control Plane**
+
+* `src/control_plane/mod.rs`
+* `src/control_plane/admission.rs`
+* `src/control_plane/contract.rs`
+* `src/control_plane/capability.rs`
+* `src/control_plane/destination.rs`
+* `src/control_plane/routing.rs`
+* `src/control_plane/lifecycle.rs`
+* `src/control_plane/failure.rs`
+
+**Related communication**
+
+* `src/client/`
+* `src/server/`
+* `src/transport/`
+
+**Related contracts**
+
+* `src/contracts/`
+
+**Related capabilities**
+
+* `src/capability/`
+
+**Related context**
+
+* `src/operation/`
+* `src/security/`
+* `src/provenance/`
+
+**Tests**
+
+* `tests/communication/`
+* `tests/conformance/`
+
+### Boundary
 
 The Control Plane is not a domain planner, reasoning engine, global workflow executor, model inference engine, or an engine's internal execution layer.
 
-#### Done when
+### Done when
 
 It can govern secure, compatible inter engine communication while engines continue to own workflow and domain completion.
 
-### Phase 16: Engine SDK
+---
 
-#### Goal
+## Phase 16: Engine SDK
+
+### Goal
 
 Offer engine developers an ergonomic public surface over stable Core mechanisms.
 
-#### Planned implementation
+### Planned implementation
 
 Add SDK entry points for engine setup, capabilities, contexts, and the supported runtime and client surfaces.
 
-#### Boundary
+### Files and Folders
+
+**SDK**
+
+* `src/sdk/mod.rs`
+* `src/sdk/engine.rs`
+* `src/sdk/capability.rs`
+* `src/sdk/context.rs`
+
+**Underlying Core surfaces**
+
+* `src/runtime/`
+* `src/capability/`
+* `src/client/`
+* `src/server/`
+* `src/operation/`
+
+**Public surface**
+
+* `src/prelude.rs`
+
+**Tests**
+
+* `tests/conformance/`
+* `tests/runtime/`
+* `tests/communication/`
+
+### Boundary
 
 The SDK simplifies Core use; it does not create a second runtime or expose Core internal implementation details as a public contract.
 
-#### Done when
+### Done when
 
 An engine developer can build against the supported SDK surface without manually composing every internal Core module.
 
-### Phase 17: Testing and Conformance hardening
+---
 
-#### Goal
+## Phase 17: Testing and Conformance hardening
+
+### Goal
 
 Complete the integrated verification and architecture conformance layer after the major runtime surfaces exist.
 
-#### Planned implementation
+### Planned implementation
 
 Add shared unit, contract, capability registration, request and response, compatibility, error mapping, context, security, artifact, cancellation, deadline, lifecycle, concurrency, and inter engine tests. Add checks for dependency direction, Core bypasses, generated type leakage, runtime boundaries, and mandatory middleware.
 
-#### Boundary
+### Files and Folders
+
+**Conformance**
+
+* `src/conformance/mod.rs`
+* `src/conformance/architecture.rs`
+* `src/conformance/contracts.rs`
+* `src/conformance/communication.rs`
+* `src/conformance/lifecycle.rs`
+* `src/conformance/security.rs`
+
+**Test suites**
+
+* `tests/foundations.rs`
+* `tests/context.rs`
+* `tests/errors.rs`
+* `tests/logging.rs`
+* `tests/contracts/`
+* `tests/communication/`
+* `tests/conformance/`
+* `tests/lifecycle/`
+* `tests/runtime/`
+* `tests/security/`
+* `tests/logging/`
+* `tests/errors/`
+
+**Cross-system coverage**
+
+* Identity and contracts
+* Capability registration and dispatch
+* Request / response communication
+* Error mapping
+* Logging
+* Context propagation
+* Security
+* Artifacts and provenance
+* Cancellation and deadlines
+* Runtime lifecycle
+* Concurrency
+* Inter-engine communication
+* Middleware enforcement
+* Architecture boundaries
+
+### Boundary
 
 Tests are written throughout every phase. This phase finalizes the complete cross system and conformance coverage.
 
-#### Done when
+### Done when
 
 Both engine categories can demonstrate use of Core without violating the frozen architectural boundaries.
 
-## Architectural Decisions
+---
 
-- Core remains a library crate with no `main.rs`.
-- One crate with internal modules is the current implementation choice. Future crate splitting is not authorized without a demonstrated architectural reason.
-- Core contains mechanisms and contracts, never Nizaam engine domain semantics.
-- The Control Plane will be communication focused and implemented only in Phase 15.
-- The Error System is a first class Core system and remains independent from Logging, transport, persistence, and domain payload semantics.
-- Error codes use validated namespaces with explicit ownership, so Core and each engine can define distinct error families without collisions.
-- Error definitions must be registered in the Error Catalog before an error occurrence can be reported.
-- The global error structure is strict and shared, while engines may define their own error codes and messages within that structure.
-- Error definitions describe error meaning, while Error Events record runtime occurrences with their execution context.
-- Logging uses one structured event contract. Global and local logging are scoped instances of one shared system.
-- Logging dispatch is bounded and asynchronous. Debug and info events may be dropped under pressure, while warning, error, and audit events wait for queue capacity.
-- Logging consumers implement the shared `LogSink` contract. Core does not select a persistence provider, user interface, or observability vendor.
-- Core owns context propagation mechanics, while engines own cancellation and timeout behavior in their domain workflows.
-- Cancellation uses parent and child propagation. Child cancellation is isolated from its parent and sibling contexts.
-- Engine shutdown uses the same cancellation mechanism as operation and task contexts.
-- Deadlines are absolute execution boundaries. A child context inherits the earliest applicable deadline and cannot extend its parent deadline.
-- `EngineContext` is the shared composition boundary for operation, cancellation, deadline, security, and provenance context.
-- Phase 5 remains provider neutral. It does not select an async runtime, transport, authentication provider, storage system, or serialization format.
-- Logging and Error remain independent peer systems. Context infrastructure may reference their contracts but does not own them.
+# Architectural Decisions
 
-## Corrections / Changes
+* Core remains a library crate with no `main.rs`.
+* One crate with internal modules is the current implementation choice. Future crate splitting is not authorized without a demonstrated architectural reason.
+* Core contains mechanisms and contracts, never Nizaam engine domain semantics.
+* The Control Plane will be communication focused and implemented only in Phase 15.
+* The Error System is a first class Core system and remains independent from Logging, transport, persistence, and domain payload semantics.
+* Error codes use validated namespaces with explicit ownership, so Core and each engine can define distinct error families without collisions.
+* Error definitions must be registered in the Error Catalog before an error occurrence can be reported.
+* The global error structure is strict and shared, while engines may define their own error codes and messages within that structure.
+* Error definitions describe error meaning, while Error Events record runtime occurrences with their execution context.
+* Logging uses one structured event contract. Global and local logging are scoped instances of one shared system.
+* Logging dispatch is bounded and asynchronous. Debug and info events may be dropped under pressure, while warning, error, and audit events wait for queue capacity.
+* Logging consumers implement the shared `LogSink` contract. Core does not select a persistence provider, user interface, or observability vendor.
+* Core owns context propagation mechanics, while engines own cancellation and timeout behavior in their domain workflows.
+* Cancellation uses parent and child propagation. Child cancellation is isolated from its parent and sibling contexts.
+* Engine shutdown uses the same cancellation mechanism as operation and task contexts.
+* Deadlines are absolute execution boundaries. A child context inherits the earliest applicable deadline and cannot extend its parent deadline.
+* `EngineContext` is the shared composition boundary for operation, cancellation, deadline, security, and provenance context.
+* Phase 5 remains provider neutral. It does not select an async runtime, transport, authentication provider, storage system, or serialization format.
+* Logging and Error remain independent peer systems. Context infrastructure may reference their contracts but does not own them.
 
-- The Cargo package is `core` and its library target is `nizaam_core`; the existing directory, library root, and private module scaffold remain in place.
+# Corrections / Changes
 
-## Open Questions
+* The Cargo package is `core` and its library target is `nizaam_core`; the existing directory, library root, and private module scaffold remain in place.
+
+# Open Questions
 
 None currently. Concrete trait signatures, provider choices, serialization, async runtime, transport implementation, and eventual crate splitting are deliberately deferred by the plan rather than unresolved architecture.
 
-## Current State
+# Current State
 
 Phase 5, Context execution infrastructure, is implemented and verified on the `phase-5-context-execution-infrastructure` branch. Cancellation, deadlines, `EngineContext`, runtime boundaries, provenance propagation, and public consumer coverage pass all Core checks. Phase 4, the Logging System foundation, remains verified, and Error and Logging remain independent peer systems.
 
-## Next Step
+# Next Step
 
 Phase 6: Capability System.

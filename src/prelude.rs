@@ -9,5 +9,9 @@ pub use crate::identity::{
     ArtifactId, AttemptId, CapabilityId, ContractId, CorrelationId, EngineId, EngineInstanceId,
     MessageId, NodeId, OperationId, PlanId,
 };
+pub use crate::logging::{
+    DispatchError, DispatchOutcome, InstanceError, LogContext, LogEvent, LogEventType, LogLevel,
+    LogMetadata, LogScope, LogSink, LogSource, LogValidationError, LoggingInstance, LoggingSystem,
+};
 pub use crate::operation::{Operation, OperationContext};
 pub use crate::status::{ArtifactReference, Compatibility, ErrorReference, Retryability, Status};

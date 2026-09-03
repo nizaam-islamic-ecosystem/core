@@ -217,6 +217,8 @@ Later Core mechanisms can return validated, referenceable errors through a share
 
 ### Phase 4: Logging System foundation
 
+**Status: verified**
+
 #### Goal
 
 Provide structured, asynchronous, reusable logging for both global and engine local use.
@@ -225,6 +227,16 @@ Provide structured, asynchronous, reusable logging for both global and engine lo
 
 Add log context, events, levels, event types, scopes, sources, producer validation, buffering, dispatch, subscribers, sinks, and logging instances. Global and local logging are scopes of the same system.
 
+#### What got built
+
+Implemented the public `logging` module and its prelude surface. Structured `LogEvent` values carry Core identities, operation context, level, event type, source, scope, status, error references, artifact references, and metadata. Validation rejects empty fields, invalid scope and source combinations, missing local engine context, and mismatched engine sources.
+
+`LoggingSystem` creates global and local `LoggingInstance` values over one shared dispatcher. `LogSink` supports multiple subscribers. Dispatch uses a bounded standard library channel and worker thread. Debug and info events may be dropped when the queue is full. Warning, error, and audit events wait for queue capacity. Shutdown is explicit and joins the worker.
+
+#### Verification
+
+`cargo fmt --all`, `cargo test --all-targets`, and `cargo clippy --all-targets -- -D warnings` pass from `core/`. Six public logging tests cover event construction, context propagation, scope and source validation, subscriber fan out, instance enforcement, and shutdown.
+
 #### Boundary
 
 The logging mechanism is shared, while an engine retains ownership of its additional fields, consumers, and operational meaning.
@@ -232,6 +244,17 @@ The logging mechanism is shared, while an engine retains ownership of its additi
 #### Done when
 
 Core and engines can produce typed log events that flow through the same validated fan out mechanism.
+
+#### Checklist
+
+- [x] Implement typed log context and event contract
+- [x] Implement levels, event types, scopes, and sources
+- [x] Implement event and producer validation
+- [x] Implement bounded asynchronous buffering and dispatch
+- [x] Implement subscribers and sinks
+- [x] Implement global and local logging instances
+- [x] Add public integration coverage
+- [x] Verify formatting, tests, compilation, and Clippy
 
 ### Phase 5: Context execution infrastructure
 
@@ -473,6 +496,14 @@ Both engine categories can demonstrate use of Core without violating the frozen 
 - One crate with internal modules is the current implementation choice. Future crate splitting is not authorized without a demonstrated architectural reason.
 - Core contains mechanisms and contracts, never Nizaam engine domain semantics.
 - The Control Plane will be communication focused and implemented only in Phase 15.
+- The Error System is a first class Core system and remains independent from Logging, transport, persistence, and domain payload semantics.
+- Error codes use validated namespaces with explicit ownership, so Core and each engine can define distinct error families without collisions.
+- Error definitions must be registered in the Error Catalog before an error occurrence can be reported.
+- The global error structure is strict and shared, while engines may define their own error codes and messages within that structure.
+- Error definitions describe error meaning, while Error Events record runtime occurrences with their execution context.
+- Logging uses one structured event contract. Global and local logging are scoped instances of one shared system.
+- Logging dispatch is bounded and asynchronous. Debug and info events may be dropped under pressure, while warning, error, and audit events wait for queue capacity.
+- Logging consumers implement the shared `LogSink` contract. Core does not select a persistence provider, user interface, or observability vendor.
 
 ## Corrections / Changes
 
@@ -484,8 +515,8 @@ None currently. Concrete trait signatures, provider choices, serialization, asyn
 
 ## Current State
 
-Implement Phase 3, the Error System foundation. Preserve the separation between technical error handling and the already implemented universal contract layer.
+Phase 4, the Logging System foundation, is implemented and verified on the `phase-4-logging-system` branch. The public Core logging contract, scoped instances, validation, bounded asynchronous dispatch, subscribers, and sinks are available. Error and Logging remain independent peer systems.
 
 ## Next Step
 
-Phase 4: Logging System foundation.
+Phase 5: Context execution infrastructure.

@@ -21,7 +21,7 @@ Implementation began with an existing Cargo library skeleton at `core/` containi
 | 2 | Universal Contract Layer | 2 | verified |
 | 3 | Error System foundation | 3 | verified |
 | 4 | Logging System foundation | 4 | verified |
-| 5 | Context execution infrastructure | 5 | not started |
+| 5 | Context execution infrastructure | 5 | verified |
 | 6 | Capability System | 6 | not started |
 | 7 | Transport and universal client/server | 7 | not started |
 | 8 | Engine Runtime | 8 | not started |
@@ -274,6 +274,32 @@ Core propagates context. Engines decide what their domain work does when cancell
 
 Downstream work receives context rather than reconstructing it from transport metadata.
 
+#### What got built
+
+Implemented the public runtime context surface on the `phase-5-context-execution-infrastructure` branch. Core now provides thread safe cancellation tokens with parent and child propagation, absolute deadlines with expiration and remaining time checks, and provider neutral security and provenance context values. `EngineContext` composes these values with the existing `OperationContext` and derives child contexts without widening cancellation or deadlines.
+
+The runtime boundaries now also provide lifecycle transitions, context checked execution pipelines, cancellable task scopes, background task ownership and shutdown joining, and a minimal engine runtime owner. Provenance contexts support immutable derived attributes without selecting a storage provider. Expired contexts can translate through the existing shared Error contract.
+
+#### Verification
+
+`cargo fmt --all`, `cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo check --workspace` pass from `core/`. The suite covers 30 library tests and 17 integration and existing public tests, including cancellation propagation and isolation, deadline limiting, context composition, lifecycle transitions, pipeline ordering and cancellation, task scopes, background shutdown, engine shutdown, provenance derivation, and public consumer propagation.
+
+#### Checklist
+
+- [x] Implement cancellation tokens and parent, child, and shutdown propagation
+- [x] Implement absolute deadlines, expiration, and remaining time checks
+- [x] Implement provider neutral security and provenance context values
+- [x] Implement `EngineContext` composition and child derivation
+- [x] Implement context checked execution pipeline behavior
+- [x] Implement lifecycle, task scope, background task, and engine runtime boundaries
+- [x] Translate expired contexts through the shared Error contract
+- [x] Add unit and public integration coverage
+- [x] Verify formatting, tests, compilation, and Clippy
+
+#### Done
+
+Downstream work receives trusted context from Core rather than reconstructing operation metadata from transport boundaries. Engines retain ownership of domain behavior after cancellation or expiration.
+
 ### Phase 6: Capability System
 
 #### Goal
@@ -504,6 +530,13 @@ Both engine categories can demonstrate use of Core without violating the frozen 
 - Logging uses one structured event contract. Global and local logging are scoped instances of one shared system.
 - Logging dispatch is bounded and asynchronous. Debug and info events may be dropped under pressure, while warning, error, and audit events wait for queue capacity.
 - Logging consumers implement the shared `LogSink` contract. Core does not select a persistence provider, user interface, or observability vendor.
+- Core owns context propagation mechanics, while engines own cancellation and timeout behavior in their domain workflows.
+- Cancellation uses parent and child propagation. Child cancellation is isolated from its parent and sibling contexts.
+- Engine shutdown uses the same cancellation mechanism as operation and task contexts.
+- Deadlines are absolute execution boundaries. A child context inherits the earliest applicable deadline and cannot extend its parent deadline.
+- `EngineContext` is the shared composition boundary for operation, cancellation, deadline, security, and provenance context.
+- Phase 5 remains provider neutral. It does not select an async runtime, transport, authentication provider, storage system, or serialization format.
+- Logging and Error remain independent peer systems. Context infrastructure may reference their contracts but does not own them.
 
 ## Corrections / Changes
 
@@ -515,8 +548,8 @@ None currently. Concrete trait signatures, provider choices, serialization, asyn
 
 ## Current State
 
-Phase 4, the Logging System foundation, is implemented and verified on the `phase-4-logging-system` branch. The public Core logging contract, scoped instances, validation, bounded asynchronous dispatch, subscribers, and sinks are available. Error and Logging remain independent peer systems.
+Phase 5, Context execution infrastructure, is implemented and verified on the `phase-5-context-execution-infrastructure` branch. Cancellation, deadlines, `EngineContext`, runtime boundaries, provenance propagation, and public consumer coverage pass all Core checks. Phase 4, the Logging System foundation, remains verified, and Error and Logging remain independent peer systems.
 
 ## Next Step
 
-Phase 5: Context execution infrastructure.
+Phase 6: Capability System.

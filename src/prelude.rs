@@ -14,4 +14,7 @@ pub use crate::logging::{
     LogMetadata, LogScope, LogSink, LogSource, LogValidationError, LoggingInstance, LoggingSystem,
 };
 pub use crate::operation::{Operation, OperationContext};
+pub use crate::provenance::ProvenanceContext;
+pub use crate::runtime::{CancellationToken, Deadline, EngineContext};
+pub use crate::security::SecurityContext;
 pub use crate::status::{ArtifactReference, Compatibility, ErrorReference, Retryability, Status};

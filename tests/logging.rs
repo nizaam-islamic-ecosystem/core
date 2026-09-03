@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier, Weak, mpsc};
 use std::thread;
+use std::time::Duration;
 
 use nizaam_core::prelude::*;
 
@@ -35,6 +36,18 @@ struct PanickingSink;
 impl LogSink for PanickingSink {
     fn publish(&self, _event: &LogEvent) {
         panic!("test sink failure");
+    }
+}
+
+struct ShutdownSink {
+    system: Weak<LoggingSystem>,
+    completed: mpsc::Sender<()>,
+}
+
+impl LogSink for ShutdownSink {
+    fn publish(&self, _event: &LogEvent) {
+        self.system.upgrade().unwrap().shutdown().unwrap();
+        self.completed.send(()).unwrap();
     }
 }
 
@@ -277,4 +290,31 @@ fn shutdown_preserves_events_accepted_before_shutdown() {
         Err(InstanceError::Dispatch(DispatchError::Closed)) => {}
         result => panic!("unexpected publish result: {result:?}"),
     }
+}
+
+#[test]
+fn shutdown_from_a_sink_callback_does_not_deadlock() {
+    let system = Arc::new(LoggingSystem::new(1).unwrap());
+    let (completed_sender, completed_receiver) = mpsc::channel();
+    system.subscribe(Arc::new(ShutdownSink {
+        system: Arc::downgrade(&system),
+        completed: completed_sender,
+    }));
+    let instance = system.instance(LogScope::Global, LogSource::ControlPlane);
+    let event = LogEvent::new(
+        MessageId::new("event-12").unwrap(),
+        LogLevel::Info,
+        LogSource::ControlPlane,
+        LogScope::Global,
+        "router",
+        LogContext::new(operation_context()),
+        "callback shutdown",
+        LogEventType::Diagnostic,
+    )
+    .unwrap();
+
+    instance.publish(event).unwrap();
+    completed_receiver
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap();
 }

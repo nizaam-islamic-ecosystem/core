@@ -18,7 +18,7 @@ pub(crate) mod config;
 pub(crate) mod conformance;
 pub mod contracts;
 pub(crate) mod control_plane;
-pub(crate) mod error;
+pub mod error;
 pub(crate) mod events;
 pub(crate) mod health;
 pub(crate) mod idempotency;

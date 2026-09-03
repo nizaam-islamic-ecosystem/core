@@ -19,7 +19,7 @@ Implementation began with an existing Cargo library skeleton at `core/` containi
 | 0 | Workspace and library foundation | 0 | verified |
 | 1 | Identity, result primitives, operation model | 1 | verified |
 | 2 | Universal Contract Layer | 2 | verified |
-| 3 | Error System foundation | 3 | not started |
+| 3 | Error System foundation | 3 | verified |
 | 4 | Logging System foundation | 4 | not started |
 | 5 | Context execution infrastructure | 5 | not started |
 | 6 | Capability System | 6 | not started |
@@ -176,6 +176,8 @@ An engine can describe and structurally validate a versioned request or response
 
 ### Phase 3: Error System foundation
 
+**Status: verified**
+
 #### Goal
 
 Give every later Core component one strict technical error model.
@@ -184,13 +186,34 @@ Give every later Core component one strict technical error model.
 
 Add error definitions and occurrences, global errors, error classes, severity, retryability, codes, context, references, catalog registration, and validation. Engine specific error definitions remain namespaced extensions of the global contract.
 
+#### What got built
+
+Implemented the public, first-class `error` module with validated namespaced `ErrorCode`, `ErrorOwner`, and `ErrorDefinition` types; shared error classification and severity; and reuse of the existing `Retryability` and `ErrorReference` primitives. The Error System now validates definition ownership, registers definitions in an in-process catalog, rejects duplicates, and requires registration before reporting an occurrence.
+
+`GlobalError` carries the definition's code, owner, version, class, severity, retryability, message, solution reference, operation context, structured diagnostic details, and cause reference. `ErrorEvent` separates a runtime occurrence from its static catalog definition. `ErrorSystem` and scoped `ErrorSystemInstance` provide synchronous registration and reporting without taking ownership of Logging, transport, persistence, or domain payload semantics.
+
 #### Boundary
 
 Error and Logging are peer systems. Logging does not own Error, and Error does not own Logging.
 
+#### Verification
+
+The focused public API tests in `tests/errors.rs` cover registration, contextual reporting, cause preservation, structured diagnostics, and rejection of unregistered definitions. The complete Core test, formatting, compilation, and Clippy checks pass from `core/`.
+
 #### Done when
 
 Later Core mechanisms can return validated, referenceable errors through a shared contract.
+
+#### Checklist
+
+- [x] Implement validated namespaced error codes and ownership
+- [x] Implement definitions, classes, severity, version, retryability, and guidance
+- [x] Implement global errors, events, context, causes, and diagnostic details
+- [x] Implement catalog registration, duplicate rejection, and lookup
+- [x] Require registered definitions for occurrence reporting
+- [x] Preserve existing `ErrorReference` and `Retryability` contracts
+- [x] Add unit and public integration coverage
+- [x] Verify formatting, tests, compilation, and Clippy
 
 ### Phase 4: Logging System foundation
 

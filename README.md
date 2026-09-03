@@ -1,5 +1,7 @@
 # Nizaam Core
 
+> Shared Rust foundation of the Nizaam Islamic Ecosystem.
+
 Nizaam Core is the shared Rust foundation of the Nizaam Islamic Ecosystem.
 
 It provides the common mechanisms required by Domain Engines and Infrastructure Engines to communicate, execute safely, share runtime context, handle errors, observe operations, and follow consistent platform rules.
@@ -7,6 +9,60 @@ It provides the common mechanisms required by Domain Engines and Infrastructure 
 The Core provides **mechanics, contracts, and platform infrastructure**.
 
 It does **not** provide domain meaning.
+
+---
+
+## Table of Contents
+
+* [Purpose](#purpose)
+* [Architecture](#architecture)
+* [Core Responsibilities](#core-responsibilities)
+* [Control Plane](#control-plane)
+* [Error System](#error-system)
+* [Logging System](#logging-system)
+* [Artifacts and Provenance](#artifacts-and-provenance)
+* [Observability](#observability)
+* [Runtime](#runtime)
+* [Security](#security)
+* [Testing and Conformance](#testing-and-conformance)
+* [Development Roadmap](#development-roadmap)
+* [Design Principles](#design-principles)
+* [Project Status](#project-status)
+* [Source of Truth](#source-of-truth)
+
+---
+
+## Project Information
+
+| Field            | Value                                            |
+| ---------------- | ------------------------------------------------ |
+| **Project**      | Nizaam Islamic Ecosystem                         |
+| **Component**    | Nizaam Core                                      |
+| **Author**       | Sharique Chaudhary                               |
+| **Language**     | Rust                                             |
+| **Architecture** | Shared Core + Global Platform Core               |
+| **Status**       | Architecture Frozen / Implementation in Progress |
+| **Last Updated** | September 3, 2026                                |
+
+---
+
+## Document Status
+
+This README describes the finalized architectural direction of Nizaam Core.
+
+The detailed implementation plan and development decisions are maintained separately in the Core architecture and scope documentation.
+
+Changes to Core architecture should be made deliberately because Core is the shared foundation used by the Nizaam ecosystem.
+
+---
+
+## Versioning
+
+**Current Architecture Version:** v1.0
+
+The architecture version refers to the documented architectural baseline and does not necessarily represent a released software package version.
+
+Future breaking architectural changes should be explicitly documented rather than silently introduced.
 
 ---
 
@@ -1477,3 +1533,13 @@ When an engine needs a mechanism that belongs to Core, the engine should consume
 The Core architecture should evolve carefully and deliberately because it forms the common foundation for the entire Nizaam ecosystem.
 
 This version is intentionally **README-level**, while `scope.md` remains the detailed living implementation-progress document.
+
+---
+
+**Author:** Sharique Chaudhary
+**Project:** Nizaam Islamic Ecosystem
+**Component:** Nizaam Core
+**Language:** Rust
+**Status:** Architecture Frozen / Implementation in Progress
+**Last Updated:** September 3, 2026
+**Documentation:** Core Architecture & Implementation Plan

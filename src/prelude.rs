@@ -4,6 +4,7 @@ pub use crate::contracts::{
     ContractDescriptor, ContractMetadata, EncodedPayload, ExecutionMetadata, Interaction,
     Participants, PayloadCodec, PayloadDescriptor, RawPayloadCodec, RequirementsMetadata, Version,
 };
+pub use crate::error::{ErrorClass, ErrorCode, ErrorDefinition, ErrorOwner, Severity};
 pub use crate::identity::{
     ArtifactId, AttemptId, CapabilityId, ContractId, CorrelationId, EngineId, EngineInstanceId,
     MessageId, NodeId, OperationId, PlanId,

@@ -71,6 +71,7 @@ impl ErrorSystemInstance {
             || error.class != definition.class
             || error.severity != definition.severity
             || error.retryability != definition.retryability
+            || error.solution_reference != definition.solution_reference
         {
             return Err(ReportError::Validation(
                 ValidationError::DefinitionMetadataMismatch,

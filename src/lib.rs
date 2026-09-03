@@ -5,6 +5,7 @@
 //! and infrastructure engines.
 
 pub mod identity;
+pub mod logging;
 pub mod operation;
 pub mod prelude;
 pub mod status;
@@ -22,7 +23,6 @@ pub mod error;
 pub(crate) mod events;
 pub(crate) mod health;
 pub(crate) mod idempotency;
-pub(crate) mod logging;
 pub(crate) mod middleware;
 pub(crate) mod observability;
 pub(crate) mod provenance;

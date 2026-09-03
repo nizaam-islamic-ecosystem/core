@@ -6,6 +6,7 @@ pub enum ValidationError {
     EmptyMessage,
     EmptyDiagnosticField,
     UnregisteredDefinition,
+    DefinitionMetadataMismatch,
 }
 
 impl fmt::Display for ValidationError {
@@ -14,6 +15,9 @@ impl fmt::Display for ValidationError {
             Self::EmptyMessage => "an error occurrence message must not be empty",
             Self::EmptyDiagnosticField => "diagnostic detail keys and values must not be empty",
             Self::UnregisteredDefinition => "the error definition is not registered",
+            Self::DefinitionMetadataMismatch => {
+                "the error metadata does not match the registered definition"
+            }
         };
         formatter.write_str(message)
     }

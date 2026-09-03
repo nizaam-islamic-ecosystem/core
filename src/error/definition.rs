@@ -100,7 +100,7 @@ pub struct ErrorDefinition {
     pub version: Version,
     pub class: ErrorClass,
     pub severity: Severity,
-    pub default_message: String,
+    default_message: String,
     pub retryability: Retryability,
     pub solution_reference: Option<String>,
 }
@@ -137,6 +137,10 @@ impl ErrorDefinition {
     pub fn with_solution_reference(mut self, reference: impl Into<String>) -> Self {
         self.solution_reference = Some(reference.into());
         self
+    }
+
+    pub fn default_message(&self) -> &str {
+        &self.default_message
     }
 }
 

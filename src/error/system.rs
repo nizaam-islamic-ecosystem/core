@@ -66,6 +66,25 @@ impl ErrorSystemInstance {
         if error.message.trim().is_empty() {
             return Err(ReportError::Validation(ValidationError::EmptyMessage));
         }
+        if error.owner != definition.owner
+            || error.version != definition.version
+            || error.class != definition.class
+            || error.severity != definition.severity
+            || error.retryability != definition.retryability
+        {
+            return Err(ReportError::Validation(
+                ValidationError::DefinitionMetadataMismatch,
+            ));
+        }
+        if error
+            .details()
+            .iter()
+            .any(|detail| detail.key.trim().is_empty() || detail.value.trim().is_empty())
+        {
+            return Err(ReportError::Validation(
+                ValidationError::EmptyDiagnosticField,
+            ));
+        }
         let reference = ErrorReference::new(definition.code.as_str().to_owned())
             .expect("validated error codes produce valid references");
         Ok(ErrorEvent { reference, error })

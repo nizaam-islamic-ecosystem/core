@@ -84,7 +84,7 @@ impl GlobalError {
             class: definition.class,
             severity: definition.severity,
             retryability: definition.retryability,
-            message: message.unwrap_or_else(|| definition.default_message.clone()),
+            message: message.unwrap_or_else(|| definition.default_message().to_owned()),
             details: Vec::new(),
             solution_reference: definition.solution_reference.clone(),
             context,
@@ -95,6 +95,10 @@ impl GlobalError {
     pub fn with_detail(mut self, detail: DiagnosticDetail) -> Self {
         self.details.push(detail);
         self
+    }
+
+    pub fn details(&self) -> &[DiagnosticDetail] {
+        &self.details
     }
 
     pub fn with_message(mut self, message: impl Into<String>) -> Self {

@@ -70,3 +70,53 @@ fn reporting_requires_registered_definitions() {
         ))
     );
 }
+
+#[test]
+fn reporting_rejects_definition_metadata_mismatches() {
+    let mut system = ErrorSystem::new();
+    system.register(definition()).unwrap();
+    let instance = system.instance();
+    let base = instance
+        .report(
+            &ErrorCode::new("CORE.CONTRACT.001").unwrap(),
+            ErrorContext::new(operation_context()),
+        )
+        .unwrap();
+
+    let mismatched = GlobalError {
+        severity: Severity::Critical,
+        ..base.error
+    };
+
+    assert_eq!(
+        instance.report_error(mismatched),
+        Err(ReportError::Validation(
+            nizaam_core::error::ValidationError::DefinitionMetadataMismatch
+        ))
+    );
+}
+
+#[test]
+fn reporting_rejects_empty_diagnostic_fields() {
+    let mut system = ErrorSystem::new();
+    system.register(definition()).unwrap();
+    let instance = system.instance();
+    let base = instance
+        .report(
+            &ErrorCode::new("CORE.CONTRACT.001").unwrap(),
+            ErrorContext::new(operation_context()),
+        )
+        .unwrap();
+
+    let invalid_detail = nizaam_core::error::DiagnosticDetail {
+        key: " ".to_owned(),
+        value: "version mismatch".to_owned(),
+    };
+
+    assert_eq!(
+        instance.report_error(base.error.with_detail(invalid_detail)),
+        Err(ReportError::Validation(
+            nizaam_core::error::ValidationError::EmptyDiagnosticField
+        ))
+    );
+}

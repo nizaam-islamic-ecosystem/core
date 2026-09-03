@@ -7,6 +7,7 @@ use super::{ErrorCode, ErrorDefinition};
 pub enum CatalogError {
     DuplicateCode(ErrorCode),
     OwnerNamespaceMismatch,
+    EmptyMessage,
 }
 
 /// In-process registry of validated static error definitions.
@@ -21,6 +22,9 @@ impl ErrorCatalog {
     }
 
     pub fn register(&mut self, definition: ErrorDefinition) -> Result<(), CatalogError> {
+        if definition.default_message().trim().is_empty() {
+            return Err(CatalogError::EmptyMessage);
+        }
         if definition.code.namespace().split('.').next() != Some(definition.owner.as_str()) {
             return Err(CatalogError::OwnerNamespaceMismatch);
         }

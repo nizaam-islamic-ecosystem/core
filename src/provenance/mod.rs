@@ -1,1 +1,5 @@
-//! Phase 10 boundary for runtime and protocol provenance mechanisms.
+//! Provenance context carried through engine execution.
+
+mod context;
+
+pub use context::ProvenanceContext;

@@ -30,22 +30,6 @@ It does **not** provide domain meaning.
 * [Project Status](#project-status)
 * [Source of Truth](#source-of-truth)
 
----
-
-## Project Information
-
-| Field            | Value                                            |
-| ---------------- | ------------------------------------------------ |
-| **Project**      | Nizaam Islamic Ecosystem                         |
-| **Component**    | Nizaam Core                                      |
-| **Author**       | Sharique Chaudhary                               |
-| **Language**     | Rust                                             |
-| **Architecture** | Shared Core + Global Platform Core               |
-| **Status**       | Architecture Frozen / Implementation in Progress |
-| **Last Updated** | September 3, 2026                                |
-
----
-
 ## Document Status
 
 This README describes the finalized architectural direction of Nizaam Core.
@@ -1536,10 +1520,10 @@ This version is intentionally **README-level**, while `scope.md` remains the det
 
 ---
 
-**Author:** Sharique Chaudhary
-**Project:** Nizaam Islamic Ecosystem
-**Component:** Nizaam Core
-**Language:** Rust
-**Status:** Architecture Frozen / Implementation in Progress
-**Last Updated:** September 3, 2026
-**Documentation:** Core Architecture & Implementation Plan
+**Author:** Sharique Chaudhary <br/>
+**Project:** Nizaam Islamic Ecosystem <br/>
+**Component:** Nizaam Core <br/>
+**Language:** Rust <br/>
+**Status:** Architecture Frozen / Implementation in Progress <br/>
+**Last Updated:** September 3, 2026 <br/>
+**Documentation:** Core Architecture & Implementation Plan <br/>

@@ -1,7 +1,6 @@
 //! Distinct, validated identifiers used across Nizaam Core contracts.
 
 use core::fmt;
-use core::str::FromStr;
 
 /// Error returned when a Core identity is empty or consists only of whitespace.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -22,16 +21,14 @@ macro_rules! identity {
         pub struct $name(String);
 
         impl $name {
-            /// Creates an identity from a nonempty, non-whitespace value.
-            pub fn new(value: impl Into<String>) -> Result<Self, InvalidIdentity> {
+            pub fn new(value: impl Into<String>) -> Result<Self, $crate::identity::InvalidIdentity> {
                 let value = value.into();
                 if value.trim().is_empty() {
-                    return Err(InvalidIdentity);
+                    return Err($crate::identity::InvalidIdentity);
                 }
                 Ok(Self(value))
             }
 
-            /// Returns the stable textual representation of this identity.
             pub fn as_str(&self) -> &str {
                 &self.0
             }
@@ -43,14 +40,14 @@ macro_rules! identity {
             }
         }
 
-        impl fmt::Display for $name {
-            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        impl ::core::fmt::Display for $name {
+            fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 formatter.write_str(self.as_str())
             }
         }
 
-        impl FromStr for $name {
-            type Err = InvalidIdentity;
+        impl ::core::str::FromStr for $name {
+            type Err = $crate::identity::InvalidIdentity;
 
             fn from_str(value: &str) -> Result<Self, Self::Err> {
                 Self::new(value)
@@ -59,28 +56,21 @@ macro_rules! identity {
     };
 }
 
-identity!(/// Identifies a protocol message. Message identity is distinct from operation identity.
-    MessageId);
-identity!(/// Identifies a platform operation across its attempts and messages.
-    OperationId);
-identity!(/// Links related messages and operations for correlation.
-    CorrelationId);
-identity!(/// Identifies an engine type.
-    EngineId);
-identity!(/// Identifies a running instance of an engine.
-    EngineInstanceId);
-identity!(/// Identifies an engine exposed capability.
-    CapabilityId);
-identity!(/// Identifies a versioned contract.
-    ContractId);
-identity!(/// Identifies a platform plan.
-    PlanId);
-identity!(/// Identifies a node within an operation or plan.
-    NodeId);
-identity!(/// Identifies an individual execution attempt.
-    AttemptId);
-identity!(/// Identifies an artifact independently of messages and operations.
-    ArtifactId);
+mod artifact;
+mod capability;
+mod contract;
+mod engine;
+mod message;
+mod operation;
+mod plan;
+
+pub use artifact::ArtifactId;
+pub use capability::CapabilityId;
+pub use contract::ContractId;
+pub use engine::{EngineId, EngineInstanceId};
+pub use message::{CorrelationId, MessageId};
+pub use operation::OperationId;
+pub use plan::{AttemptId, NodeId, PlanId};
 
 #[cfg(test)]
 mod tests {

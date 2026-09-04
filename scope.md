@@ -10,7 +10,7 @@ Logging and Error are independent peer systems. They may communicate through typ
 
 ## Existing Project Baseline
 
-Implementation began with an existing Cargo library skeleton at `core/` containing `Cargo.toml` and `src/lib.rs`. No binary target or `src/main.rs` exists. The root workspace and the complete private module scaffold are now in place. The Cargo package remains `core`; its library target is `nizaam_core`, which avoids a downstream import collision with Rust's built in `core` crate.
+Implementation began with an existing Cargo library skeleton at the repository root containing `Cargo.toml` and `src/lib.rs`. No binary target or `src/main.rs` exists. The repository root is the explicit single member Cargo workspace, and the complete private module scaffold is in place. The Cargo package remains `core`; its library target is `nizaam_core`, which avoids a downstream import collision with Rust's built in `core` crate.
 
 ## At a glance
 
@@ -40,22 +40,22 @@ Testing is continuous. Phase 17 is the final integration and conformance hardeni
 ## Project Structure
 
 ```text
-Cargo.toml                         # workspace, member: core
-core/
-├── Cargo.toml                     # core package, nizaam_core library target
-├── README.md
-├── scope.md
-├── src/
-│   ├── lib.rs                     # public library root
-│   ├── prelude.rs                 # small Phase 1 ergonomic surface
-│   ├── identity/                  # distinct Core IDs
-│   ├── operation/                 # operation and operation context
-│   └── status.rs                  # result primitives and references
-└── tests/
-    └── foundations.rs             # public API integration test
+Cargo.toml                         # package and explicit single member workspace
+Cargo.lock
+README.md
+scope.md
+src/
+├── lib.rs                         # public library root
+├── prelude.rs                     # small Phase 1 ergonomic surface
+├── identity/                      # distinct Core IDs
+├── operation/                     # operation and operation context
+└── status.rs                      # result primitives and references
+tests/
+├── foundations.rs                 # public API integration test
+└── contracts.rs                   # public contract integration tests
 ```
 
-The phase modules for contracts, errors, logging, capability, transport, runtime, security, artifacts, provenance, observability, health, configuration, middleware, streaming, retry, idempotency, events, Control Plane, SDK, and conformance also exist as private scaffolding under `src/`. Their presence records the approved structure only. It does not mark their phases as implemented or make their APIs public before the relevant phase has behavior and tests.
+The phase modules for errors, logging, capability, transport, runtime, security, artifacts, provenance, observability, health, configuration, middleware, streaming, retry, idempotency, events, Control Plane, SDK, and conformance also exist as private scaffolding under `src/`. Their presence records the approved structure only. The contracts module is public because Phase 2 is implemented and verified. A scaffold's presence does not mark its phase as implemented or make its APIs public before the relevant phase has behavior and tests.
 
 # Implementation Phases
 
@@ -77,18 +77,17 @@ Root Cargo workspace configuration, preserved `core/src/lib.rs` as the library r
 
 **Workspace / package files**
 
-* `Cargo.toml`
+* `Cargo.toml` with the Core package and explicit workspace declaration
 * `Cargo.lock`
-* `core/Cargo.toml`
 
 **Core library files**
 
-* `core/src/lib.rs`
+* `src/lib.rs`
 
 **Documentation**
 
-* `core/README.md`
-* `core/scope.md`
+* `README.md`
+* `scope.md`
 
 **Structural requirement**
 
@@ -97,7 +96,7 @@ Root Cargo workspace configuration, preserved `core/src/lib.rs` as the library r
 
 ### Verification
 
-`cargo check --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings` pass. `cargo fmt --all --check` currently reports formatting in the private module scaffold and is still to be corrected.
+`cargo check --workspace`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo fmt --all --check` pass from the repository root.
 
 ### Corrections
 
@@ -110,10 +109,10 @@ No binary target is planned. Future workspace members are deliberately deferred 
 ### Checklist
 
 * [x] Inspect and preserve the existing Cargo library project
-* [x] Create root workspace configuration
+* [x] Create explicit single member workspace configuration at the repository root
 * [x] Keep `src/lib.rs` as crate root
 * [x] Avoid `src/main.rs` and binary targets
-* [x] Verify workspace checks
+* [x] Verify workspace checks, tests, Clippy, and formatting
 
 ---
 
@@ -129,7 +128,7 @@ All Core identities are distinct newtypes around validated text. They are intent
 
 ### What got built
 
-`identity` defines `MessageId`, `OperationId`, `CorrelationId`, `EngineId`, `EngineInstanceId`, `CapabilityId`, `ContractId`, `PlanId`, `NodeId`, `AttemptId`, and `ArtifactId`. `status` defines `Status`, `Retryability`, `Compatibility`, `ErrorReference`, and `ArtifactReference`. `operation` defines `Operation` and `OperationContext`, including parent, plan, node, and attempt identity. `prelude` exposes the intentionally small Phase 1 public surface.
+`identity` defines `MessageId`, `OperationId`, `CorrelationId`, `EngineId`, `EngineInstanceId`, `CapabilityId`, `ContractId`, `PlanId`, `NodeId`, `AttemptId`, and `ArtifactId` in their dedicated identity modules. `status` defines `Status`, `Retryability`, `Compatibility`, `ErrorReference`, and `ArtifactReference`. `operation` defines `Operation` and `OperationContext` in their dedicated operation modules, including parent, plan, node, and attempt identity. `prelude` exposes the intentionally small Phase 1 public surface.
 
 ### Files and Folders
 
@@ -163,7 +162,7 @@ All Core identities are distinct newtypes around validated text. They are intent
 
 ### Verification
 
-`cargo check --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings` pass. Five tests pass: four unit tests and one integration test. `cargo fmt --all --check` remains outstanding for the private module scaffold.
+The focused foundation integration tests and identity and operation unit tests pass. The complete workspace checks are rerun after Phase 2 because the Phase 2 public surface depends on these foundations.
 
 ### Corrections
 
@@ -180,7 +179,7 @@ Deadline, cancellation, security context, and provenance context receive their b
 * [x] Implement outcome and compatibility primitives
 * [x] Implement operation and attempt context foundations
 * [x] Add unit and public API integration coverage
-* [x] Verify Rust checks
+* [x] Verify foundation integration and unit tests
 
 ---
 
@@ -225,12 +224,12 @@ The standalone crate manifest was also corrected to remove invalid inherited wor
 
 **Tests**
 
-* `tests/contracts/`
+* `tests/contracts.rs`
 * `tests/foundations.rs`
 
 ### Verification
 
-`cargo fmt --all`, `cargo test`, and `cargo clippy --all-targets -- -D warnings` pass from `core/`. The test suite covers descriptor construction and rejection, metadata, compatibility, request validation, opaque payload round trips, and public prelude usage.
+`cargo fmt --all --check`, `cargo test --workspace`, `cargo check --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings` pass from the Core repository root. The test suite covers descriptor construction and rejection, metadata, compatibility, request validation, opaque payload round trips, and public prelude usage.
 
 ### Boundary
 
@@ -249,8 +248,8 @@ An engine can describe and structurally validate a versioned request or response
 * [x] Implement opaque payload encoding and decoding boundary
 * [x] Implement structural validation and compatibility checks
 * [x] Preserve engine ownership of payload semantics
-* [x] Add unit and public integration coverage
-* [x] Verify formatting, tests, and Clippy
+* [x] Add unit and public integration coverage in `tests/contracts.rs`
+* [x] Verify formatting, tests, compilation, and Clippy
 
 ---
 

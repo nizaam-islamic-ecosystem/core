@@ -2,7 +2,12 @@
 
 use crate::identity::{CorrelationId, OperationId, PlanId};
 
+pub mod cancellation;
 mod context;
+pub mod deadline;
+
+pub use cancellation::CancellationToken;
+pub use deadline::Deadline;
 
 pub use context::OperationContext;
 

@@ -381,6 +381,8 @@ Core and engines can produce typed log events that flow through the same validat
 
 ## Phase 5: Context execution infrastructure
 
+**Status: verified**
+
 ### Goal
 
 Make operation execution safe and consistent across engine boundaries.
@@ -399,7 +401,7 @@ Downstream work receives context rather than reconstructing it from transport me
 
 ### What got built
 
-Implemented the public runtime context surface on the `phase-5-context-execution-infrastructure` branch. Core now provides thread safe cancellation tokens with parent and child propagation, absolute deadlines with expiration and remaining time checks, and provider neutral security and provenance context values. `EngineContext` composes these values with the existing `OperationContext` and derives child contexts without widening cancellation or deadlines.
+Implemented the public runtime context surface on the `audit-phases` branch. Core now provides thread safe cancellation tokens with parent and child propagation, absolute deadlines with expiration and remaining time checks, and provider neutral security and provenance context values. `EngineContext` composes these values with the existing `OperationContext` and derives child contexts without widening cancellation or deadlines.
 
 The runtime boundaries now also provide lifecycle transitions, context checked execution pipelines, cancellable task scopes, background task ownership and shutdown joining, and a minimal engine runtime owner. Provenance contexts support immutable derived attributes without selecting a storage provider. Expired contexts can translate through the existing shared Error contract.
 
@@ -411,7 +413,6 @@ The runtime boundaries now also provide lifecycle transitions, context checked e
 * `src/operation/context.rs`
 * `src/operation/cancellation.rs`
 * `src/operation/deadline.rs`
-* `src/operation/state.rs`
 
 **Security context**
 
@@ -443,12 +444,10 @@ The runtime boundaries now also provide lifecycle transitions, context checked e
 **Tests**
 
 * `tests/context.rs`
-* `tests/runtime/`
-* `tests/lifecycle/`
 
 ### Verification
 
-`cargo fmt --all`, `cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo check --workspace` pass from `core/`. The suite covers 30 library tests and 17 integration and existing public tests, including cancellation propagation and isolation, deadline limiting, context composition, lifecycle transitions, pipeline ordering and cancellation, task scopes, background shutdown, engine shutdown, provenance derivation, and public consumer propagation.
+`cargo fmt --all --check`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo check --workspace` pass from the Core repository root. The suite covers 33 library tests and 21 integration tests, including cancellation propagation and isolation, deadline limiting, context composition, lifecycle transitions, pipeline ordering and cancellation, task scopes, background shutdown, engine shutdown, provenance derivation, and public consumer propagation.
 
 ### Checklist
 
@@ -461,6 +460,8 @@ The runtime boundaries now also provide lifecycle transitions, context checked e
 * [x] Translate expired contexts through the shared Error contract
 * [x] Add unit and public integration coverage
 * [x] Verify formatting, tests, compilation, and Clippy
+
+The exact universal operation state machine remains intentionally deferred because the architecture plan leaves its transition table open. `src/operation/state.rs` is therefore not part of the verified Phase 5 implementation surface.
 
 ### Done
 

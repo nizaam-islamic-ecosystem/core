@@ -447,7 +447,7 @@ The runtime boundaries now also provide lifecycle transitions, context checked e
 
 ### Verification
 
-`cargo fmt --all --check`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo check --workspace` pass from the Core repository root. The suite covers 33 library tests and 21 integration tests, including cancellation propagation and isolation, deadline limiting, context composition, lifecycle transitions, pipeline ordering and cancellation, task scopes, background shutdown, engine shutdown, provenance derivation, and public consumer propagation.
+`cargo fmt --all --check`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo check --workspace` pass from the Core repository root. The suite covers 34 library tests and 21 integration tests, including cancellation propagation and isolation, deadline limiting, context composition, lifecycle transitions, pipeline ordering and cancellation, task scopes, background shutdown, engine shutdown, provenance derivation, and public consumer propagation.
 
 ### Checklist
 

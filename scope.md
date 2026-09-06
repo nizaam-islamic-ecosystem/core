@@ -22,7 +22,7 @@ Implementation began with an existing Cargo library skeleton at the repository r
 | 3  | Error System foundation                      | 3     | verified    |
 | 4  | Logging System foundation                    | 4     | verified    |
 | 5  | Context execution infrastructure             | 5     | verified    |
-| 6  | Capability System                            | 6     | not started |
+| 6  | Capability System                            | 6     | verified    |
 | 7  | Transport and universal client/server        | 7     | not started |
 | 8  | Engine Runtime                               | 8     | not started |
 | 9  | Middleware and Security                      | 9     | not started |
@@ -56,6 +56,318 @@ tests/
 ```
 
 The phase modules for errors, logging, capability, transport, runtime, security, artifacts, provenance, observability, health, configuration, middleware, streaming, retry, idempotency, events, Control Plane, SDK, and conformance also exist as private scaffolding under `src/`. Their presence records the approved structure only. The contracts module is public because Phase 2 is implemented and verified. A scaffold's presence does not mark its phase as implemented or make its APIs public before the relevant phase has behavior and tests.
+
+## Agent Implementation Rules
+
+These rules are mandatory for any agent working on Nizaam Core.
+
+### 1. Scope is authoritative
+
+This scope is the authoritative implementation specification for Nizaam Core.
+
+The agent must follow the architecture, boundaries, phase order, decisions,
+constraints, and completion criteria defined in this document.
+
+The agent must not silently reinterpret or replace architectural decisions
+with its own preferred design.
+
+### 2. Ask before proceeding when requirements are unclear
+
+The agent MUST ask questions before implementing anything whenever:
+
+* a requirement is ambiguous or incomplete;
+* two requirements appear to conflict;
+* the implementation requires an architectural decision that is not already
+  defined in this scope;
+* the agent needs to choose between multiple materially different designs;
+* the agent believes an existing architectural decision should be changed;
+* a previous phase must be modified in a way that could affect its contract
+  or behavior;
+* the agent needs to introduce a dependency, provider, runtime, transport,
+  serialization format, storage mechanism, or other implementation choice
+  that has not been authorized;
+* the agent discovers that the current phase cannot be implemented correctly
+  without changing the scope;
+* the agent is unsure whether functionality belongs in Core or in an engine;
+* the agent is unsure whether functionality belongs to the current phase
+  or a later phase.
+
+The agent MUST NOT guess in these situations.
+
+The agent must explain the ambiguity, present the relevant options when
+appropriate, and wait for explicit user direction.
+
+### 3. Permission is required to work against these rules
+
+If the agent determines that correct implementation requires violating,
+bypassing, weakening, changing, or extending any rule, boundary, or
+architectural decision in this scope, it MUST STOP and ask for explicit
+permission before making that change.
+
+The agent must clearly state:
+
+1. Which rule, boundary, or decision would be affected.
+2. Why the current implementation cannot proceed without changing it.
+3. What change the agent proposes.
+4. What possible consequences the change may have.
+
+The agent must not proceed until the user explicitly approves the change.
+
+### 4. Never silently change architecture
+
+The agent must never silently:
+
+* redesign an existing system;
+* move responsibilities between Core and engines;
+* introduce new Core responsibilities;
+* change a verified phase's intended behavior;
+* change public contracts;
+* change dependency direction;
+* introduce domain semantics into Core;
+* turn a mechanism into a workflow or policy;
+* implement functionality belonging to a later phase;
+* remove an architectural boundary because it makes implementation easier.
+
+If such a change appears necessary, the agent must stop and ask permission.
+
+### 5. Protect previously verified phases
+
+A previously verified phase is considered a stable foundation.
+
+When implementing a new phase, the agent must preserve the behavior,
+contracts, boundaries, and tests of all previously verified phases.
+
+The agent must not rewrite, remove, weaken, or redesign previous-phase
+functionality merely to simplify the current phase.
+
+If modification of a previous phase is genuinely required by the approved
+architecture, the agent must explain why and obtain permission before making
+the change.
+
+### 6. Implement only the current phase
+
+The agent must implement the current phase being worked on.
+
+The agent must not implement functionality from future phases merely because:
+
+* the required files already exist as scaffolding;
+* the functionality appears useful;
+* the functionality makes the current implementation easier;
+* the agent believes it should be implemented earlier.
+
+Future-phase functionality remains deferred unless this scope explicitly
+requires it for the current phase.
+
+Existing scaffolding does not mean that a phase is implemented.
+
+### 7. Preserve Core and engine boundaries
+
+Core provides shared contracts and mechanisms.
+
+Core must not acquire:
+
+* domain entities;
+* domain workflows;
+* domain business rules;
+* domain policies;
+* domain algorithms;
+* engine-specific semantics;
+* engine-specific storage;
+* engine-specific payload meaning;
+* engine-specific methodologies.
+
+If the agent believes something should be added to Core but it may contain
+domain or engine semantics, the agent must stop and ask before implementing it.
+
+### 8. Do not invent deferred implementation choices
+
+When this scope deliberately leaves a choice open, the agent must not
+silently choose a technology or provider unless the choice is necessary
+and authorized.
+
+This includes, where applicable:
+
+* async runtime;
+* transport implementation;
+* serialization format;
+* authentication provider;
+* storage provider;
+* persistence mechanism;
+* observability vendor;
+* external service;
+* crate splitting;
+* infrastructure provider.
+
+If a deferred choice becomes necessary for the current phase, the agent
+must explain the choice and ask for permission before committing to it.
+
+### 9. Full regression testing is mandatory
+
+After implementing or modifying any phase, the agent MUST run the complete
+Core test suite from the repository root:
+
+    cargo test
+
+The agent must NOT test only the current phase.
+
+Tests belonging to all previously implemented phases are mandatory
+regression tests and must continue to pass.
+
+A current phase must not be declared complete if previously passing tests
+are failing.
+
+If a regression occurs, the agent must investigate and resolve it before
+declaring the current phase complete.
+
+### 10. Do not modify tests merely to hide regressions
+
+The agent must not modify, remove, weaken, skip, or delete an existing test
+simply because the current implementation causes it to fail.
+
+If an existing test conflicts with an approved architectural change, the
+agent must stop and ask the user before changing the test or its expected
+behavior.
+
+#### 10.1. Unit and integration testing requirements
+
+Every implementation source file must have unit tests covering the behavior
+of each testable function, method, constructor, validation path, and relevant
+error path defined in that file.
+
+Unit tests should remain close to the implementation and may be placed in the
+corresponding source module using Rust's `#[cfg(test)]` test modules.
+
+The repository-level `tests/` directory must contain integration tests for
+the public Core API and cross-module behavior.
+
+Unit tests verify individual implementation behavior.
+
+Integration tests verify that multiple Core modules and public APIs work
+together correctly from the perspective of a downstream consumer.
+
+Both unit and integration tests are mandatory. Neither replaces the other.
+
+The agent must add or update appropriate unit and integration tests whenever
+it adds or modifies behavior.
+
+The complete test suite must be executed with:
+
+    cargo test --workspace
+
+This command must be treated as the standard verification command for both
+unit and integration tests.
+
+The agent must not consider a function, file, or phase adequately tested
+merely because another unrelated integration test happens to pass.
+
+### 11. Compilation is not completion
+
+The agent must not consider a phase complete merely because:
+
+* the project compiles;
+* `cargo check` passes;
+* the current phase's tests pass;
+* the required files exist;
+* the implementation appears logically correct.
+
+Before declaring a phase complete, the agent must verify the phase against:
+
+* Goal;
+* Planned implementation;
+* Files and folders;
+* Boundary;
+* Done when;
+* Checklist;
+* Existing regression tests.
+
+### 12. Full verification after every implementation
+
+The minimum completion verification for every implementation phase is:
+
+    cargo test --workspace
+    cargo test --workspace --all-targets
+    cargo test --workspace --doc
+    cargo check --workspace
+    cargo build --workspace
+    cargo fmt --all --check
+    cargo clippy --workspace --all-targets -- -D warnings
+
+These checks must be run from the repository root.
+
+The agent must verify the complete existing test suite, formatting, and
+Clippy checks after implementing or modifying any phase.
+
+The agent must NOT test, format-check, or lint only the current phase.
+
+All previously implemented phases are included in the required regression
+verification.
+
+A phase must not be declared complete if any of these checks fail.
+
+The agent may run additional focused tests or verification commands when
+appropriate, but focused checks do not replace these complete repository-wide
+checks.
+
+### 13. Ask questions instead of guessing
+
+When uncertain, the default behavior is:
+
+    STOP → EXPLAIN → ASK → WAIT → IMPLEMENT
+
+The agent must not use:
+
+    GUESS → IMPLEMENT → HOPE
+
+This rule applies especially to architectural, API, ownership, dependency,
+boundary, and phase-scope decisions.
+
+### 14. Phase completion requires explicit verification
+
+Before reporting that a phase is complete, the agent must verify that:
+
+* the implementation matches this scope;
+* no unauthorized architectural changes were introduced;
+* previously verified phases remain intact;
+* the complete `cargo test` suite passes;
+* the current phase's requirements are satisfied;
+* no future-phase functionality was accidentally implemented as part of
+  the current phase.
+
+If any of these conditions cannot be satisfied, the agent must not claim
+the phase is complete.
+
+### 15. User approval overrides implementation convenience
+
+Implementation convenience is never sufficient justification for breaking
+an architectural rule.
+
+If following the scope makes implementation harder, the agent must follow
+the scope.
+
+If the agent believes the scope itself needs to change, it must ask the
+user for permission before changing the scope or implementing against it.
+
+### 16. Do not modify scope.md without permission
+
+The agent must not modify `scope.md` as part of normal implementation.
+
+If the agent believes the scope is incorrect, incomplete, contradictory,
+or needs clarification, it must report the issue and ask the user for
+permission before changing the scope.
+
+### 17. Completion report
+
+When a phase is completed, the agent should report:
+
+* what was implemented;
+* what files were changed;
+* what tests were added or updated;
+* the result of the full `cargo test`;
+* any other verification performed;
+* whether any previous-phase files or behavior were modified;
+* whether any architectural decisions required user approval.
+
+The agent must clearly state if anything remains unresolved.
 
 # Implementation Phases
 
@@ -471,6 +783,8 @@ Downstream work receives trusted context from Core rather than reconstructing op
 
 ## Phase 6: Capability System
 
+**Status: verified**
+
 ### Goal
 
 Give engines a common way to expose, register, locate, and invoke capabilities.
@@ -478,6 +792,16 @@ Give engines a common way to expose, register, locate, and invoke capabilities.
 ### Planned implementation
 
 Add capability definitions, registrations, a registry, handlers, and local dispatch.
+
+### What got built
+
+Implemented the public `capability` module and exposed its surface through the prelude. Capability definitions now carry validated metadata (`CapabilityId`, `EngineId`, name, description, `Version`) but not payload schemas; payload structure remains engine owned.
+
+`CapabilityHandler` trait defines the invocation contract: takes `EngineContext` and `CapabilityInvocation`, returns `CapabilityOutcome`. `FunctionHandler<F>` adapter and `arc_handler()` helper allow plain functions to be registered as capability handlers without requiring explicit trait implementation.
+
+`CapabilityRegistry` uses `RwLock<BTreeMap<CapabilityId, CapabilityEntry>>` for thread-safe registration and lookup, mirroring the `ErrorCatalog` pattern. Provides `register`, `unregister`, `get`, `contains`, `len`, `is_empty`, and `iter` operations.
+
+`dispatch()` function takes `EngineContext`, `CapabilityInvocation`, and `&CapabilityRegistry`. Checks cancellation and deadline expiration before invoking handlers, returning `CapabilityDispatchResult` with `Outcome` or `Error` variants (`Unknown`, `Cancelled`, `DeadlineExpired`, `HandlerFailed`, `InvalidDefinition`).
 
 ### Files and Folders
 
@@ -493,10 +817,6 @@ Add capability definitions, registrations, a registry, handlers, and local dispa
 
 * `src/identity/capability.rs`
 
-**Related contracts**
-
-* `src/contracts/`
-
 **Public surface**
 
 * `src/prelude.rs`
@@ -511,7 +831,25 @@ Add capability definitions, registrations, a registry, handlers, and local dispa
 
 Core provides the capability mechanism only. Capability names, typed requests, workflows, and results remain engine owned.
 
+### Verification
+
+`cargo fmt --all --check`, `cargo test --workspace`, `cargo check --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings` pass from the Core repository root. The suite covers 21 library unit tests and 15 integration tests in `tests/capability.rs`, including definition validation, registry CRUD, duplicate rejection, dispatch happy path, cancelled context, expired deadline, missing capability, handler failure translation, function adapter, and end-to-end pipeline.
+
 ### Done when
+
+An engine can register a capability and Core can resolve its handler without interpreting its domain semantics.
+
+### Checklist
+
+* [x] Implement capability definition with validation
+* [x] Implement handler interface with function adapter
+* [x] Implement thread-safe registry with register, unregister, get, iter
+* [x] Implement dispatch with cancellation and deadline checks
+* [x] Add unit tests for all capability modules
+* [x] Add public integration coverage in `tests/capability.rs`
+* [x] Verify formatting, tests, compilation, and Clippy
+
+### Done
 
 An engine can register a capability and Core can resolve its handler without interpreting its domain semantics.
 
@@ -1107,6 +1445,13 @@ Both engine categories can demonstrate use of Core without violating the frozen 
 * `EngineContext` is the shared composition boundary for operation, cancellation, deadline, security, and provenance context.
 * Phase 5 remains provider neutral. It does not select an async runtime, transport, authentication provider, storage system, or serialization format.
 * Logging and Error remain independent peer systems. Context infrastructure may reference their contracts but does not own them.
+* The Capability System provides the mechanism for capability registration and dispatch. Core does not prescribe typed request/response structures; those remain engine owned.
+* Capability handlers are invoked via `CapabilityHandler` trait taking `EngineContext` and `CapabilityInvocation`, returning `CapabilityOutcome`.
+* `CapabilityRegistry` uses `RwLock<BTreeMap<CapabilityId, CapabilityEntry>>` for thread-safe registration and lookup, mirroring the `ErrorCatalog` pattern.
+* `CapabilityDispatchResult` separates successful `Outcome` from `Error` variants (`Unknown`, `Cancelled`, `DeadlineExpired`, `HandlerFailed`, `InvalidDefinition`).
+* The dispatch function checks cancellation and deadline expiration before invoking handlers, ensuring safe execution boundaries.
+* `FunctionHandler<F>` adapter and `arc_handler()` helper allow plain functions to be registered as capability handlers without requiring explicit trait implementation.
+* Capability definitions carry metadata (`CapabilityId`, `EngineId`, name, description, `Version`) but not payload schemas; those remain engine owned.
 
 # Corrections / Changes
 
@@ -1118,8 +1463,8 @@ None currently. Concrete trait signatures, provider choices, serialization, asyn
 
 # Current State
 
-Phase 5, Context execution infrastructure, is implemented and verified on the `phase-5-context-execution-infrastructure` branch. Cancellation, deadlines, `EngineContext`, runtime boundaries, provenance propagation, and public consumer coverage pass all Core checks. Phase 4, the Logging System foundation, remains verified, and Error and Logging remain independent peer systems.
+Phase 6, Capability System, is implemented and verified on the `phase-6-capability-system` branch. Capability definitions, registration, thread-safe registry, handler interface with function adapter, and local dispatch with cancellation and deadline checks all pass Core checks. Phase 5, Context execution infrastructure, remains verified. Phase 4, the Logging System foundation, remains verified. Error and Logging remain independent peer systems.
 
 # Next Step
 
-Phase 6: Capability System.
+Phase 7: Transport and universal client/server.

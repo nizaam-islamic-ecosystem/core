@@ -4,6 +4,7 @@
 //! other engine specific semantics. It is a library crate consumed by domain
 //! and infrastructure engines.
 
+pub mod capability;
 pub mod identity;
 pub mod logging;
 pub mod operation;
@@ -13,7 +14,6 @@ pub mod status;
 // These private module boundaries establish the approved Core structure. They
 // become public only when their corresponding phase has a deliberate API.
 pub(crate) mod artifacts;
-pub(crate) mod capability;
 pub(crate) mod client;
 pub(crate) mod config;
 pub(crate) mod conformance;

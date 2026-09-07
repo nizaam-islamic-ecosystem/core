@@ -166,10 +166,17 @@ mod tests {
 
     #[test]
     fn with_deadline_keeps_earlier_deadline() {
+        // Set an earlier deadline first, then a later one.
+        // with_deadline must keep the earlier of the two.
+        let earlier = Deadline::from_now(Duration::from_secs(10)).unwrap();
         let later = Deadline::from_now(Duration::from_secs(60)).unwrap();
-        let context = sample_context().with_deadline(later);
+
+        let context = sample_context().with_deadline(earlier).with_deadline(later);
+
         let deadline = context.deadline().unwrap();
-        assert!(deadline.remaining() <= Duration::from_secs(60));
+        // The result must be the earlier deadline (10s), not the later one.
+        assert_eq!(deadline, earlier);
+        assert!(deadline.remaining() <= Duration::from_secs(10));
     }
 
     #[test]

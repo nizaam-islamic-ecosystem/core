@@ -183,6 +183,7 @@ impl std::error::Error for InvalidDescriptor {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error;
 
     #[test]
     fn descriptors_preserve_contract_and_payload_metadata() {
@@ -206,5 +207,97 @@ mod tests {
             PayloadDescriptor::new("  ", Version::new(1, 0, 0)),
             Err(InvalidDescriptor::EmptyMediaType)
         );
+    }
+
+    #[test]
+    fn version_derives_eq_ord_hash_and_implements_display() {
+        let v1 = Version::new(1, 2, 3);
+        let v2 = Version::new(1, 2, 3);
+        let v3 = Version::new(1, 2, 4);
+        let v4 = Version::new(2, 0, 0);
+
+        assert_eq!(v1, v2);
+        assert!(v1 < v3);
+        assert!(v1 < v4);
+        assert!(v3 < v4);
+        assert_eq!(v1.to_string(), "1.2.3");
+        assert_eq!(v4.to_string(), "2.0.0");
+
+        use std::collections::HashSet;
+        let mut set: HashSet<Version> = HashSet::new();
+        set.insert(v1.clone());
+        set.insert(v2.clone());
+        assert_eq!(set.len(), 1);
+        set.insert(v3.clone());
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn version_accessors_return_components() {
+        let v = Version::new(2, 5, 9);
+        assert_eq!(v.major(), 2);
+        assert_eq!(v.minor(), 5);
+        assert_eq!(v.patch(), 9);
+    }
+
+    #[test]
+    fn interaction_variants_are_distinct() {
+        assert_ne!(Interaction::Request, Interaction::Response);
+        assert_ne!(Interaction::Request, Interaction::Event);
+        assert_ne!(Interaction::Response, Interaction::Event);
+        assert_eq!(Interaction::Request, Interaction::Request);
+    }
+
+    #[test]
+    fn encoded_payload_stores_descriptor_and_bytes() {
+        let desc = PayloadDescriptor::new("text/plain", Version::new(1, 0, 0)).unwrap();
+        let payload = EncodedPayload::new(desc.clone(), b"hello world");
+        assert_eq!(payload.bytes(), b"hello world");
+        assert_eq!(payload.descriptor(), &desc);
+    }
+
+    #[test]
+    fn encoded_payload_accepts_string_as_bytes() {
+        let desc = PayloadDescriptor::new("application/json", Version::new(1, 0, 0)).unwrap();
+        let payload = EncodedPayload::new(desc, "json payload".to_string());
+        assert_eq!(payload.bytes(), b"json payload");
+    }
+
+    #[test]
+    fn raw_payload_codec_round_trips_any_bytes() {
+        let codec = RawPayloadCodec;
+        let original = b"arbitrary binary \x00 data";
+        let encoded = codec.encode(original).unwrap();
+        assert_eq!(encoded.as_slice(), original);
+        let decoded = codec.decode(&encoded).unwrap();
+        assert_eq!(decoded.as_slice(), original);
+    }
+
+    #[test]
+    fn raw_payload_codec_implements_default_and_clone() {
+        let codec1 = RawPayloadCodec;
+        let codec2 = RawPayloadCodec;
+        assert_eq!(
+            codec1.encode(b"test").unwrap(),
+            codec2.encode(b"test").unwrap()
+        );
+        assert_eq!(
+            codec1.clone().encode(b"test").unwrap(),
+            codec1.encode(b"test").unwrap()
+        );
+    }
+
+    #[test]
+    fn encoding_error_display_and_error_trait() {
+        let err = EncodingError::InvalidPayload;
+        assert_eq!(err.to_string(), "the payload codec rejected the payload");
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn invalid_descriptor_display_and_error_trait() {
+        let err = InvalidDescriptor::EmptyMediaType;
+        assert_eq!(err.to_string(), "a payload media type must not be empty");
+        assert!(err.source().is_none());
     }
 }

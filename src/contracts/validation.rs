@@ -155,4 +155,139 @@ mod tests {
             Err(ValidationError::MinimumContractVersionMismatch)
         );
     }
+
+    #[test]
+    fn envelope_rejects_empty_payload() {
+        let descriptor = ContractDescriptor::new(
+            ContractId::new("lookup.request").unwrap(),
+            CapabilityId::new("lookup").unwrap(),
+            Version::new(1, 0, 0),
+            Interaction::Request,
+            PayloadDescriptor::new("application/octet-stream", Version::new(1, 0, 0)).unwrap(),
+        );
+        let metadata = ContractMetadata::new(
+            descriptor.clone(),
+            Participants::new(
+                EngineId::new("caller").unwrap(),
+                EngineId::new("provider").unwrap(),
+            ),
+        );
+        let envelope = MessageEnvelope::new(
+            MessageId::new("message-1").unwrap(),
+            OperationContext::new(Operation::new(
+                OperationId::new("operation-1").unwrap(),
+                CorrelationId::new("correlation-1").unwrap(),
+            )),
+            metadata,
+            EncodedPayload::new(descriptor.payload, Vec::<u8>::new()),
+        );
+
+        assert_eq!(
+            validate_envelope(&envelope),
+            Err(ValidationError::EmptyPayload)
+        );
+    }
+
+    #[test]
+    fn response_rejects_non_response_interaction() {
+        let descriptor = ContractDescriptor::new(
+            ContractId::new("lookup.response").unwrap(),
+            CapabilityId::new("lookup").unwrap(),
+            Version::new(1, 0, 0),
+            Interaction::Request,
+            PayloadDescriptor::new("application/octet-stream", Version::new(1, 0, 0)).unwrap(),
+        );
+        let metadata = ContractMetadata::new(
+            descriptor.clone(),
+            Participants::new(
+                EngineId::new("caller").unwrap(),
+                EngineId::new("provider").unwrap(),
+            ),
+        );
+        let envelope = MessageEnvelope::new(
+            MessageId::new("message-1").unwrap(),
+            OperationContext::new(Operation::new(
+                OperationId::new("operation-1").unwrap(),
+                CorrelationId::new("correlation-1").unwrap(),
+            )),
+            metadata,
+            EncodedPayload::new(descriptor.payload, b"payload".to_vec()),
+        );
+
+        assert_eq!(
+            validate_response(&UniversalResponse::new(
+                envelope,
+                crate::status::Status::Success
+            )),
+            Err(ValidationError::InteractionMismatch)
+        );
+    }
+
+    #[test]
+    fn envelope_rejects_payload_descriptor_mismatch() {
+        let payload =
+            PayloadDescriptor::new("application/octet-stream", Version::new(1, 0, 0)).unwrap();
+        let other_payload =
+            PayloadDescriptor::new("application/json", Version::new(1, 0, 0)).unwrap();
+        let descriptor = ContractDescriptor::new(
+            ContractId::new("lookup.request").unwrap(),
+            CapabilityId::new("lookup").unwrap(),
+            Version::new(1, 0, 0),
+            Interaction::Request,
+            payload,
+        );
+        let metadata = ContractMetadata::new(
+            descriptor.clone(),
+            Participants::new(
+                EngineId::new("caller").unwrap(),
+                EngineId::new("provider").unwrap(),
+            ),
+        );
+        // The encoded payload uses a different descriptor than the metadata requires
+        let envelope = MessageEnvelope::new(
+            MessageId::new("message-1").unwrap(),
+            OperationContext::new(Operation::new(
+                OperationId::new("operation-1").unwrap(),
+                CorrelationId::new("correlation-1").unwrap(),
+            )),
+            metadata,
+            EncodedPayload::new(other_payload, b"payload".to_vec()),
+        );
+
+        assert_eq!(
+            validate_envelope(&envelope),
+            Err(ValidationError::PayloadDescriptorMismatch)
+        );
+    }
+
+    #[test]
+    fn validation_error_display_messages() {
+        assert_eq!(
+            ValidationError::EmptyPayload.to_string(),
+            "a contract payload must not be empty"
+        );
+        assert_eq!(
+            ValidationError::InteractionMismatch.to_string(),
+            "the envelope interaction does not match its message kind"
+        );
+        assert_eq!(
+            ValidationError::CapabilityRequirementMismatch.to_string(),
+            "the required capability does not match the contract"
+        );
+        assert_eq!(
+            ValidationError::MinimumContractVersionMismatch.to_string(),
+            "the contract version does not meet the minimum required version"
+        );
+        assert_eq!(
+            ValidationError::PayloadDescriptorMismatch.to_string(),
+            "the payload descriptor does not match the contract descriptor"
+        );
+    }
+
+    #[test]
+    fn validation_error_is_error_trait() {
+        fn assert_error<E: std::error::Error>(_: E) {}
+        assert_error(ValidationError::EmptyPayload);
+        assert_error(ValidationError::InteractionMismatch);
+    }
 }

@@ -19,4 +19,19 @@ mod tests {
 
         assert_eq!(context, context.clone());
     }
+
+    #[test]
+    fn security_context_default_equals_new() {
+        let default_ctx: SecurityContext = Default::default();
+        assert_eq!(default_ctx, SecurityContext::new());
+    }
+
+    #[test]
+    fn security_context_derives_clone_debug_eq_partial_eq() {
+        let context = SecurityContext::new();
+        let clone = context.clone();
+
+        assert_eq!(context, clone);
+        assert!(!format!("{:?}", context).is_empty());
+    }
 }

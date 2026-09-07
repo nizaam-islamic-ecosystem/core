@@ -116,20 +116,18 @@ impl ContractMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contracts::descriptor::{Interaction, PayloadDescriptor};
+    use crate::identity::ContractId;
 
     #[test]
     fn metadata_keeps_participants_and_execution_hints_together() {
         let metadata = ContractMetadata::new(
             ContractDescriptor::new(
-                crate::identity::ContractId::new("lookup.request").unwrap(),
+                ContractId::new("lookup.request").unwrap(),
                 CapabilityId::new("lookup").unwrap(),
                 Version::new(1, 0, 0),
-                crate::contracts::descriptor::Interaction::Request,
-                crate::contracts::descriptor::PayloadDescriptor::new(
-                    "application/json",
-                    Version::new(1, 0, 0),
-                )
-                .unwrap(),
+                Interaction::Request,
+                PayloadDescriptor::new("application/json", Version::new(1, 0, 0)).unwrap(),
             ),
             Participants::new(
                 EngineId::new("caller").unwrap(),
@@ -139,6 +137,82 @@ mod tests {
         .with_execution(ExecutionMetadata::standard().idempotent());
 
         assert_eq!(metadata.participants.sender.as_str(), "caller");
+        assert!(metadata.execution.idempotent);
+    }
+
+    #[test]
+    fn participants_builder_methods_chain() {
+        let p = Participants::new(
+            EngineId::new("sender").unwrap(),
+            EngineId::new("target").unwrap(),
+        )
+        .with_sender_instance(EngineInstanceId::new("sender-1").unwrap())
+        .with_target_instance(EngineInstanceId::new("target-1").unwrap());
+
+        assert_eq!(p.sender.as_str(), "sender");
+        assert_eq!(p.target.as_str(), "target");
+        assert_eq!(p.sender_instance.as_ref().unwrap().as_str(), "sender-1");
+        assert_eq!(p.target_instance.as_ref().unwrap().as_str(), "target-1");
+    }
+
+    #[test]
+    fn participants_builder_partial_instances() {
+        let p = Participants::new(
+            EngineId::new("sender").unwrap(),
+            EngineId::new("target").unwrap(),
+        )
+        .with_sender_instance(EngineInstanceId::new("only-sender").unwrap());
+
+        assert!(p.sender_instance.is_some());
+        assert!(p.target_instance.is_none());
+    }
+
+    #[test]
+    fn requirements_metadata_builder_methods_chain() {
+        let r = RequirementsMetadata::none()
+            .requiring_capability(CapabilityId::new("cap-x").unwrap())
+            .requiring_contract_version(Version::new(2, 0, 0));
+
+        assert_eq!(r.required_capability.as_ref().unwrap().as_str(), "cap-x");
+        assert_eq!(r.minimum_contract_version.as_ref().unwrap().major(), 2);
+    }
+
+    #[test]
+    fn execution_metadata_builder_methods_chain() {
+        let e = ExecutionMetadata::standard().with_priority(99).idempotent();
+
+        assert_eq!(e.priority, Some(99));
+        assert!(e.idempotent);
+    }
+
+    #[test]
+    fn execution_metadata_standard_is_default() {
+        let e = ExecutionMetadata::standard();
+        assert!(e.priority.is_none());
+        assert!(!e.idempotent);
+    }
+
+    #[test]
+    fn contract_metadata_with_requirements_and_execution() {
+        let desc = ContractDescriptor::new(
+            ContractId::new("c1").unwrap(),
+            CapabilityId::new("cap1").unwrap(),
+            Version::new(1, 0, 0),
+            Interaction::Request,
+            PayloadDescriptor::new("application/octet-stream", Version::new(1, 0, 0)).unwrap(),
+        );
+        let participants = Participants::new(
+            EngineId::new("caller").unwrap(),
+            EngineId::new("provider").unwrap(),
+        );
+        let metadata = ContractMetadata::new(desc, participants)
+            .with_requirements(
+                RequirementsMetadata::none()
+                    .requiring_capability(CapabilityId::new("cap1").unwrap()),
+            )
+            .with_execution(ExecutionMetadata::standard().idempotent());
+
+        assert!(metadata.requirements.required_capability.is_some());
         assert!(metadata.execution.idempotent);
     }
 }

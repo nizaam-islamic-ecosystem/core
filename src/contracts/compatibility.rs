@@ -39,6 +39,8 @@ pub fn compare_contracts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contracts::descriptor::{ContractDescriptor, Interaction, PayloadDescriptor};
+    use crate::identity::{CapabilityId, ContractId};
 
     #[test]
     fn versions_require_the_same_major_version() {
@@ -82,6 +84,138 @@ mod tests {
         assert_eq!(
             compare_contracts(&required, &offered),
             Compatibility::Incompatible
+        );
+    }
+
+    #[test]
+    fn versions_return_unknown_when_offered_is_less_than_required_same_major() {
+        // Same major (1.x.x) but offered is lower patch than required
+        assert_eq!(
+            compare_versions(&Version::new(1, 0, 5), &Version::new(1, 0, 3)),
+            Compatibility::Unknown
+        );
+        // Same major but offered is lower minor
+        assert_eq!(
+            compare_versions(&Version::new(1, 5, 0), &Version::new(1, 2, 9)),
+            Compatibility::Unknown
+        );
+    }
+
+    #[test]
+    fn contracts_require_same_contract_id() {
+        let payload = PayloadDescriptor::new("application/json", Version::new(1, 0, 0)).unwrap();
+        let required = ContractDescriptor::new(
+            ContractId::new("contract-a").unwrap(),
+            CapabilityId::new("cap").unwrap(),
+            Version::new(1, 0, 0),
+            Interaction::Request,
+            payload.clone(),
+        );
+        let offered = ContractDescriptor::new(
+            ContractId::new("contract-b").unwrap(), // different contract_id
+            CapabilityId::new("cap").unwrap(),
+            Version::new(1, 0, 0),
+            Interaction::Request,
+            payload.clone(),
+        );
+        assert_eq!(
+            compare_contracts(&required, &offered),
+            Compatibility::Incompatible
+        );
+    }
+
+    #[test]
+    fn contracts_require_same_capability_id() {
+        let payload = PayloadDescriptor::new("application/json", Version::new(1, 0, 0)).unwrap();
+        let required = ContractDescriptor::new(
+            ContractId::new("contract").unwrap(),
+            CapabilityId::new("cap-a").unwrap(),
+            Version::new(1, 0, 0),
+            Interaction::Request,
+            payload.clone(),
+        );
+        let offered = ContractDescriptor::new(
+            ContractId::new("contract").unwrap(),
+            CapabilityId::new("cap-b").unwrap(), // different capability_id
+            Version::new(1, 0, 0),
+            Interaction::Request,
+            payload.clone(),
+        );
+        assert_eq!(
+            compare_contracts(&required, &offered),
+            Compatibility::Incompatible
+        );
+    }
+
+    #[test]
+    fn contracts_require_same_interaction() {
+        let payload = PayloadDescriptor::new("application/json", Version::new(1, 0, 0)).unwrap();
+        let required = ContractDescriptor::new(
+            ContractId::new("contract").unwrap(),
+            CapabilityId::new("cap").unwrap(),
+            Version::new(1, 0, 0),
+            Interaction::Request,
+            payload.clone(),
+        );
+        let offered = ContractDescriptor::new(
+            ContractId::new("contract").unwrap(),
+            CapabilityId::new("cap").unwrap(),
+            Version::new(1, 0, 0),
+            Interaction::Response, // different interaction
+            payload.clone(),
+        );
+        assert_eq!(
+            compare_contracts(&required, &offered),
+            Compatibility::Incompatible
+        );
+    }
+
+    #[test]
+    fn contracts_require_same_media_type() {
+        let required_payload =
+            PayloadDescriptor::new("application/json", Version::new(1, 0, 0)).unwrap();
+        let offered_payload =
+            PayloadDescriptor::new("application/problem+json", Version::new(1, 0, 0)).unwrap();
+        let required = ContractDescriptor::new(
+            ContractId::new("contract").unwrap(),
+            CapabilityId::new("cap").unwrap(),
+            Version::new(1, 0, 0),
+            Interaction::Request,
+            required_payload,
+        );
+        let offered = ContractDescriptor::new(
+            ContractId::new("contract").unwrap(),
+            CapabilityId::new("cap").unwrap(),
+            Version::new(1, 0, 0),
+            Interaction::Request,
+            offered_payload,
+        );
+        assert_eq!(
+            compare_contracts(&required, &offered),
+            Compatibility::Incompatible
+        );
+    }
+
+    #[test]
+    fn contracts_return_compatible_when_all_fields_match_with_higher_version() {
+        let payload = PayloadDescriptor::new("application/json", Version::new(1, 0, 0)).unwrap();
+        let required = ContractDescriptor::new(
+            ContractId::new("contract").unwrap(),
+            CapabilityId::new("cap").unwrap(),
+            Version::new(1, 0, 0),
+            Interaction::Request,
+            payload.clone(),
+        );
+        let offered = ContractDescriptor::new(
+            ContractId::new("contract").unwrap(),
+            CapabilityId::new("cap").unwrap(),
+            Version::new(1, 2, 5), // higher minor + patch, same major
+            Interaction::Request,
+            payload.clone(),
+        );
+        assert_eq!(
+            compare_contracts(&required, &offered),
+            Compatibility::Compatible
         );
     }
 }

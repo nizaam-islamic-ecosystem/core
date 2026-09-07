@@ -175,4 +175,47 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<BoxedCapabilityHandler>();
     }
+
+    #[test]
+    fn capability_response_new_stores_bytes() {
+        let bytes = b"response".to_vec();
+        let response = CapabilityResponse::new(bytes.clone());
+        assert_eq!(response.response_bytes, bytes);
+    }
+
+    #[test]
+    fn capability_response_into_bytes() {
+        let bytes = b"into bytes".to_vec();
+        let response = CapabilityResponse::new(bytes.clone());
+        let extracted = response.into_bytes();
+        assert_eq!(extracted, bytes);
+    }
+
+    #[test]
+    fn capability_response_from_implementation() {
+        let bytes = b"from impl".to_vec();
+        let response = CapabilityResponse::new(bytes.clone());
+        let result: Vec<u8> = response.into();
+        assert_eq!(result, bytes);
+    }
+
+    #[test]
+    fn capability_response_debug() {
+        let response = CapabilityResponse::new(b"debug".to_vec());
+        let debug_str = format!("{:?}", response);
+        assert!(debug_str.contains("CapabilityResponse"));
+    }
+
+    #[test]
+    fn function_handler_new_stores_function() {
+        let handler = FunctionHandler::new(|_: &EngineContext, _: &CapabilityInvocation| {
+            Ok(CapabilityOutcome::new(b"stored".to_vec()))
+        });
+        // Calling new does not invoke — it just stores.
+        // We verify it compiles and can be invoked via the trait.
+        let context = make_context();
+        let invocation = make_invocation();
+        let result = handler.invoke(&context, &invocation).unwrap();
+        assert_eq!(result.into_bytes(), b"stored");
+    }
 }

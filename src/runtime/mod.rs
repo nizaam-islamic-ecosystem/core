@@ -132,6 +132,63 @@ mod tests {
     };
     use std::time::Duration;
 
+    fn sample_operation() -> Operation {
+        Operation::new(
+            OperationId::new("op-1").unwrap(),
+            CorrelationId::new("corr-1").unwrap(),
+        )
+    }
+
+    fn sample_context() -> EngineContext {
+        EngineContext::new(OperationContext::new(sample_operation()))
+    }
+
+    #[test]
+    fn new_context_has_no_deadline_and_active_cancellation() {
+        let context = sample_context();
+
+        assert!(context.deadline().is_none());
+        assert!(!context.cancellation().is_cancelled());
+        assert!(!context.is_expired());
+    }
+
+    #[test]
+    fn accessors_return_consistent_views() {
+        let context = sample_context();
+        let operation = sample_operation();
+
+        assert_eq!(context.operation().operation.id, operation.id);
+        assert_eq!(
+            context.operation().operation.correlation_id,
+            operation.correlation_id
+        );
+    }
+
+    #[test]
+    fn with_deadline_keeps_earlier_deadline() {
+        let later = Deadline::from_now(Duration::from_secs(60)).unwrap();
+        let context = sample_context().with_deadline(later);
+        let deadline = context.deadline().unwrap();
+        assert!(deadline.remaining() <= Duration::from_secs(60));
+    }
+
+    #[test]
+    fn with_security_replaces_security_context() {
+        let original = SecurityContext::new();
+        let context = sample_context().with_security(original.clone());
+
+        assert_eq!(context.security(), &original);
+    }
+
+    #[test]
+    fn with_provenance_replaces_provenance_context() {
+        let provenance = ProvenanceContext::new().with_attribute("k", "v");
+        let context = sample_context().with_provenance(provenance.clone());
+
+        assert_eq!(context.provenance(), &provenance);
+        assert_eq!(context.provenance().attribute("k"), Some("v"));
+    }
+
     #[test]
     fn child_context_preserves_trusted_context_and_parent_cancellation() {
         let operation = Operation::new(
@@ -158,6 +215,38 @@ mod tests {
     }
 
     #[test]
+    fn child_with_deadline_keeps_the_earlier_parent_deadline() {
+        let operation = Operation::new(
+            OperationId::new("operation-cd-1").unwrap(),
+            CorrelationId::new("correlation-cd-1").unwrap(),
+        );
+        let parent = EngineContext::new(OperationContext::new(operation))
+            .with_deadline(Deadline::from_now(Duration::from_millis(50)).unwrap());
+        let child =
+            parent.child_with_deadline(Deadline::from_now(Duration::from_secs(10)).unwrap());
+
+        assert!(child.deadline().unwrap().remaining() <= Duration::from_secs(1));
+    }
+
+    #[test]
+    fn expiration_error_returns_none_when_not_expired() {
+        let context =
+            sample_context().with_deadline(Deadline::from_now(Duration::from_secs(60)).unwrap());
+        let definition = ErrorDefinition::new(
+            ErrorCode::new("CORE.EXECUTION.001").unwrap(),
+            ErrorOwner::new("CORE").unwrap(),
+            Version::new(1, 0, 0),
+            ErrorClass::Execution,
+            Severity::Error,
+            "Execution deadline expired",
+            Retryability::NonRetryable,
+        )
+        .unwrap();
+
+        assert!(context.expiration_error(&definition).is_none());
+    }
+
+    #[test]
     fn expired_context_translates_through_the_shared_error_contract() {
         let operation = Operation::new(
             OperationId::new("operation-2").unwrap(),
@@ -180,5 +269,17 @@ mod tests {
 
         assert_eq!(error.code.as_str(), "CORE.EXECUTION.001");
         assert_eq!(error.context.operation.operation.id.as_str(), "operation-2");
+    }
+
+    #[test]
+    fn engine_context_supports_clone() {
+        let context = sample_context()
+            .with_deadline(Deadline::from_now(Duration::from_secs(60)).unwrap())
+            .with_security(SecurityContext::new())
+            .with_provenance(ProvenanceContext::new().with_attribute("k", "v"));
+        let clone = context.clone();
+
+        assert_eq!(context.deadline(), clone.deadline());
+        assert_eq!(context.provenance(), clone.provenance());
     }
 }

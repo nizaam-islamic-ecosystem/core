@@ -37,4 +37,42 @@ mod tests {
         assert_eq!(context.attribute("stage"), None);
         assert_eq!(derived.attribute("stage"), Some("decode"));
     }
+
+    #[test]
+    fn empty_context_returns_none_for_missing_keys() {
+        let context = ProvenanceContext::new();
+        assert_eq!(context.attribute("missing"), None);
+    }
+
+    #[test]
+    fn default_context_equals_new() {
+        assert_eq!(ProvenanceContext::default(), ProvenanceContext::new());
+    }
+
+    #[test]
+    fn with_attribute_overrides_existing_value() {
+        let context = ProvenanceContext::new()
+            .with_attribute("key", "original")
+            .with_attribute("key", "updated");
+
+        assert_eq!(context.attribute("key"), Some("updated"));
+    }
+
+    #[test]
+    fn with_attribute_accepts_string_and_str_inputs() {
+        let context = ProvenanceContext::new()
+            .with_attribute("string", String::from("value"))
+            .with_attribute("str", "value");
+
+        assert_eq!(context.attribute("string"), Some("value"));
+        assert_eq!(context.attribute("str"), Some("value"));
+    }
+
+    #[test]
+    fn provenance_context_supports_clone_and_eq() {
+        let original = ProvenanceContext::new().with_attribute("k", "v");
+        let clone = original.clone();
+
+        assert_eq!(original, clone);
+    }
 }

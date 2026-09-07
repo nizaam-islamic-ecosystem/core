@@ -111,3 +111,116 @@ impl GlobalError {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contracts::Version;
+    use crate::error::{ErrorClass, ErrorCode, ErrorDefinition, ErrorOwner, Severity};
+    use crate::identity::{CorrelationId, OperationId};
+    use crate::operation::Operation;
+    use crate::operation::OperationContext;
+    use crate::status::Retryability;
+
+    fn operation_context() -> OperationContext {
+        OperationContext::new(Operation::new(
+            OperationId::new("test-op").unwrap(),
+            CorrelationId::new("test-corr").unwrap(),
+        ))
+    }
+
+    fn global_error() -> GlobalError {
+        GlobalError {
+            code: ErrorCode::new("CORE.TEST.001").unwrap(),
+            owner: ErrorOwner::new("CORE").unwrap(),
+            version: Version::new(1, 0, 0),
+            class: ErrorClass::Contract,
+            severity: Severity::Error,
+            retryability: Retryability::NonRetryable,
+            message: "Test error".to_string(),
+            details: Vec::new(),
+            solution_reference: None,
+            context: ErrorContext::new(operation_context()),
+            cause: None,
+        }
+    }
+
+    #[test]
+    fn diagnostic_detail_rejects_empty_key() {
+        let detail = DiagnosticDetail::new("", "value");
+        assert!(detail.is_none());
+    }
+
+    #[test]
+    fn diagnostic_detail_rejects_empty_value() {
+        let detail = DiagnosticDetail::new("key", "");
+        assert!(detail.is_none());
+    }
+
+    #[test]
+    fn diagnostic_detail_accepts_valid_fields() {
+        let detail = DiagnosticDetail::new("key", "value").unwrap();
+        assert_eq!(detail.key, "key");
+        assert_eq!(detail.value, "value");
+    }
+
+    #[test]
+    fn error_context_starts_without_engine_or_capability() {
+        let context = ErrorContext::new(operation_context());
+        assert!(context.engine_id.is_none());
+        assert!(context.capability_id.is_none());
+    }
+
+    #[test]
+    fn error_context_builder_methods_set_fields() {
+        let context = ErrorContext::new(operation_context())
+            .from_engine(EngineId::new("engine-1").unwrap())
+            .for_capability(CapabilityId::new("cap-1").unwrap());
+        assert!(context.engine_id.is_some());
+        assert!(context.capability_id.is_some());
+    }
+
+    #[test]
+    fn global_error_from_definition_preserves_fields() {
+        let definition = ErrorDefinition::new(
+            ErrorCode::new("CORE.TEST.002").unwrap(),
+            ErrorOwner::new("CORE").unwrap(),
+            Version::new(1, 0, 0),
+            ErrorClass::Contract,
+            Severity::Warning,
+            "Warning message",
+            Retryability::Retryable,
+        )
+        .unwrap();
+        let error =
+            GlobalError::from_definition(&definition, ErrorContext::new(operation_context()), None);
+        assert_eq!(error.code.as_str(), "CORE.TEST.002");
+        assert_eq!(error.severity, Severity::Warning);
+        assert_eq!(error.retryability, Retryability::Retryable);
+        assert!(error.cause.is_none());
+        assert!(error.details.is_empty());
+    }
+
+    #[test]
+    fn global_error_with_message_overrides_default() {
+        let mut error = global_error();
+        error = error.with_message("Custom message".to_string());
+        assert_eq!(error.message, "Custom message");
+    }
+
+    #[test]
+    fn global_error_with_detail_adds_to_details() {
+        let mut error = global_error();
+        error = error.with_detail(DiagnosticDetail::new("key", "value").unwrap());
+        assert_eq!(error.details.len(), 1);
+        assert_eq!(error.details[0].key, "key");
+    }
+
+    #[test]
+    fn global_error_caused_by_sets_cause() {
+        let mut error = global_error();
+        let cause = ErrorReference::new("CORE.CAUSE.001").unwrap();
+        error = error.caused_by(cause.clone());
+        assert_eq!(error.cause, Some(cause));
+    }
+}

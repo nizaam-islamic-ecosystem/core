@@ -833,7 +833,7 @@ Core provides the capability mechanism only. Capability names, typed requests, w
 
 ### Verification
 
-`cargo fmt --all --check`, `cargo test --workspace`, `cargo check --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings` pass from the Core repository root. The suite covers 21 library unit tests and 15 integration tests in `tests/capability.rs`, including definition validation, registry CRUD, duplicate rejection, dispatch happy path, cancelled context, expired deadline, missing capability, handler failure translation, function adapter, and end-to-end pipeline.
+`cargo fmt --all --check`, `cargo test --workspace`, `cargo check --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings` pass from the Core repository root. The suite covers 62 library unit tests (17 in mod.rs, 14 in definition.rs, 19 in registry.rs, 9 in handler.rs, 11 in dispatch.rs) and 27 integration tests in `tests/capability.rs`, including definition validation, registry CRUD, duplicate rejection, dispatch happy path, cancelled context, expired deadline, missing capability, handler failure translation, function adapter, end-to-end pipeline, multi-handler dispatch, dispatch precedence (cancellation/deadline before missing capability), and context metadata propagation.
 
 ### Done when
 

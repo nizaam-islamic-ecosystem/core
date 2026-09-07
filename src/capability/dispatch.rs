@@ -230,4 +230,79 @@ mod tests {
             Some(CapabilityError::HandlerFailed(_))
         ));
     }
+
+    #[test]
+    fn dispatch_checks_cancellation_before_missing_capability() {
+        // When context is cancelled AND capability doesn't exist,
+        // cancellation should be returned (not Unknown).
+        let registry = CapabilityRegistry::new();
+
+        let context = make_context();
+        context.cancellation().cancel();
+
+        let invocation = make_invocation(CapabilityId::new("missing.cap").unwrap());
+        let result = dispatch(&registry, &context, &invocation);
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.as_error(),
+            Some(CapabilityError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn dispatch_checks_deadline_before_missing_capability() {
+        // When deadline expired AND capability doesn't exist,
+        // deadline expiration should be returned (not Unknown).
+        let registry = CapabilityRegistry::new();
+
+        let context = make_context().with_deadline(Deadline::from_now(Duration::ZERO).unwrap());
+
+        let invocation = make_invocation(CapabilityId::new("missing.cap").unwrap());
+        let result = dispatch(&registry, &context, &invocation);
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.as_error(),
+            Some(CapabilityError::DeadlineExpired)
+        ));
+    }
+
+    #[test]
+    fn dispatch_result_outcome_accessors() {
+        let outcome = CapabilityOutcome::new(b"accessor test".to_vec());
+        let result = CapabilityDispatchResult::Outcome(outcome);
+
+        assert!(result.is_ok());
+        assert!(!result.is_err());
+        assert!(result.as_outcome().is_some());
+        assert!(result.as_error().is_none());
+
+        let extracted = result.into_outcome();
+        assert!(extracted.is_some());
+        assert_eq!(extracted.unwrap().into_bytes(), b"accessor test");
+    }
+
+    #[test]
+    fn dispatch_result_error_accessors() {
+        let result = CapabilityDispatchResult::Error(CapabilityError::Unknown);
+
+        assert!(!result.is_ok());
+        assert!(result.is_err());
+        assert!(result.as_outcome().is_none());
+        assert!(result.as_error().is_some());
+
+        let extracted = result.into_error();
+        assert!(extracted.is_some());
+        assert!(matches!(extracted.unwrap(), CapabilityError::Unknown));
+    }
+
+    #[test]
+    fn dispatch_result_debug() {
+        let ok_result = CapabilityDispatchResult::Outcome(CapabilityOutcome::new(b"ok".to_vec()));
+        let err_result = CapabilityDispatchResult::Error(CapabilityError::Unknown);
+
+        assert!(format!("{:?}", ok_result).contains("Outcome"));
+        assert!(format!("{:?}", err_result).contains("Error"));
+    }
 }

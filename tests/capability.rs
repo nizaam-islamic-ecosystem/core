@@ -11,6 +11,7 @@ use nizaam_core::capability::{
     CapabilityHandler, CapabilityInvocation, CapabilityOutcome, CapabilityRegistry, RegistryError,
     arc_handler, dispatch,
 };
+use nizaam_core::contracts::Version;
 use nizaam_core::identity::{CapabilityId, ContractId, EngineId};
 use nizaam_core::identity::{CorrelationId, OperationId};
 use nizaam_core::operation::{Operation, OperationContext};
@@ -316,4 +317,281 @@ fn test_registry_clone_is_independent() {
 
     // Cloned should still have it (it's a logical copy, not a reference)
     assert!(cloned.contains(def.capability_id()));
+}
+
+#[test]
+fn test_dispatch_uses_context_operation_metadata() {
+    // Verify the handler receives the correct operation context.
+    let received_context = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let received_clone = std::sync::Arc::clone(&received_context);
+    let handler: Arc<dyn CapabilityHandler> =
+        arc_handler(move |ctx: &EngineContext, _: &CapabilityInvocation| {
+            let op_id = ctx.operation().operation.id.clone();
+            *received_clone.lock().unwrap() = Some(op_id);
+            Ok(CapabilityOutcome::new(b"ok".to_vec()))
+        });
+
+    let registry = CapabilityRegistry::new();
+    let def = CapabilityDefinition::new(
+        CapabilityId::new("ctx.op").unwrap(),
+        EngineId::new("engine").unwrap(),
+        "Context Op Test",
+    )
+    .unwrap();
+    registry.register(def, handler).unwrap();
+
+    let operation = Operation::new(
+        OperationId::new("custom-op-id").unwrap(),
+        CorrelationId::new("custom-corr-id").unwrap(),
+    );
+    let context = EngineContext::new(OperationContext::new(operation));
+    let invocation = make_invocation(CapabilityId::new("ctx.op").unwrap());
+
+    let result = dispatch(&registry, &context, &invocation);
+    assert!(result.is_ok());
+
+    let captured = received_context.lock().unwrap().take();
+    let op_id = captured.expect("handler should have been called");
+    assert_eq!(op_id.as_str(), "custom-op-id");
+}
+
+#[test]
+fn test_multiple_handlers_different_capabilities() {
+    let registry = CapabilityRegistry::new();
+
+    let handler1 = arc_handler(|_: &EngineContext, _: &CapabilityInvocation| {
+        Ok(CapabilityOutcome::new(b"response1".to_vec()))
+    });
+    let handler2 = arc_handler(|_: &EngineContext, _: &CapabilityInvocation| {
+        Ok(CapabilityOutcome::new(b"response2".to_vec()))
+    });
+
+    let def1 = CapabilityDefinition::new(
+        CapabilityId::new("multi.1").unwrap(),
+        EngineId::new("engine").unwrap(),
+        "Multi 1",
+    )
+    .unwrap();
+    let def2 = CapabilityDefinition::new(
+        CapabilityId::new("multi.2").unwrap(),
+        EngineId::new("engine").unwrap(),
+        "Multi 2",
+    )
+    .unwrap();
+
+    registry.register(def1, handler1).unwrap();
+    registry.register(def2, handler2).unwrap();
+
+    let context = make_context();
+
+    let result1 = dispatch(
+        &registry,
+        &context,
+        &make_invocation(CapabilityId::new("multi.1").unwrap()),
+    );
+    let result2 = dispatch(
+        &registry,
+        &context,
+        &make_invocation(CapabilityId::new("multi.2").unwrap()),
+    );
+
+    assert_eq!(result1.into_outcome().unwrap().into_bytes(), b"response1");
+    assert_eq!(result2.into_outcome().unwrap().into_bytes(), b"response2");
+}
+
+#[test]
+fn test_definition_with_all_metadata_in_pipeline() {
+    let registry = CapabilityRegistry::new();
+
+    let handler = arc_handler(|_: &EngineContext, _: &CapabilityInvocation| {
+        Ok(CapabilityOutcome::new(b"full-metadata".to_vec()))
+    });
+
+    let def = CapabilityDefinition::new(
+        CapabilityId::new("full.meta").unwrap(),
+        EngineId::new("meta.engine").unwrap(),
+        "Full Metadata Capability",
+    )
+    .unwrap()
+    .with_description("A capability with all metadata fields set")
+    .unwrap()
+    .with_version(Version::new(1, 0, 0));
+
+    assert_eq!(def.name(), "Full Metadata Capability");
+    assert_eq!(
+        def.description(),
+        Some("A capability with all metadata fields set")
+    );
+    assert_eq!(def.version().unwrap().major(), 1);
+
+    registry.register(def, handler).unwrap();
+
+    let context = make_context();
+    let result = dispatch(
+        &registry,
+        &context,
+        &make_invocation(CapabilityId::new("full.meta").unwrap()),
+    );
+
+    assert!(result.is_ok());
+    assert_eq!(
+        result.into_outcome().unwrap().into_bytes(),
+        b"full-metadata"
+    );
+}
+
+#[test]
+fn test_dispatch_unknown_before_handler_invocation() {
+    // Even if a handler is registered, an unknown capability should return Unknown
+    // (not attempt to invoke any handler).
+    let handler: Arc<dyn CapabilityHandler> =
+        arc_handler(|_: &EngineContext, _: &CapabilityInvocation| {
+            panic!("This handler should never be called");
+        });
+
+    let registry = CapabilityRegistry::new();
+    let def = CapabilityDefinition::new(
+        CapabilityId::new("known.cap").unwrap(),
+        EngineId::new("engine").unwrap(),
+        "Known Capability",
+    )
+    .unwrap();
+    registry.register(def, handler).unwrap();
+
+    let context = make_context();
+    let result = dispatch(
+        &registry,
+        &context,
+        &make_invocation(CapabilityId::new("unknown.cap").unwrap()),
+    );
+
+    assert!(result.is_err());
+    assert!(matches!(result.as_error(), Some(CapabilityError::Unknown)));
+}
+
+#[test]
+fn test_function_adapter_error_types() {
+    let handler: Arc<dyn CapabilityHandler> =
+        arc_handler(|_: &EngineContext, _: &CapabilityInvocation| {
+            Err(CapabilityError::HandlerFailed("test error".to_string()))
+        });
+
+    let context = make_context();
+    let invocation = make_invocation(CapabilityId::new("err.cap").unwrap());
+    let result = handler.invoke(&context, &invocation);
+
+    assert!(result.is_err());
+    let error = result.unwrap_err();
+    assert_eq!(error.to_string(), "capability handler failed: test error");
+}
+
+#[test]
+fn test_capability_outcome_with_various_payloads() {
+    // Test that CapabilityOutcome can handle various payload types.
+    let outcome_vec = CapabilityOutcome::new(b"binary".to_vec());
+    assert_eq!(outcome_vec.as_bytes(), b"binary");
+
+    let outcome_string = CapabilityOutcome::new("string payload".to_string());
+    assert_eq!(outcome_string.as_bytes(), b"string payload");
+
+    let outcome_slice = CapabilityOutcome::new(&b"slice payload"[..]);
+    assert_eq!(outcome_slice.as_bytes(), b"slice payload");
+
+    let outcome_empty = CapabilityOutcome::new(Vec::<u8>::new());
+    assert!(outcome_empty.as_bytes().is_empty());
+}
+
+#[test]
+fn test_dispatch_result_equality() {
+    let outcome1 = CapabilityDispatchResult::Outcome(CapabilityOutcome::new(b"same".to_vec()));
+    let outcome2 = CapabilityDispatchResult::Outcome(CapabilityOutcome::new(b"same".to_vec()));
+    let error1 = CapabilityDispatchResult::Error(CapabilityError::Unknown);
+    let error2 = CapabilityDispatchResult::Error(CapabilityError::Unknown);
+
+    assert_eq!(outcome1, outcome2);
+    assert_eq!(error1, error2);
+
+    let mixed = CapabilityDispatchResult::Outcome(CapabilityOutcome::new(b"diff".to_vec()));
+    assert_ne!(outcome1, mixed);
+}
+
+#[test]
+fn test_definition_rejects_whitespace_only_name() {
+    let result = CapabilityDefinition::new(
+        CapabilityId::new("ws.cap").unwrap(),
+        EngineId::new("engine").unwrap(),
+        "   \t\n  ",
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_definition_rejects_whitespace_only_description() {
+    let result = CapabilityDefinition::new(
+        CapabilityId::new("ws.desc").unwrap(),
+        EngineId::new("engine").unwrap(),
+        "Valid Name",
+    )
+    .unwrap()
+    .with_description("\t   \n");
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_registry_clear_removes_all_entries() {
+    let registry = CapabilityRegistry::new();
+
+    for i in 0..5 {
+        let def = CapabilityDefinition::new(
+            CapabilityId::new(format!("clear.{}", i)).unwrap(),
+            EngineId::new("engine").unwrap(),
+            format!("Clear {}", i),
+        )
+        .unwrap();
+        registry.register(def, simple_handler()).unwrap();
+    }
+
+    assert_eq!(registry.len(), 5);
+
+    // Unregister all one by one
+    for i in 0..5 {
+        registry
+            .unregister(&CapabilityId::new(format!("clear.{}", i)).unwrap())
+            .unwrap();
+    }
+
+    assert!(registry.is_empty());
+    assert_eq!(registry.len(), 0);
+}
+
+#[test]
+fn test_capability_invocation_debug() {
+    let invocation = CapabilityInvocation::new(
+        CapabilityId::new("debug.test").unwrap(),
+        ContractId::new("debug.contract").unwrap(),
+        b"debug payload".to_vec(),
+    );
+    let debug_str = format!("{:?}", invocation);
+    assert!(debug_str.contains("CapabilityInvocation"));
+}
+
+#[test]
+fn test_capability_error_debug() {
+    let errors = [
+        CapabilityError::Unknown,
+        CapabilityError::Cancelled,
+        CapabilityError::DeadlineExpired,
+        CapabilityError::InvalidDefinition,
+        CapabilityError::HandlerFailed("debug".to_string()),
+    ];
+
+    for error in &errors {
+        let debug_str = format!("{:?}", error);
+        assert!(
+            !debug_str.is_empty(),
+            "Debug should produce non-empty output for {:?}",
+            error
+        );
+    }
 }

@@ -291,4 +291,104 @@ mod tests {
                 .any(|e| e.definition().capability_id() == def2.capability_id())
         );
     }
+
+    #[test]
+    fn registry_default_is_empty() {
+        let registry = CapabilityRegistry::default();
+        assert!(registry.is_empty());
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn registry_multiple_registrations_increase_len() {
+        let registry = make_registry();
+        let def1 = CapabilityDefinition::new(
+            CapabilityId::new("multi.1").unwrap(),
+            EngineId::new("engine").unwrap(),
+            "Multi 1",
+        )
+        .unwrap();
+        let def2 = CapabilityDefinition::new(
+            CapabilityId::new("multi.2").unwrap(),
+            EngineId::new("engine").unwrap(),
+            "Multi 2",
+        )
+        .unwrap();
+        registry.register(def1, make_handler()).unwrap();
+        registry.register(def2, make_handler()).unwrap();
+        assert_eq!(registry.len(), 2);
+    }
+
+    #[test]
+    fn registry_iter_empty_when_no_registrations() {
+        let registry = make_registry();
+        let entries: Vec<_> = registry.iter().collect();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn registry_unregister_allows_re_registration() {
+        let registry = make_registry();
+        let def = CapabilityDefinition::new(
+            CapabilityId::new("re.reg").unwrap(),
+            EngineId::new("engine").unwrap(),
+            "Re-Register",
+        )
+        .unwrap();
+        registry.register(def.clone(), make_handler()).unwrap();
+        registry.unregister(def.capability_id()).unwrap();
+        let result = registry.register(def, make_handler());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn registry_error_already_registered_includes_cap_id() {
+        let error = RegistryError::AlreadyRegistered(CapabilityId::new("dup.id").unwrap());
+        let display = error.to_string();
+        assert!(display.contains("dup.id"));
+        assert!(display.contains("already registered"));
+    }
+
+    #[test]
+    fn registry_error_not_found_includes_cap_id() {
+        let error = RegistryError::NotFound(CapabilityId::new("missing.id").unwrap());
+        let display = error.to_string();
+        assert!(display.contains("missing.id"));
+        assert!(display.contains("not registered"));
+    }
+
+    #[test]
+    fn registry_error_implements_std_error_trait() {
+        fn assert_error<E: std::error::Error>() {}
+        assert_error::<RegistryError>();
+    }
+
+    #[test]
+    fn capability_entry_debug_excludes_handler() {
+        let def = CapabilityDefinition::new(
+            CapabilityId::new("debug.entry").unwrap(),
+            EngineId::new("engine").unwrap(),
+            "Debug Entry",
+        )
+        .unwrap();
+        let entry = CapabilityEntry::new(def, make_handler());
+        let debug = format!("{:?}", entry);
+        assert!(debug.contains("CapabilityEntry"));
+    }
+
+    #[test]
+    fn capability_entry_accessors() {
+        let def = CapabilityDefinition::new(
+            CapabilityId::new("access.entry").unwrap(),
+            EngineId::new("access.engine").unwrap(),
+            "Access Entry",
+        )
+        .unwrap();
+        let handler = make_handler();
+        let entry = CapabilityEntry::new(def.clone(), Arc::clone(&handler));
+
+        assert_eq!(entry.definition(), &def);
+        // Verify handler can be retrieved as a trait object.
+        let _ = entry.handler();
+    }
 }

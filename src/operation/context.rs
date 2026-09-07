@@ -45,4 +45,43 @@ mod tests {
         assert_eq!(context.operation.id.as_str(), "operation-1");
         assert_eq!(context.attempt_id.unwrap().as_str(), "attempt-1");
     }
+
+    #[test]
+    fn new_context_has_no_node_or_attempt() {
+        let operation = Operation::new(
+            OperationId::new("operation-2").unwrap(),
+            CorrelationId::new("correlation-2").unwrap(),
+        );
+        let context = OperationContext::new(operation);
+
+        assert!(context.node_id.is_none());
+        assert!(context.attempt_id.is_none());
+    }
+
+    #[test]
+    fn operation_context_supports_clone_and_eq() {
+        let operation = Operation::new(
+            OperationId::new("operation-3").unwrap(),
+            CorrelationId::new("correlation-3").unwrap(),
+        );
+        let original = OperationContext::new(operation);
+        let clone = original.clone();
+
+        assert_eq!(original, clone);
+    }
+
+    #[test]
+    fn for_attempt_builder_chains_and_sets_both_fields() {
+        let operation = Operation::new(
+            OperationId::new("operation-4").unwrap(),
+            CorrelationId::new("correlation-4").unwrap(),
+        );
+        let context = OperationContext::new(operation).for_attempt(
+            NodeId::new("node-4").unwrap(),
+            AttemptId::new("attempt-4").unwrap(),
+        );
+
+        assert_eq!(context.node_id.as_ref().unwrap().as_str(), "node-4");
+        assert_eq!(context.attempt_id.as_ref().unwrap().as_str(), "attempt-4");
+    }
 }

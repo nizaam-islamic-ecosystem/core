@@ -37,7 +37,7 @@ fn request() -> UniversalRequest {
 
 #[test]
 fn public_contract_request_validates_structurally() {
-    let request = request();
+    let request: UniversalRequest = request();
 
     assert!(request.has_request_interaction());
     assert_eq!(validate_request(&request), Ok(()));

@@ -6,8 +6,9 @@
 //! encoding/decoding.
 
 use crate::contracts::descriptor::{PayloadCodec, RawPayloadCodec};
+use std::collections::HashMap;
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, OnceLock, Weak,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -66,17 +67,51 @@ pub trait ByteSource: Send + Sync {
     fn read(&self, buf: &mut [u8]) -> Result<Option<usize>, StreamError>;
 }
 
+struct SourceState {
+    recv_lock: Mutex<()>,
+    unusable: AtomicBool,
+}
+
+type SharedSourceStates = Mutex<HashMap<usize, Weak<SourceState>>>;
+
+static SHARED_SOURCE_STATES: OnceLock<SharedSourceStates> = OnceLock::new();
+
+fn shared_source_state(source: &dyn ByteSource) -> Arc<SourceState> {
+    let registry = SHARED_SOURCE_STATES.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = source as *const dyn ByteSource as *const () as usize;
+
+    let mut states = registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    if let Some(state) = states.get(&key).and_then(Weak::upgrade) {
+        return state;
+    }
+
+    states.retain(|_, state| state.strong_count() > 0);
+
+    let state = Arc::new(SourceState {
+        recv_lock: Mutex::new(()),
+        unusable: AtomicBool::new(false),
+    });
+
+    states.insert(key, Arc::downgrade(&state));
+    state
+}
+
 /// A framed message stream using `RawPayloadCodec` for payload encoding.
 ///
 /// `MessageStream` wraps a raw `ByteSink`/`ByteSource` pair and owns the
 /// message framing. Each message is encoded as a 4-byte big-endian payload
 /// length followed by the encoded payload bytes.
+///
+/// Multiple `MessageStream` wrappers over the same `ByteSource` share receive
+/// serialization and terminal protocol state.
 pub struct MessageStream<'a> {
     sink: &'a dyn ByteSink,
     source: &'a dyn ByteSource,
     codec: RawPayloadCodec,
-    recv_lock: Mutex<()>,
-    unusable: Arc<AtomicBool>,
+    source_state: Arc<SourceState>,
 }
 
 impl<'a> MessageStream<'a> {
@@ -86,8 +121,7 @@ impl<'a> MessageStream<'a> {
             sink,
             source,
             codec: RawPayloadCodec,
-            recv_lock: Mutex::new(()),
-            unusable: Arc::new(AtomicBool::new(false)),
+            source_state: shared_source_state(source),
         }
     }
 
@@ -118,11 +152,12 @@ impl<'a> MessageStream<'a> {
     /// Receives a single framed message.
     pub fn recv(&self) -> Result<Option<Vec<u8>>, StreamError> {
         let _guard = self
+            .source_state
             .recv_lock
             .lock()
             .map_err(|_| StreamError::Io("message stream receive lock is poisoned".into()))?;
 
-        if self.unusable.load(Ordering::Acquire) {
+        if self.source_state.unusable.load(Ordering::Acquire) {
             return Err(StreamError::Decode(
                 "stream is unusable after an oversized frame".into(),
             ));
@@ -140,7 +175,7 @@ impl<'a> MessageStream<'a> {
             // Do not drain peer-controlled bytes here. A ByteSource may block,
             // so draining an oversized frame could wait indefinitely if the
             // peer stops sending. Mark this stream unusable instead.
-            self.unusable.store(true, Ordering::Release);
+            self.source_state.unusable.store(true, Ordering::Release);
 
             return Err(StreamError::Decode(
                 "framed message exceeds the maximum length".into(),
@@ -284,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn message_stream_recv_rejects_oversized_frame_and_stays_unusable() {
+    fn message_stream_recv_rejects_oversized_frame_and_invalidates_shared_source() {
         let channel = TestChannel::new();
         let (write_end, read_end) = channel.split();
         let sink_arc = Arc::new(write_end);
@@ -303,11 +338,46 @@ mod tests {
             StreamError::Decode("framed message exceeds the maximum length".into())
         );
 
-        let error = stream.recv().unwrap_err();
+        // A new wrapper over the same ByteSource must observe the same
+        // terminal state rather than attempting to parse the rejected bytes.
+        let recreated = MessageStream::new(&*sink_arc, &*source_arc);
+        let error = recreated.recv().unwrap_err();
         assert_eq!(
             error,
             StreamError::Decode("stream is unusable after an oversized frame".into())
         );
+    }
+
+    #[test]
+    fn message_stream_wrappers_share_receive_serialization() {
+        let channel = TestChannel::new();
+        let (write_end, read_end) = channel.split();
+        let sink_arc = Arc::new(write_end);
+        let source_arc = Arc::new(read_end);
+
+        let stream = MessageStream::new(&*sink_arc, &*source_arc);
+        stream.send(b"first").unwrap();
+        stream.send(b"second").unwrap();
+
+        let source_for_a = Arc::clone(&source_arc);
+        let source_for_b = Arc::clone(&source_arc);
+        let sink_for_a = Arc::clone(&sink_arc);
+        let sink_for_b = Arc::clone(&sink_arc);
+
+        let handle_a = std::thread::spawn(move || {
+            let stream = MessageStream::new(&*sink_for_a, &*source_for_a);
+            stream.recv().unwrap().unwrap()
+        });
+
+        let handle_b = std::thread::spawn(move || {
+            let stream = MessageStream::new(&*sink_for_b, &*source_for_b);
+            stream.recv().unwrap().unwrap()
+        });
+
+        let mut messages = vec![handle_a.join().unwrap(), handle_b.join().unwrap()];
+        messages.sort();
+
+        assert_eq!(messages, vec![b"first".to_vec(), b"second".to_vec()]);
     }
 
     #[test]

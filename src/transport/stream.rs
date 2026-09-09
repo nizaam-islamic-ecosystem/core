@@ -7,6 +7,10 @@
 
 use crate::contracts::descriptor::{PayloadCodec, RawPayloadCodec};
 
+/// Maximum permitted frame length before the payload buffer is allocated.
+/// Frames claiming a larger length are rejected to avoid unbounded memory use.
+pub const MAX_FRAME_LENGTH: usize = 16 * 1024 * 1024;
+
 /// Errors that can occur during stream operations.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StreamError {
@@ -108,6 +112,11 @@ impl<'a> MessageStream<'a> {
         }
         let len = u32::from_be_bytes(len_buf) as usize;
 
+        if len > MAX_FRAME_LENGTH {
+            return Err(StreamError::Decode(
+                "framed message exceeds the maximum length".into(),
+            ));
+        }
         // Read the complete encoded payload.
         let mut payload_buf = vec![0u8; len];
         if len > 0 && !self.read_exact(&mut payload_buf)? {

@@ -17,7 +17,7 @@ impl std::error::Error for InvalidIdentity {}
 macro_rules! identity {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
-        #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
+        #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize)]
         pub struct $name(String);
 
         impl $name {
@@ -51,6 +51,24 @@ macro_rules! identity {
 
             fn from_str(value: &str) -> Result<Self, Self::Err> {
                 Self::new(value)
+            }
+        }
+
+        impl ::core::convert::TryFrom<String> for $name {
+            type Error = $crate::identity::InvalidIdentity;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::new(value).map_err(serde::de::Error::custom)
             }
         }
     };
@@ -279,5 +297,39 @@ mod tests {
         assert_eq!(err.to_string(), "a Nizaam identity must not be empty");
         assert_eq!(err, InvalidIdentity);
         assert_eq!(err.clone(), InvalidIdentity);
+    }
+
+    // -------------------------------------------------------------------------
+    // serde deserialization delegates validation to `new`
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn identity_serde_rejects_empty_string() {
+        let result: Result<EngineId, _> = serde_json::from_str("\"\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn identity_serde_rejects_whitespace_only_string() {
+        let result: Result<CapabilityId, _> = serde_json::from_str("\"   \"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn identity_serde_round_trips_valid_value() {
+        let id: EngineId = serde_json::from_str("\"weather-engine\"").unwrap();
+        assert_eq!(id.as_str(), "weather-engine");
+    }
+
+    #[test]
+    fn identity_try_from_string_delegates_validation() {
+        assert!(EngineId::try_from(String::from("")).is_err());
+        assert!(EngineId::try_from(String::from("  ")).is_err());
+        assert_eq!(
+            EngineId::try_from(String::from("weather-engine"))
+                .unwrap()
+                .as_str(),
+            "weather-engine"
+        );
     }
 }

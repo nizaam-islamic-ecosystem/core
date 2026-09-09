@@ -90,6 +90,12 @@ impl<'a> MessageStream<'a> {
             .encode(message)
             .map_err(|e| StreamError::Encode(e.to_string()))?;
 
+        if encoded.len() > MAX_FRAME_LENGTH {
+            return Err(StreamError::Encode(
+                "framed message exceeds the maximum length".into(),
+            ));
+        }
+
         let len = u32::try_from(encoded.len())
             .map_err(|_| StreamError::Encode("message is too large to frame".into()))?;
 

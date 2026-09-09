@@ -6,6 +6,7 @@
 //! encoding/decoding.
 
 use crate::contracts::descriptor::{PayloadCodec, RawPayloadCodec};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Maximum permitted frame length before the payload buffer is allocated.
 /// Frames claiming a larger length are rejected to avoid unbounded memory use.
@@ -71,6 +72,7 @@ pub struct MessageStream<'a> {
     sink: &'a dyn ByteSink,
     source: &'a dyn ByteSource,
     codec: RawPayloadCodec,
+    unusable: AtomicBool,
 }
 
 impl<'a> MessageStream<'a> {
@@ -80,6 +82,7 @@ impl<'a> MessageStream<'a> {
             sink,
             source,
             codec: RawPayloadCodec,
+            unusable: AtomicBool::new(false),
         }
     }
 
@@ -109,6 +112,12 @@ impl<'a> MessageStream<'a> {
 
     /// Receives a single framed message.
     pub fn recv(&self) -> Result<Option<Vec<u8>>, StreamError> {
+        if self.unusable.load(Ordering::Acquire) {
+            return Err(StreamError::Decode(
+                "stream is unusable after an oversized frame".into(),
+            ));
+        }
+
         // Read the complete 4-byte, big-endian length prefix. A ByteSource
         // may legally return fewer bytes than requested, so do not assume
         // that one read fills the prefix.
@@ -119,9 +128,12 @@ impl<'a> MessageStream<'a> {
         let len = u32::from_be_bytes(len_buf) as usize;
 
         if len > MAX_FRAME_LENGTH {
-            // Consume the complete oversized frame before returning so the
-            // next call to `recv` remains aligned at the next frame boundary.
-            self.discard_exact(len)?;
+            // Do not drain peer-controlled bytes here. A ByteSource may block,
+            // so draining an oversized frame could wait indefinitely if the
+            // peer stops sending. Mark the stream unusable instead, preventing
+            // subsequent recv calls from interpreting the rejected payload as
+            // a new frame.
+            self.unusable.store(true, Ordering::Release);
 
             return Err(StreamError::Decode(
                 "framed message exceeds the maximum length".into(),
@@ -153,23 +165,6 @@ impl<'a> MessageStream<'a> {
             }
         }
         Ok(true)
-    }
-
-    /// Discards exactly `len` bytes without allocating a buffer for them.
-    fn discard_exact(&self, len: usize) -> Result<(), StreamError> {
-        let mut remaining = len;
-        let mut discard_buf = [0u8; 4096];
-
-        while remaining > 0 {
-            let chunk_len = remaining.min(discard_buf.len());
-
-            match self.source.read(&mut discard_buf[..chunk_len])? {
-                Some(0) | None => return Err(StreamError::Closed),
-                Some(n) => remaining -= n,
-            }
-        }
-
-        Ok(())
     }
 }
 
@@ -282,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn message_stream_recv_rejects_oversized_frame_and_preserves_alignment() {
+    fn message_stream_recv_rejects_oversized_frame_without_blocking_or_resyncing() {
         let channel = TestChannel::new();
         let (write_end, read_end) = channel.split();
         let sink_arc = Arc::new(write_end);
@@ -290,13 +285,9 @@ mod tests {
         let stream = MessageStream::new(&*sink_arc, &*source_arc);
 
         let oversized_len = MAX_FRAME_LENGTH + 1;
-        let mut framed = Vec::with_capacity(4 + oversized_len + 4 + b"valid".len());
-        framed.extend_from_slice(&(oversized_len as u32).to_be_bytes());
-        framed.resize(framed.len() + oversized_len, 0);
-        framed.extend_from_slice(&(5u32).to_be_bytes());
-        framed.extend_from_slice(b"valid");
-
-        sink_arc.write(&framed).unwrap();
+        sink_arc
+            .write(&(oversized_len as u32).to_be_bytes())
+            .unwrap();
 
         let error = stream.recv().unwrap_err();
         assert_eq!(
@@ -304,7 +295,13 @@ mod tests {
             StreamError::Decode("framed message exceeds the maximum length".into())
         );
 
-        assert_eq!(stream.recv().unwrap(), Some(b"valid".to_vec()));
+        // The stream is terminal after an oversized frame. A second recv must
+        // return immediately rather than consuming payload bytes as a new frame.
+        let error = stream.recv().unwrap_err();
+        assert_eq!(
+            error,
+            StreamError::Decode("stream is unusable after an oversized frame".into())
+        );
     }
 
     #[test]

@@ -26,7 +26,6 @@ impl Clone for InMemoryHandler {
 struct InMemoryRegistration {
     handler: InMemoryHandler,
     channel: Arc<Mutex<ChannelBuffer>>,
-    call_lock: Arc<Mutex<()>>,
 }
 
 pub struct InMemoryTransport {
@@ -49,11 +48,10 @@ impl InMemoryTransport {
                 respond: Arc::new(handler),
             },
             channel: Arc::new(Mutex::new((Vec::new(), Vec::new()))),
-            call_lock: Arc::new(Mutex::new(())),
         };
 
-        // Publish the handler, channel, and call lock together under one
-        // registry lock so calls cannot observe a partially registered target.
+        // Publish the handler and channel together under one registry lock so
+        // calls cannot observe a partially registered target.
         self.registrations
             .lock()
             .unwrap()
@@ -101,24 +99,10 @@ impl Transport for InMemoryTransport {
             framed.extend_from_slice(&len.to_be_bytes());
             framed.extend_from_slice(&encoded);
 
-            // A target has a shared in-memory request buffer. The entire
-            // request exchange must therefore be serialized per target so
-            // that concurrent calls cannot consume each other's frames.
-            let _call_guard = registration
-                .call_lock
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-            {
-                let mut channel = registration
-                    .channel
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-                let (tx, _rx) = &mut *channel;
-                tx.extend_from_slice(&framed);
-            }
-
+            // The channel lock covers the complete frame enqueue/dequeue
+            // transaction, so concurrent calls cannot consume each other's
+            // frames. The lock is released before invoking the handler, which
+            // allows a handler to re-enter the same target without deadlocking.
             let payload = {
                 let mut channel = registration
                     .channel
@@ -126,6 +110,7 @@ impl Transport for InMemoryTransport {
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
 
                 let (tx, _rx) = &mut *channel;
+                tx.extend_from_slice(&framed);
 
                 if tx.len() < 4 {
                     return Err(TransportError::Decode("incomplete request".into()));
@@ -145,6 +130,8 @@ impl Transport for InMemoryTransport {
             let decoded: UniversalRequest = serde_json::from_slice(&payload)
                 .map_err(|e| TransportError::Decode(e.to_string()))?;
 
+            // Never hold the channel synchronization lock while executing
+            // user-provided handler code.
             let response = (registration.handler.respond)(decoded);
 
             Ok(response)
@@ -284,5 +271,44 @@ mod tests {
 
         assert!(ids.contains(&"msg-1"));
         assert!(ids.contains(&"msg-2"));
+    }
+
+    #[test]
+    fn reentrant_handler_can_call_same_target_without_deadlock() {
+        let transport = InMemoryTransport::new();
+        let target = EngineId::new("echo").unwrap();
+
+        let nested_transport = transport.clone();
+        let nested_target = target.clone();
+
+        transport.register(target.clone(), move |request| {
+            let message_id = request.envelope.message_id.as_str().to_owned();
+
+            // Only the first request performs a reentrant call. The nested request
+            // returns directly, preventing infinite recursion.
+            if message_id == "msg-1" {
+                let nested_request = make_request(&nested_target, "msg-2");
+                let transport = nested_transport.clone();
+                let target = nested_target.clone();
+
+                let handle = std::thread::spawn(move || {
+                    futures::executor::block_on(transport.call(&target, nested_request)).unwrap()
+                });
+
+                let nested_response = handle.join().unwrap();
+
+                assert_eq!(nested_response.envelope.message_id.as_str(), "msg-2");
+                assert_eq!(nested_response.status, Status::Success);
+            }
+
+            UniversalResponse::new(request.envelope, Status::Success)
+        });
+
+        let request = make_request(&target, "msg-1");
+
+        let response = futures::executor::block_on(transport.call(&target, request)).unwrap();
+
+        assert_eq!(response.status, Status::Success);
+        assert_eq!(response.envelope.message_id.as_str(), "msg-1");
     }
 }

@@ -119,6 +119,10 @@ impl<'a> MessageStream<'a> {
         let len = u32::from_be_bytes(len_buf) as usize;
 
         if len > MAX_FRAME_LENGTH {
+            // Consume the complete oversized frame before returning so the
+            // next call to `recv` remains aligned at the next frame boundary.
+            self.discard_exact(len)?;
+
             return Err(StreamError::Decode(
                 "framed message exceeds the maximum length".into(),
             ));
@@ -149,6 +153,23 @@ impl<'a> MessageStream<'a> {
             }
         }
         Ok(true)
+    }
+
+    /// Discards exactly `len` bytes without allocating a buffer for them.
+    fn discard_exact(&self, len: usize) -> Result<(), StreamError> {
+        let mut remaining = len;
+        let mut discard_buf = [0u8; 4096];
+
+        while remaining > 0 {
+            let chunk_len = remaining.min(discard_buf.len());
+
+            match self.source.read(&mut discard_buf[..chunk_len])? {
+                Some(0) | None => return Err(StreamError::Closed),
+                Some(n) => remaining -= n,
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -258,6 +279,32 @@ mod tests {
         stream.send(b"hello world").unwrap();
         let received = stream.recv().unwrap();
         assert_eq!(received, Some(b"hello world".to_vec()));
+    }
+
+    #[test]
+    fn message_stream_recv_rejects_oversized_frame_and_preserves_alignment() {
+        let channel = TestChannel::new();
+        let (write_end, read_end) = channel.split();
+        let sink_arc = Arc::new(write_end);
+        let source_arc = Arc::new(read_end);
+        let stream = MessageStream::new(&*sink_arc, &*source_arc);
+
+        let oversized_len = MAX_FRAME_LENGTH + 1;
+        let mut framed = Vec::with_capacity(4 + oversized_len + 4 + b"valid".len());
+        framed.extend_from_slice(&(oversized_len as u32).to_be_bytes());
+        framed.resize(framed.len() + oversized_len, 0);
+        framed.extend_from_slice(&(5u32).to_be_bytes());
+        framed.extend_from_slice(b"valid");
+
+        sink_arc.write(&framed).unwrap();
+
+        let error = stream.recv().unwrap_err();
+        assert_eq!(
+            error,
+            StreamError::Decode("framed message exceeds the maximum length".into())
+        );
+
+        assert_eq!(stream.recv().unwrap(), Some(b"valid".to_vec()));
     }
 
     #[test]

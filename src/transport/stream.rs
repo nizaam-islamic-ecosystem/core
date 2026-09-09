@@ -6,7 +6,10 @@
 //! encoding/decoding.
 
 use crate::contracts::descriptor::{PayloadCodec, RawPayloadCodec};
-use std::sync::Mutex;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 /// Maximum permitted frame length before the payload buffer is allocated.
 /// Frames claiming a larger length are rejected to avoid unbounded memory use.
@@ -61,13 +64,6 @@ pub trait ByteSource: Send + Sync {
     /// Reads bytes from the channel into the provided buffer.
     /// Returns the number of bytes read, or None if the channel is closed.
     fn read(&self, buf: &mut [u8]) -> Result<Option<usize>, StreamError>;
-
-    /// Permanently invalidates this byte source after a protocol violation.
-    ///
-    /// Implementations must make subsequent reads fail rather than allowing
-    /// remaining bytes from the invalid stream to be interpreted as a new
-    /// message sequence.
-    fn invalidate(&self) -> Result<(), StreamError>;
 }
 
 /// A framed message stream using `RawPayloadCodec` for payload encoding.
@@ -80,6 +76,7 @@ pub struct MessageStream<'a> {
     source: &'a dyn ByteSource,
     codec: RawPayloadCodec,
     recv_lock: Mutex<()>,
+    unusable: Arc<AtomicBool>,
 }
 
 impl<'a> MessageStream<'a> {
@@ -90,6 +87,7 @@ impl<'a> MessageStream<'a> {
             source,
             codec: RawPayloadCodec,
             recv_lock: Mutex::new(()),
+            unusable: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -123,6 +121,12 @@ impl<'a> MessageStream<'a> {
             .recv_lock
             .lock()
             .map_err(|_| StreamError::Io("message stream receive lock is poisoned".into()))?;
+
+        if self.unusable.load(Ordering::Acquire) {
+            return Err(StreamError::Decode(
+                "stream is unusable after an oversized frame".into(),
+            ));
+        }
         // Read the complete 4-byte, big-endian length prefix. A ByteSource
         // may legally return fewer bytes than requested, so do not assume
         // that one read fills the prefix.
@@ -135,9 +139,8 @@ impl<'a> MessageStream<'a> {
         if len > MAX_FRAME_LENGTH {
             // Do not drain peer-controlled bytes here. A ByteSource may block,
             // so draining an oversized frame could wait indefinitely if the
-            // peer stops sending. Invalidate the underlying source instead.
-            // The invalid state therefore survives MessageStream recreation.
-            self.source.invalidate()?;
+            // peer stops sending. Mark this stream unusable instead.
+            self.unusable.store(true, Ordering::Release);
 
             return Err(StreamError::Decode(
                 "framed message exceeds the maximum length".into(),
@@ -181,7 +184,6 @@ mod tests {
     struct TestChannel {
         state: Arc<Mutex<TestState>>,
         signal: Arc<Condvar>,
-        invalidated: Arc<std::sync::atomic::AtomicBool>,
     }
 
     struct TestState {
@@ -197,7 +199,6 @@ mod tests {
                     closed: false,
                 })),
                 signal: Arc::new(Condvar::new()),
-                invalidated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }
         }
         fn split(&self) -> (TestWriteEnd, TestReadEnd) {
@@ -213,7 +214,6 @@ mod tests {
                 TestReadEnd {
                     state: s2,
                     signal: c2,
-                    invalidated: Arc::clone(&self.invalidated),
                 },
             )
         }
@@ -227,7 +227,6 @@ mod tests {
     struct TestReadEnd {
         state: Arc<Mutex<TestState>>,
         signal: Arc<Condvar>,
-        invalidated: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl ByteSink for TestWriteEnd {
@@ -255,12 +254,6 @@ mod tests {
 
     impl ByteSource for TestReadEnd {
         fn read(&self, buf: &mut [u8]) -> Result<Option<usize>, StreamError> {
-            if self.invalidated.load(std::sync::atomic::Ordering::Acquire) {
-                return Err(StreamError::Decode(
-                    "stream is unusable after an oversized frame".into(),
-                ));
-            }
-
             let mut state = self.state.lock().unwrap();
             while state.buffer.is_empty() && !state.closed {
                 state = self
@@ -275,12 +268,6 @@ mod tests {
             buf[..n].copy_from_slice(&state.buffer[..n]);
             state.buffer.drain(..n);
             Ok(Some(n))
-        }
-
-        fn invalidate(&self) -> Result<(), StreamError> {
-            self.invalidated
-                .store(true, std::sync::atomic::Ordering::Release);
-            Ok(())
         }
     }
 
@@ -297,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn message_stream_recv_rejects_oversized_frame_and_invalidates_shared_source() {
+    fn message_stream_recv_rejects_oversized_frame_and_stays_unusable() {
         let channel = TestChannel::new();
         let (write_end, read_end) = channel.split();
         let sink_arc = Arc::new(write_end);
@@ -316,10 +303,7 @@ mod tests {
             StreamError::Decode("framed message exceeds the maximum length".into())
         );
 
-        // A new wrapper over the same source must observe the permanent
-        // invalidation instead of reading the rejected payload as a frame.
-        let recreated = MessageStream::new(&*sink_arc, &*source_arc);
-        let error = recreated.recv().unwrap_err();
+        let error = stream.recv().unwrap_err();
         assert_eq!(
             error,
             StreamError::Decode("stream is unusable after an oversized frame".into())

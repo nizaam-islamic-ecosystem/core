@@ -12,4 +12,7 @@ pub use descriptor::{
     ContractDescriptor, EncodedPayload, EncodingError, Interaction, InvalidDescriptor,
     PayloadCodec, PayloadDescriptor, RawPayloadCodec, Version,
 };
+pub use envelope::MessageEnvelope;
 pub use metadata::{ContractMetadata, ExecutionMetadata, Participants, RequirementsMetadata};
+pub use request::UniversalRequest;
+pub use response::UniversalResponse;

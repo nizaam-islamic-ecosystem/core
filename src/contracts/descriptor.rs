@@ -3,7 +3,9 @@ use core::fmt;
 use crate::identity::{CapabilityId, ContractId};
 
 /// A validated semantic version for a contract or schema.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub struct Version {
     major: u32,
     minor: u32,
@@ -39,7 +41,7 @@ impl fmt::Display for Version {
 }
 
 /// Identifies the interaction represented by a contract.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Interaction {
     Request,
     Response,
@@ -47,14 +49,14 @@ pub enum Interaction {
 }
 
 /// Describes an encoded payload without interpreting its domain meaning.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PayloadDescriptor {
     media_type: String,
     schema_version: Version,
 }
 
 /// An opaque payload owned and interpreted by an engine capability.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EncodedPayload {
     descriptor: PayloadDescriptor,
     bytes: Vec<u8>,
@@ -67,7 +69,7 @@ pub trait PayloadCodec {
 }
 
 /// A codec for payloads that are already encoded by the owning engine.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct RawPayloadCodec;
 
 impl PayloadCodec for RawPayloadCodec {
@@ -81,7 +83,7 @@ impl PayloadCodec for RawPayloadCodec {
 }
 
 /// An encoding or decoding failure supplied by a payload codec.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum EncodingError {
     InvalidPayload,
 }
@@ -137,7 +139,7 @@ impl PayloadDescriptor {
 }
 
 /// Describes a versioned contract and its payload shape.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ContractDescriptor {
     pub contract_id: ContractId,
     pub capability_id: CapabilityId,
@@ -165,7 +167,7 @@ impl ContractDescriptor {
 }
 
 /// A structural error found while constructing a descriptor.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum InvalidDescriptor {
     EmptyMediaType,
 }

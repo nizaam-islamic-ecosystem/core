@@ -17,7 +17,7 @@ impl std::error::Error for InvalidIdentity {}
 macro_rules! identity {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
-        #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+        #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
         pub struct $name(String);
 
         impl $name {

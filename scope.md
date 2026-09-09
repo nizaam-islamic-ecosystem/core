@@ -260,6 +260,27 @@ unit and integration tests.
 The agent must not consider a function, file, or phase adequately tested
 merely because another unrelated integration test happens to pass.
 
+### 10.1.1. Module-level testing through `mod.rs`
+
+Every Core module folder that contains multiple implementation source files
+must use its `mod.rs` as the module's shared internal test surface.
+
+Each implementation source file must contain its own unit tests for its
+testable behavior.
+
+The corresponding `mod.rs` may additionally contain unit tests that exercise
+the interaction between multiple implementation files within the same module.
+
+These module-level tests are still unit tests because they verify behavior
+within a single Core module and do not represent downstream consumer usage.
+
+The `mod.rs` file must not become a replacement for source-file unit tests.
+Source-file behavior must remain covered by tests close to its implementation.
+
+Repository-level integration tests under `tests/` must be used to verify
+public API behavior, cross-module interactions, feature-level behavior, and
+end-to-end Core flows from the perspective of a downstream consumer.
+
 ### 11. Compilation is not completion
 
 The agent must not consider a phase complete merely because:

@@ -2,15 +2,13 @@
 
 use crate::contracts::{UniversalRequest, UniversalResponse};
 use crate::identity::EngineId;
-use crate::status::Status;
 use crate::transport::{BoxedFuture, Transport, TransportError};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 type ChannelBuffer = (Vec<u8>, Vec<u8>);
-type SharedChannels = Arc<Mutex<HashMap<EngineId, ChannelBuffer>>>;
-type SharedCallLocks = Arc<Mutex<HashMap<EngineId, Arc<Mutex<()>>>>>;
+type RegistrationMap = Arc<Mutex<HashMap<EngineId, InMemoryRegistration>>>;
 
 struct InMemoryHandler {
     respond: Arc<dyn Fn(UniversalRequest) -> UniversalResponse + Send + Sync>,
@@ -24,18 +22,21 @@ impl Clone for InMemoryHandler {
     }
 }
 
+#[derive(Clone)]
+struct InMemoryRegistration {
+    handler: InMemoryHandler,
+    channel: Arc<Mutex<ChannelBuffer>>,
+    call_lock: Arc<Mutex<()>>,
+}
+
 pub struct InMemoryTransport {
-    channels: SharedChannels,
-    handlers: Arc<Mutex<HashMap<EngineId, InMemoryHandler>>>,
-    call_locks: SharedCallLocks,
+    registrations: RegistrationMap,
 }
 
 impl InMemoryTransport {
     pub fn new() -> Self {
         Self {
-            channels: Arc::new(Mutex::new(HashMap::new())),
-            handlers: Arc::new(Mutex::new(HashMap::new())),
-            call_locks: Arc::new(Mutex::new(HashMap::new())),
+            registrations: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -43,26 +44,24 @@ impl InMemoryTransport {
     where
         F: Fn(UniversalRequest) -> UniversalResponse + Send + Sync + 'static,
     {
-        self.handlers.lock().unwrap().insert(
-            target.clone(),
-            InMemoryHandler {
+        let registration = InMemoryRegistration {
+            handler: InMemoryHandler {
                 respond: Arc::new(handler),
             },
-        );
+            channel: Arc::new(Mutex::new((Vec::new(), Vec::new()))),
+            call_lock: Arc::new(Mutex::new(())),
+        };
 
-        self.channels
+        // Publish the handler, channel, and call lock together under one
+        // registry lock so calls cannot observe a partially registered target.
+        self.registrations
             .lock()
             .unwrap()
-            .insert(target.clone(), (Vec::new(), Vec::new()));
-
-        self.call_locks
-            .lock()
-            .unwrap()
-            .insert(target, Arc::new(Mutex::new(())));
+            .insert(target, registration);
     }
 
     pub fn registered_targets(&self) -> Vec<EngineId> {
-        self.handlers.lock().unwrap().keys().cloned().collect()
+        self.registrations.lock().unwrap().keys().cloned().collect()
     }
 }
 
@@ -78,12 +77,20 @@ impl Transport for InMemoryTransport {
         target: &EngineId,
         request: UniversalRequest,
     ) -> BoxedFuture<UniversalResponse, TransportError> {
-        let handlers = Arc::clone(&self.handlers);
-        let channels = Arc::clone(&self.channels);
-        let call_locks = Arc::clone(&self.call_locks);
+        let registrations = Arc::clone(&self.registrations);
         let target = target.clone();
 
         Box::pin(async move {
+            let registration = {
+                let registrations = registrations.lock().unwrap();
+                registrations.get(&target).cloned()
+            };
+
+            let registration = match registration {
+                Some(registration) => registration,
+                None => return Err(TransportError::Disconnected),
+            };
+
             let encoded =
                 serde_json::to_vec(&request).map_err(|e| TransportError::Encode(e.to_string()))?;
 
@@ -97,83 +104,66 @@ impl Transport for InMemoryTransport {
             // A target has a shared in-memory request buffer. The entire
             // request exchange must therefore be serialized per target so
             // that concurrent calls cannot consume each other's frames.
-            let call_lock = {
-                let locks = call_locks.lock().unwrap();
-                locks
-                    .get(&target)
-                    .cloned()
-                    .ok_or(TransportError::Disconnected)?
-            };
-
-            let _call_guard = call_lock.lock().unwrap();
+            let _call_guard = registration
+                .call_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
 
             {
-                let mut ch = channels.lock().unwrap();
+                let mut channel = registration
+                    .channel
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-                if let Some((tx, _rx)) = ch.get_mut(&target) {
-                    tx.extend_from_slice(&framed);
-                } else {
-                    return Err(TransportError::Disconnected);
-                }
+                let (tx, _rx) = &mut *channel;
+                tx.extend_from_slice(&framed);
             }
 
-            let handler = {
-                let h = handlers.lock().unwrap();
-                h.get(&target).cloned()
+            let payload = {
+                let mut channel = registration
+                    .channel
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+                let (tx, _rx) = &mut *channel;
+
+                if tx.len() < 4 {
+                    return Err(TransportError::Decode("incomplete request".into()));
+                }
+
+                let len_bytes: [u8; 4] = tx[..4].try_into().unwrap();
+                let len = u32::from_be_bytes(len_bytes) as usize;
+
+                if tx.len() < 4 + len {
+                    return Err(TransportError::Decode("incomplete payload".into()));
+                }
+
+                tx.drain(..4);
+                tx.drain(..len).collect::<Vec<u8>>()
             };
 
-            match handler {
-                Some(h) => {
-                    let payload = {
-                        let mut ch = channels.lock().unwrap();
-                        let (tx, _rx) = ch.get_mut(&target).ok_or(TransportError::Disconnected)?;
+            let decoded: UniversalRequest = serde_json::from_slice(&payload)
+                .map_err(|e| TransportError::Decode(e.to_string()))?;
 
-                        if tx.len() < 4 {
-                            return Err(TransportError::Decode("incomplete request".into()));
-                        }
+            let response = (registration.handler.respond)(decoded);
 
-                        let len_bytes: [u8; 4] = tx[..4].try_into().unwrap();
-                        let len = u32::from_be_bytes(len_bytes) as usize;
-
-                        if tx.len() < 4 + len {
-                            return Err(TransportError::Decode("incomplete payload".into()));
-                        }
-
-                        tx.drain(..4);
-                        tx.drain(..len).collect::<Vec<u8>>()
-                    };
-
-                    let decoded: UniversalRequest = serde_json::from_slice(&payload)
-                        .map_err(|e| TransportError::Decode(e.to_string()))?;
-
-                    let respond = Arc::clone(&h.respond);
-                    let response = respond(decoded);
-
-                    Ok(response)
-                }
-                None => {
-                    let envelope = request.envelope.clone();
-                    Ok(UniversalResponse::new(envelope, Status::Failure))
-                }
-            }
+            Ok(response)
         })
     }
 
     fn is_connected(&self, target: &EngineId) -> bool {
-        self.handlers.lock().unwrap().contains_key(target)
+        self.registrations.lock().unwrap().contains_key(target)
     }
 
     fn connected_targets(&self) -> Vec<EngineId> {
-        self.handlers.lock().unwrap().keys().cloned().collect()
+        self.registrations.lock().unwrap().keys().cloned().collect()
     }
 }
 
 impl Clone for InMemoryTransport {
     fn clone(&self) -> Self {
         Self {
-            channels: Arc::clone(&self.channels),
-            handlers: Arc::clone(&self.handlers),
-            call_locks: Arc::clone(&self.call_locks),
+            registrations: Arc::clone(&self.registrations),
         }
     }
 }

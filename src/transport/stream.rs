@@ -6,6 +6,7 @@
 //! encoding/decoding.
 
 use crate::contracts::descriptor::{PayloadCodec, RawPayloadCodec};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Maximum permitted frame length before the payload buffer is allocated.
@@ -73,6 +74,7 @@ pub struct MessageStream<'a> {
     source: &'a dyn ByteSource,
     codec: RawPayloadCodec,
     unusable: AtomicBool,
+    recv_lock: Mutex<()>,
 }
 
 impl<'a> MessageStream<'a> {
@@ -83,6 +85,7 @@ impl<'a> MessageStream<'a> {
             source,
             codec: RawPayloadCodec,
             unusable: AtomicBool::new(false),
+            recv_lock: Mutex::new(()),
         }
     }
 
@@ -112,6 +115,10 @@ impl<'a> MessageStream<'a> {
 
     /// Receives a single framed message.
     pub fn recv(&self) -> Result<Option<Vec<u8>>, StreamError> {
+        let _guard = self
+            .recv_lock
+            .lock()
+            .map_err(|_| StreamError::Io("message stream receive lock is poisoned".into()))?;
         if self.unusable.load(Ordering::Acquire) {
             return Err(StreamError::Decode(
                 "stream is unusable after an oversized frame".into(),

@@ -50,8 +50,8 @@ impl InMemoryTransport {
             channel: Arc::new(Mutex::new((Vec::new(), Vec::new()))),
         };
 
-        // Publish the handler and channel together under one registry lock so
-        // calls cannot observe a partially registered target.
+        // Publish the handler, channel, and call lock together under one
+        // registry lock so calls cannot observe a partially registered target.
         self.registrations
             .lock()
             .unwrap()
@@ -99,10 +99,10 @@ impl Transport for InMemoryTransport {
             framed.extend_from_slice(&len.to_be_bytes());
             framed.extend_from_slice(&encoded);
 
-            // The channel lock covers the complete frame enqueue/dequeue
-            // transaction, so concurrent calls cannot consume each other's
-            // frames. The lock is released before invoking the handler, which
-            // allows a handler to re-enter the same target without deadlocking.
+            // Append and extract the frame while holding the same channel
+            // lock. This makes the operation atomic with respect to other
+            // callers, while releasing the lock before handler execution so
+            // handlers can safely re-enter the same target.
             let payload = {
                 let mut channel = registration
                     .channel
@@ -130,8 +130,6 @@ impl Transport for InMemoryTransport {
             let decoded: UniversalRequest = serde_json::from_slice(&payload)
                 .map_err(|e| TransportError::Decode(e.to_string()))?;
 
-            // Never hold the channel synchronization lock while executing
-            // user-provided handler code.
             let response = (registration.handler.respond)(decoded);
 
             Ok(response)
@@ -275,6 +273,20 @@ mod tests {
 
     #[test]
     fn reentrant_handler_can_call_same_target_without_deadlock() {
+        use std::future::Future;
+        use std::task::{Context, Poll};
+
+        fn poll_ready<F: Future>(future: F) -> F::Output {
+            let waker = futures::task::noop_waker();
+            let mut context = Context::from_waker(&waker);
+            let mut future = Box::pin(future);
+
+            match Future::poll(future.as_mut(), &mut context) {
+                Poll::Ready(output) => output,
+                Poll::Pending => panic!("in-memory call unexpectedly yielded"),
+            }
+        }
+
         let transport = InMemoryTransport::new();
         let target = EngineId::new("echo").unwrap();
 
@@ -284,18 +296,12 @@ mod tests {
         transport.register(target.clone(), move |request| {
             let message_id = request.envelope.message_id.as_str().to_owned();
 
-            // Only the first request performs a reentrant call. The nested request
-            // returns directly, preventing infinite recursion.
+            // Only the outer request re-enters, preventing infinite recursion.
             if message_id == "msg-1" {
                 let nested_request = make_request(&nested_target, "msg-2");
-                let transport = nested_transport.clone();
-                let target = nested_target.clone();
-
-                let handle = std::thread::spawn(move || {
-                    futures::executor::block_on(transport.call(&target, nested_request)).unwrap()
-                });
-
-                let nested_response = handle.join().unwrap();
+                let nested_response =
+                    poll_ready(nested_transport.call(&nested_target, nested_request))
+                        .expect("reentrant call should succeed");
 
                 assert_eq!(nested_response.envelope.message_id.as_str(), "msg-2");
                 assert_eq!(nested_response.status, Status::Success);

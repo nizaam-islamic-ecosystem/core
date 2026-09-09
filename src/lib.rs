@@ -14,7 +14,7 @@ pub mod status;
 // These private module boundaries establish the approved Core structure. They
 // become public only when their corresponding phase has a deliberate API.
 pub(crate) mod artifacts;
-pub(crate) mod client;
+pub mod client;
 pub(crate) mod config;
 pub(crate) mod conformance;
 pub mod contracts;
@@ -30,6 +30,6 @@ pub(crate) mod retry;
 pub mod runtime;
 pub(crate) mod sdk;
 pub mod security;
-pub(crate) mod server;
+pub mod server;
 pub(crate) mod streaming;
-pub(crate) mod transport;
+pub mod transport;

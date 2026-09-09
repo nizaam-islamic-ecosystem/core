@@ -3,7 +3,9 @@ use core::fmt;
 use crate::identity::{CapabilityId, ContractId};
 
 /// A validated semantic version for a contract or schema.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub struct Version {
     major: u32,
     minor: u32,
@@ -39,7 +41,7 @@ impl fmt::Display for Version {
 }
 
 /// Identifies the interaction represented by a contract.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Interaction {
     Request,
     Response,
@@ -47,14 +49,37 @@ pub enum Interaction {
 }
 
 /// Describes an encoded payload without interpreting its domain meaning.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// Deserialization validates through [`PayloadDescriptor::new`] so that an
+/// empty or whitespace-only `media_type` is rejected, matching the public
+/// constructor. Serialization and equality behavior are unchanged.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct PayloadDescriptor {
     media_type: String,
     schema_version: Version,
 }
 
+/// Intermediate representation used to validate a [`PayloadDescriptor`] while
+/// deserializing from a transport such as JSON.
+#[derive(Clone, Debug, serde::Deserialize)]
+struct PayloadDescriptorIr {
+    media_type: String,
+    schema_version: Version,
+}
+
+impl<'de> serde::Deserialize<'de> for PayloadDescriptor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let intermediate = PayloadDescriptorIr::deserialize(deserializer)?;
+        PayloadDescriptor::new(intermediate.media_type, intermediate.schema_version)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// An opaque payload owned and interpreted by an engine capability.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EncodedPayload {
     descriptor: PayloadDescriptor,
     bytes: Vec<u8>,
@@ -67,7 +92,7 @@ pub trait PayloadCodec {
 }
 
 /// A codec for payloads that are already encoded by the owning engine.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct RawPayloadCodec;
 
 impl PayloadCodec for RawPayloadCodec {
@@ -81,7 +106,7 @@ impl PayloadCodec for RawPayloadCodec {
 }
 
 /// An encoding or decoding failure supplied by a payload codec.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum EncodingError {
     InvalidPayload,
 }
@@ -137,7 +162,7 @@ impl PayloadDescriptor {
 }
 
 /// Describes a versioned contract and its payload shape.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ContractDescriptor {
     pub contract_id: ContractId,
     pub capability_id: CapabilityId,
@@ -165,7 +190,7 @@ impl ContractDescriptor {
 }
 
 /// A structural error found while constructing a descriptor.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum InvalidDescriptor {
     EmptyMediaType,
 }
@@ -207,6 +232,29 @@ mod tests {
             PayloadDescriptor::new("  ", Version::new(1, 0, 0)),
             Err(InvalidDescriptor::EmptyMediaType)
         );
+    }
+
+    #[test]
+    fn payload_descriptor_serde_rejects_whitespace_only_media_type() {
+        let json = r#"{"media_type":"   ","schema_version":{"major":1,"minor":0,"patch":0}}"#;
+        let result: Result<PayloadDescriptor, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn payload_descriptor_serde_rejects_empty_media_type() {
+        let json = r#"{"media_type":"","schema_version":{"major":1,"minor":0,"patch":0}}"#;
+        let result: Result<PayloadDescriptor, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn payload_descriptor_serde_round_trips_valid_media_type() {
+        let json =
+            r#"{"media_type":"application/json","schema_version":{"major":1,"minor":2,"patch":0}}"#;
+        let descriptor: PayloadDescriptor = serde_json::from_str(json).unwrap();
+        assert_eq!(descriptor.media_type(), "application/json");
+        assert_eq!(descriptor.schema_version(), &Version::new(1, 2, 0));
     }
 
     #[test]

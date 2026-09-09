@@ -97,7 +97,7 @@ impl Transport for InMemoryTransport {
             match handler {
                 Some(h) => {
                     let mut ch = channels.lock().unwrap();
-                    let (_tx, rx) = ch.get_mut(&target).ok_or(TransportError::Disconnected)?;
+                    let (rx, _tx) = ch.get_mut(&target).ok_or(TransportError::Disconnected)?;
                     if rx.len() < 4 {
                         return Err(TransportError::Decode("incomplete request".into()));
                     }

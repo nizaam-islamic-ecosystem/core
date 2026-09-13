@@ -40,6 +40,14 @@ where
         target: &EngineId,
         request: UniversalRequest,
     ) -> BoxedFuture<UniversalResponse, TransportError> {
+        if request.envelope.metadata.participants.target != *target {
+            return Box::pin(async {
+                Err(TransportError::Peer(
+                    "request target does not match the client target".into(),
+                ))
+            });
+        }
+
         self.transport.call(target, request)
     }
 
@@ -115,6 +123,26 @@ mod tests {
 
         assert_eq!(response.status, Status::Success);
         assert_eq!(response.envelope.message_id.as_str(), "msg-1");
+    }
+
+    #[test]
+    fn client_rejects_a_request_with_a_mismatched_target() {
+        let transport = InMemoryTransport::new();
+        let dispatch_target = EngineId::new("dispatch-target").unwrap();
+        let request_target = EngineId::new("request-target").unwrap();
+
+        transport.register(dispatch_target.clone(), |_request| {
+            panic!("mismatched request target must not reach transport");
+        });
+
+        let client = UniversalClient::new(transport);
+        let request = make_request(&request_target, "msg-mismatch");
+        let result = futures::executor::block_on(client.send(&dispatch_target, request));
+
+        assert_eq!(
+            result.expect_err("mismatched request target must be rejected"),
+            TransportError::Peer("request target does not match the client target".into())
+        );
     }
 
     #[test]

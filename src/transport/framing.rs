@@ -26,7 +26,7 @@ use std::fmt;
 ///   [2-3] Reserved (2 bytes)
 ///   [4] Payload Length (4 bytes)
 ///   [8] Transport Message ID (8 bytes)
-///   [12] Fragment Index (4 bytes)
+///   [16] Fragment Index (4 bytes)
 #[derive(Debug)]
 pub struct MessageHeader {
     version: u8,

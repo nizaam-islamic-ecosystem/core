@@ -129,10 +129,18 @@ fn response_for(request: UniversalRequest, status: Status, payload: Vec<u8>) -> 
     );
 
     let requesting_participants = envelope.metadata.participants;
-    let participants = Participants::new(
+    let sender_instance = requesting_participants.target_instance.clone();
+    let target_instance = requesting_participants.sender_instance.clone();
+    let mut participants = Participants::new(
         requesting_participants.target,
         requesting_participants.sender,
     );
+    if let Some(instance) = sender_instance {
+        participants = participants.with_sender_instance(instance);
+    }
+    if let Some(instance) = target_instance {
+        participants = participants.with_target_instance(instance);
+    }
 
     UniversalResponse::new(
         MessageEnvelope::new(
@@ -571,6 +579,14 @@ fn engine_instance_identities_survive_the_transport_round_trip() {
         .expect("the engine handler must have been invoked");
     assert_eq!(seen, participants);
     assert_eq!(response.status, Status::Success);
+    assert_eq!(
+        response.envelope.metadata.participants.sender_instance,
+        participants.target_instance
+    );
+    assert_eq!(
+        response.envelope.metadata.participants.target_instance,
+        participants.sender_instance
+    );
 }
 
 #[test]

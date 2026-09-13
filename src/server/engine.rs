@@ -106,17 +106,67 @@ pub fn handle_request(
     server: &EngineServer,
     request: UniversalRequest,
 ) -> Result<UniversalResponse, TransportError> {
+    if !request.has_request_interaction() {
+        return Ok(failure_response(request));
+    }
+
     if !server.state().is_serving() {
-        return Ok(UniversalResponse::new(request.envelope, Status::Failure));
+        return Ok(failure_response(request));
     }
 
     let handlers = server.handlers();
     let capability_id = request.envelope.metadata.descriptor.capability_id.clone();
-    let handlers_guard = handlers.lock().unwrap();
-    match handlers_guard.get(&capability_id) {
+    let handler = {
+        let handlers_guard = handlers.lock().unwrap();
+        handlers_guard.get(&capability_id).cloned()
+    };
+    match handler {
         Some(handler) => Ok(handler(request)),
-        None => Ok(UniversalResponse::new(request.envelope, Status::Failure)),
+        None => Ok(failure_response(request)),
     }
+}
+
+fn failure_response(request: UniversalRequest) -> UniversalResponse {
+    let envelope = request.envelope;
+    let metadata = envelope.metadata;
+    let request_descriptor = metadata.descriptor;
+    let payload_descriptor = request_descriptor.payload.clone();
+    let requesting_participants = metadata.participants;
+
+    let descriptor = crate::contracts::ContractDescriptor::new(
+        request_descriptor.contract_id,
+        request_descriptor.capability_id,
+        request_descriptor.version,
+        crate::contracts::Interaction::Response,
+        payload_descriptor.clone(),
+    );
+
+    let sender_instance = requesting_participants.target_instance.clone();
+    let target_instance = requesting_participants.sender_instance.clone();
+    let mut participants = crate::contracts::Participants::new(
+        requesting_participants.target,
+        requesting_participants.sender,
+    );
+    if let Some(instance) = sender_instance {
+        participants = participants.with_sender_instance(instance);
+    }
+    if let Some(instance) = target_instance {
+        participants = participants.with_target_instance(instance);
+    }
+
+    let response_metadata = crate::contracts::ContractMetadata::new(descriptor, participants)
+        .with_requirements(metadata.requirements)
+        .with_execution(metadata.execution);
+
+    UniversalResponse::new(
+        crate::contracts::MessageEnvelope::new(
+            envelope.message_id,
+            envelope.operation_context,
+            response_metadata,
+            crate::contracts::EncodedPayload::new(payload_descriptor, Vec::new()),
+        ),
+        Status::Failure,
+    )
 }
 
 #[cfg(test)]
@@ -215,6 +265,29 @@ mod tests {
         let response = handle_request(&server, request).unwrap();
 
         assert_eq!(response.status, Status::Failure);
+    }
+
+    #[test]
+    fn server_rejects_non_request_interaction_before_handler_dispatch() {
+        let mut server = EngineServer::new(EngineId::new("server").unwrap());
+        let target = EngineId::new("server").unwrap();
+
+        server.register_handler(
+            CapabilityId::new("test-cap").unwrap(),
+            Arc::new(|_request| panic!("non-request interaction reached handler")),
+        );
+        server.start();
+
+        let mut request = make_request(&target, "msg-invalid");
+        request.envelope.metadata.descriptor.interaction = Interaction::Response;
+
+        let response = handle_request(&server, request).unwrap();
+
+        assert_eq!(response.status, Status::Failure);
+        assert_eq!(
+            response.envelope.metadata.descriptor.interaction,
+            Interaction::Response
+        );
     }
 
     #[test]

@@ -1043,22 +1043,22 @@ The framing implementation preserves logical message boundaries while keeping tr
 
 Phase 7 was verified through the complete Core test/format/check pipeline and the dedicated communication integration suite. The verification covers the public communication surface and the byte-level transport contract, including:
 
-* universal client to engine server request/response flow;
-* abstract `Transport` usage and transport trait-object behavior;
-* capability handler invocation through the engine server;
-* engine routing to the addressed target;
-* rejection of requests before serving and after draining/stopping;
-* successful and rejected client connections;
-* closed-connection call rejection;
-* binary message-header serialization/deserialization and fixed header sizing;
-* big-endian framing field encoding;
-* transport message and fragment metadata;
-* logical-message fragmentation and exact payload reassembly;
-* large logical payload round trips;
-* opaque binary payload preservation, including non-UTF-8 bytes;
-* operation-context and contract metadata preservation;
-* sender/target and engine-instance identity preservation; and
-* stream/source/sink and connection abstraction behavior.
+* [x] universal client to engine server request/response flow;
+* [x] abstract `Transport` usage and transport trait-object behavior;
+* [x] capability handler invocation through the engine server;
+* [x] engine routing to the addressed target;
+* [x] rejection of requests before serving and after draining/stopping;
+* [x] successful and rejected client connections;
+* [x] closed-connection call rejection;
+* [x] binary message-header serialization/deserialization and fixed header sizing;
+* [x] big-endian framing field encoding;
+* [x] transport message and fragment metadata;
+* [x] logical-message fragmentation and exact payload reassembly;
+* [x] large logical payload round trips;
+* [x] opaque binary payload preservation, including non-UTF-8 bytes;
+* [x] operation-context and contract metadata preservation;
+* [x] sender/target and engine-instance identity preservation; and
+* [x] stream/source/sink and connection abstraction behavior.
 
 The dedicated Phase 7 integration suite passes with `33 passed; 0 failed`. The broader Core regression suite also remains green, including the previously verified capability, contract, context, error, foundation, and logging tests.
 

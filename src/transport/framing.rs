@@ -18,6 +18,8 @@
 
 use std::fmt;
 
+use crate::transport::stream::MAX_FRAME_LENGTH;
+
 /// Binary message header used in the transport layer.
 ///
 /// Layout (big-endian):
@@ -59,6 +61,11 @@ impl MessageHeader {
         message_id: [u8; 8],
         fragment_index: u32,
     ) -> Self {
+        assert!(
+            usize::try_from(payload_length).unwrap() <= MAX_FRAME_LENGTH,
+            "payload_length exceeds MAX_FRAME_LENGTH"
+        );
+
         Self {
             version,
             flags,
@@ -105,6 +112,11 @@ impl MessageHeader {
         let flags = data[1];
         let reserved = [data[2], data[3]];
         let payload_length = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+        if usize::try_from(payload_length).unwrap() > MAX_FRAME_LENGTH {
+            return Err(format!(
+                "payload_length exceeds MAX_FRAME_LENGTH ({MAX_FRAME_LENGTH})"
+            ));
+        }
         let message_id = data[8..16].try_into().map_err(|_| "Invalid message ID")?;
         let fragment_index = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
 
@@ -204,6 +216,27 @@ mod tests {
         assert_eq!(bytes[7], 0x00); // payload_length low byte
         assert_eq!(bytes[16], 0x00); // fragment_index high byte
         assert_eq!(bytes[19], 0x05); // fragment_index low byte
+    }
+
+    #[test]
+    #[should_panic(expected = "payload_length exceeds MAX_FRAME_LENGTH")]
+    fn message_header_constructor_rejects_oversized_payload() {
+        MessageHeader::new(
+            1,
+            0,
+            u32::try_from(MAX_FRAME_LENGTH).unwrap() + 1,
+            [0; 8],
+            0,
+        );
+    }
+
+    #[test]
+    fn message_header_deserialize_rejects_oversized_payload() {
+        let mut bytes = vec![0u8; 20];
+        bytes[4..8].copy_from_slice(&(u32::try_from(MAX_FRAME_LENGTH).unwrap() + 1).to_be_bytes());
+
+        let result = MessageHeader::deserialize(&bytes);
+        assert!(result.is_err());
     }
 
     #[test]

@@ -73,7 +73,9 @@ impl EngineServer {
 
     /// Starts the server, transitioning from Starting to Serving.
     pub fn start(&mut self) {
-        self.state = ServerState::Serving;
+        if self.state == ServerState::Starting {
+            self.state = ServerState::Serving;
+        }
     }
 
     /// Initiates graceful shutdown, transitioning from Serving to Draining.
@@ -108,6 +110,12 @@ pub fn handle_request(
 ) -> Result<UniversalResponse, TransportError> {
     if !request.has_request_interaction() {
         return Ok(failure_response(request));
+    }
+
+    if request.envelope.metadata.participants.target != server.engine_id {
+        return Err(TransportError::Peer(
+            "request target does not match the server identity".into(),
+        ));
     }
 
     if !server.state().is_serving() {
@@ -288,6 +296,27 @@ mod tests {
             response.envelope.metadata.descriptor.interaction,
             Interaction::Response
         );
+    }
+
+    #[test]
+    fn server_rejects_request_with_mismatched_target() {
+        let mut server = EngineServer::new(EngineId::new("server").unwrap());
+        server.register_handler(
+            CapabilityId::new("test-cap").unwrap(),
+            Arc::new(|_request| panic!("mismatched target reached handler")),
+        );
+        server.start();
+
+        let target = EngineId::new("other-server").unwrap();
+        let request = make_request(&target, "msg-mismatched-target");
+
+        let result = handle_request(&server, request);
+
+        assert!(matches!(
+            result,
+            Err(TransportError::Peer(message))
+                if message == "request target does not match the server identity"
+        ));
     }
 
     #[test]

@@ -1,11 +1,11 @@
 use core::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use crate::identity::{CapabilityId, ContractId};
 
 /// A validated semantic version for a contract or schema.
-#[derive(
-    Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct Version {
     major: u32,
     minor: u32,

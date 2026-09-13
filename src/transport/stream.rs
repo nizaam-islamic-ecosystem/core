@@ -6,9 +6,8 @@
 //! encoding/decoding.
 
 use crate::contracts::descriptor::{PayloadCodec, RawPayloadCodec};
-use std::collections::HashMap;
 use std::sync::{
-    Arc, Mutex, OnceLock, Weak,
+    Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -61,42 +60,44 @@ pub trait ByteSink: Send + Sync {
 }
 
 /// A source for reading bytes from a transport channel.
-pub trait ByteSource: Send + Sync {
-    /// Reads bytes from the channel into the provided buffer.
-    /// Returns the number of bytes read, or None if the channel is closed.
-    fn read(&self, buf: &mut [u8]) -> Result<Option<usize>, StreamError>;
-}
-
-struct SourceState {
+/// Shared receive state owned by a `ByteSource`.
+///
+/// The state lives for exactly as long as the source owns it. Every
+/// `MessageStream` wrapper created from that source therefore shares the same
+/// receive lock and terminal protocol state.
+#[derive(Debug)]
+pub struct ByteSourceState {
     recv_lock: Mutex<()>,
     unusable: AtomicBool,
 }
 
-type SharedSourceStates = Mutex<HashMap<usize, Weak<SourceState>>>;
-
-static SHARED_SOURCE_STATES: OnceLock<SharedSourceStates> = OnceLock::new();
-
-fn shared_source_state(source: &dyn ByteSource) -> Arc<SourceState> {
-    let registry = SHARED_SOURCE_STATES.get_or_init(|| Mutex::new(HashMap::new()));
-    let key = source as *const dyn ByteSource as *const () as usize;
-
-    let mut states = registry
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    if let Some(state) = states.get(&key).and_then(Weak::upgrade) {
-        return state;
+impl ByteSourceState {
+    /// Creates fresh shared state for a byte source.
+    pub fn new() -> Self {
+        Self {
+            recv_lock: Mutex::new(()),
+            unusable: AtomicBool::new(false),
+        }
     }
+}
 
-    states.retain(|_, state| state.strong_count() > 0);
+impl Default for ByteSourceState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-    let state = Arc::new(SourceState {
-        recv_lock: Mutex::new(()),
-        unusable: AtomicBool::new(false),
-    });
+pub trait ByteSource: Send + Sync {
+    /// Reads bytes from the channel into the provided buffer.
+    /// Returns the number of bytes read, or None if the channel is closed.
+    fn read(&self, buf: &mut [u8]) -> Result<Option<usize>, StreamError>;
 
-    states.insert(key, Arc::downgrade(&state));
-    state
+    /// Returns the source-owned shared state used by `MessageStream`.
+    ///
+    /// Implementations that proxy another `ByteSource` must return the
+    /// underlying source's state so wrapper recreation and proxying cannot
+    /// bypass terminal stream state or receive serialization.
+    fn stream_state(&self) -> &ByteSourceState;
 }
 
 /// A framed message stream using `RawPayloadCodec` for payload encoding.
@@ -111,7 +112,7 @@ pub struct MessageStream<'a> {
     sink: &'a dyn ByteSink,
     source: &'a dyn ByteSource,
     codec: RawPayloadCodec,
-    source_state: Arc<SourceState>,
+    source_state: &'a ByteSourceState,
 }
 
 impl<'a> MessageStream<'a> {
@@ -121,7 +122,7 @@ impl<'a> MessageStream<'a> {
             sink,
             source,
             codec: RawPayloadCodec,
-            source_state: shared_source_state(source),
+            source_state: source.stream_state(),
         }
     }
 
@@ -249,6 +250,7 @@ mod tests {
                 TestReadEnd {
                     state: s2,
                     signal: c2,
+                    stream_state: ByteSourceState::new(),
                 },
             )
         }
@@ -262,6 +264,7 @@ mod tests {
     struct TestReadEnd {
         state: Arc<Mutex<TestState>>,
         signal: Arc<Condvar>,
+        stream_state: ByteSourceState,
     }
 
     impl ByteSink for TestWriteEnd {
@@ -304,6 +307,10 @@ mod tests {
             state.buffer.drain(..n);
             Ok(Some(n))
         }
+
+        fn stream_state(&self) -> &ByteSourceState {
+            &self.stream_state
+        }
     }
 
     #[test]
@@ -325,18 +332,20 @@ mod tests {
         let sink_arc = Arc::new(write_end);
         let source_arc = Arc::new(read_end);
 
-        let stream = MessageStream::new(&*sink_arc, &*source_arc);
+        {
+            let stream = MessageStream::new(&*sink_arc, &*source_arc);
 
-        let oversized_len = MAX_FRAME_LENGTH + 1;
-        sink_arc
-            .write(&(oversized_len as u32).to_be_bytes())
-            .unwrap();
+            let oversized_len = MAX_FRAME_LENGTH + 1;
+            sink_arc
+                .write(&(oversized_len as u32).to_be_bytes())
+                .unwrap();
 
-        let error = stream.recv().unwrap_err();
-        assert_eq!(
-            error,
-            StreamError::Decode("framed message exceeds the maximum length".into())
-        );
+            let error = stream.recv().unwrap_err();
+            assert_eq!(
+                error,
+                StreamError::Decode("framed message exceeds the maximum length".into())
+            );
+        }
 
         // A new wrapper over the same ByteSource must observe the same
         // terminal state rather than attempting to parse the rejected bytes.
@@ -378,6 +387,54 @@ mod tests {
         messages.sort();
 
         assert_eq!(messages, vec![b"first".to_vec(), b"second".to_vec()]);
+    }
+
+    struct TestReadProxy<'a> {
+        source: &'a TestReadEnd,
+    }
+
+    impl<'a> ByteSource for TestReadProxy<'a> {
+        fn read(&self, buf: &mut [u8]) -> Result<Option<usize>, StreamError> {
+            self.source.read(buf)
+        }
+
+        fn stream_state(&self) -> &ByteSourceState {
+            self.source.stream_state()
+        }
+    }
+
+    #[test]
+    fn message_stream_proxy_preserves_source_state() {
+        let channel = TestChannel::new();
+        let (write_end, read_end) = channel.split();
+        let sink_arc = Arc::new(write_end);
+        let source_arc = Arc::new(read_end);
+
+        {
+            let stream = MessageStream::new(&*sink_arc, &*source_arc);
+            let oversized_len = MAX_FRAME_LENGTH + 1;
+
+            sink_arc
+                .write(&(oversized_len as u32).to_be_bytes())
+                .unwrap();
+
+            let error = stream.recv().unwrap_err();
+            assert_eq!(
+                error,
+                StreamError::Decode("framed message exceeds the maximum length".into())
+            );
+        }
+
+        let proxy = TestReadProxy {
+            source: &source_arc,
+        };
+        let stream = MessageStream::new(&*sink_arc, &proxy);
+
+        let error = stream.recv().unwrap_err();
+        assert_eq!(
+            error,
+            StreamError::Decode("stream is unusable after an oversized frame".into())
+        );
     }
 
     #[test]

@@ -79,3 +79,64 @@ pub trait Transport: Send + Sync {
     /// Returns the list of engine instances this transport is connected to.
     fn connected_targets(&self) -> Vec<EngineId>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error;
+
+    #[test]
+    fn transport_errors_report_clear_messages() {
+        assert_eq!(
+            TransportError::Disconnected.to_string(),
+            "transport is not connected"
+        );
+        assert_eq!(
+            TransportError::Closed.to_string(),
+            "connection closed by peer"
+        );
+        assert_eq!(
+            TransportError::Encode("bad payload".into()).to_string(),
+            "encode error: bad payload"
+        );
+        assert_eq!(
+            TransportError::Decode("bad response".into()).to_string(),
+            "decode error: bad response"
+        );
+        assert_eq!(
+            TransportError::Cancelled.to_string(),
+            "operation was cancelled"
+        );
+        assert_eq!(
+            TransportError::DeadlineExpired.to_string(),
+            "operation deadline expired"
+        );
+        assert_eq!(TransportError::Timeout.to_string(), "operation timed out");
+        assert_eq!(
+            TransportError::Peer("peer failed".into()).to_string(),
+            "peer error: peer failed"
+        );
+    }
+
+    #[test]
+    fn transport_errors_identify_retryable_failures() {
+        assert!(TransportError::Timeout.is_retryable());
+        assert!(TransportError::Disconnected.is_retryable());
+        assert!(!TransportError::Closed.is_retryable());
+        assert!(!TransportError::Cancelled.is_retryable());
+        assert!(!TransportError::DeadlineExpired.is_retryable());
+        assert!(!TransportError::Peer("failed".into()).is_retryable());
+    }
+
+    #[test]
+    fn transport_errors_implement_error_trait() {
+        let error = TransportError::Timeout;
+        assert!(error.source().is_none());
+    }
+
+    #[test]
+    fn transport_result_alias_preserves_error_type() {
+        let success: TransportResult<UniversalResponse> = Err(TransportError::Closed);
+        assert!(matches!(success, Err(TransportError::Closed)));
+    }
+}

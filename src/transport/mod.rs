@@ -6,11 +6,13 @@
 //! in-memory reference implementation; all other transports live outside Core.
 
 pub mod connection;
+pub mod framing;
 pub mod in_memory;
 pub mod stream;
 pub mod transport_trait;
 
 pub use connection::{Connection, ConnectionState};
+pub use framing::MessageHeader;
 pub use in_memory::InMemoryTransport;
 pub use stream::{ByteSink, ByteSource, MessageStream, StreamError};
 pub use transport_trait::{BoxedFuture, Transport, TransportError, TransportResult};

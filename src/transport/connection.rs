@@ -49,3 +49,29 @@ pub trait Connection: Send + Sync {
     /// Closes the connection.
     fn close(&mut self);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_state_transitions_are_correct() {
+        assert!(!ConnectionState::Connecting.is_open());
+        assert!(ConnectionState::Open.is_open());
+        assert!(!ConnectionState::Closing.is_open());
+        assert!(!ConnectionState::Closed.is_open());
+    }
+
+    #[test]
+    fn connection_state_is_open_only_when_open() {
+        let open_state = ConnectionState::Open;
+        let connecting_state = ConnectionState::Connecting;
+        let closing_state = ConnectionState::Closing;
+        let closed_state = ConnectionState::Closed;
+
+        assert!(open_state.is_open());
+        assert!(!connecting_state.is_open());
+        assert!(!closing_state.is_open());
+        assert!(!closed_state.is_open());
+    }
+}

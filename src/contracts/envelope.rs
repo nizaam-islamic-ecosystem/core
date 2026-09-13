@@ -4,7 +4,7 @@ use crate::identity::MessageId;
 use crate::operation::OperationContext;
 
 /// The common identity, context, metadata, and opaque payload of a message.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MessageEnvelope {
     pub message_id: MessageId,
     pub operation_context: OperationContext,

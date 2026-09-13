@@ -12,7 +12,7 @@ pub use deadline::Deadline;
 pub use context::OperationContext;
 
 /// The stable platform identity of work that may span many messages and attempts.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Operation {
     pub id: OperationId,
     pub correlation_id: CorrelationId,

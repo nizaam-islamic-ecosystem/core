@@ -3,7 +3,7 @@
 use crate::identity::ArtifactId;
 
 /// The high level technical outcome of a Core operation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Status {
     Success,
     Failure,
@@ -12,14 +12,14 @@ pub enum Status {
 }
 
 /// Whether a technical failure may be retried by a policy that permits it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Retryability {
     Retryable,
     NonRetryable,
 }
 
 /// Compatibility result for a contract, schema, or version comparison.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Compatibility {
     Compatible,
     Incompatible,
@@ -45,7 +45,7 @@ impl ErrorReference {
 }
 
 /// Reference to an artifact without assigning domain meaning to its content.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ArtifactReference {
     pub artifact_id: ArtifactId,
     pub version: Option<String>,

@@ -3,7 +3,7 @@ use crate::contracts::envelope::MessageEnvelope;
 use crate::status::Status;
 
 /// A universal response envelope carrying an opaque capability payload.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UniversalResponse {
     pub envelope: MessageEnvelope,
     pub status: Status,

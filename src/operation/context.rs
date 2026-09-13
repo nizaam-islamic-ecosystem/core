@@ -3,7 +3,7 @@ use crate::identity::{AttemptId, NodeId};
 
 /// Per execution context derived from a trusted operation, never reconstructed
 /// from raw transport metadata by an engine.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OperationContext {
     pub operation: Operation,
     pub node_id: Option<NodeId>,

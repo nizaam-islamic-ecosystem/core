@@ -2,7 +2,7 @@ use crate::contracts::descriptor::Interaction;
 use crate::contracts::envelope::MessageEnvelope;
 
 /// A universal request envelope carrying an opaque capability payload.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UniversalRequest {
     pub envelope: MessageEnvelope,
 }

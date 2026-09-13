@@ -2,7 +2,7 @@ use crate::contracts::descriptor::{ContractDescriptor, Version};
 use crate::identity::{CapabilityId, EngineId, EngineInstanceId};
 
 /// The communicating engine identities associated with a message.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Participants {
     pub sender: EngineId,
     pub sender_instance: Option<EngineInstanceId>,
@@ -32,7 +32,7 @@ impl Participants {
 }
 
 /// Declares non semantic requirements for handling a message.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RequirementsMetadata {
     pub required_capability: Option<CapabilityId>,
     pub minimum_contract_version: Option<Version>,
@@ -58,7 +58,7 @@ impl RequirementsMetadata {
 }
 
 /// Declares execution hints without deciding execution policy.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionMetadata {
     pub priority: Option<u32>,
     pub idempotent: bool,
@@ -84,7 +84,7 @@ impl ExecutionMetadata {
 }
 
 /// Metadata shared by requests, responses, and messages.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ContractMetadata {
     pub descriptor: ContractDescriptor,
     pub participants: Participants,

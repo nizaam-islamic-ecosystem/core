@@ -144,6 +144,35 @@ impl ErrorDefinition {
     }
 }
 
+/// A technical transition failed because the requested destination is not
+/// valid from the current state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvalidTransition {
+    pub from: String,
+    pub to: String,
+}
+
+impl InvalidTransition {
+    pub fn new(from: impl Into<String>, to: impl Into<String>) -> Self {
+        Self {
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+}
+
+impl fmt::Display for InvalidTransition {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "invalid transition from '{}' to '{}'",
+            self.from, self.to
+        )
+    }
+}
+
+impl std::error::Error for InvalidTransition {}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InvalidErrorCode {
     Malformed,

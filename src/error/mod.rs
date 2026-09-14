@@ -10,7 +10,7 @@ mod validation;
 pub use catalog::{CatalogError, ErrorCatalog};
 pub use definition::{
     ErrorClass, ErrorCode, ErrorDefinition, ErrorOwner, InvalidDefinition, InvalidErrorCode,
-    InvalidErrorOwner, Severity,
+    InvalidErrorOwner, InvalidTransition, Severity,
 };
 pub use event::{DiagnosticDetail, ErrorContext, ErrorEvent, GlobalError};
 pub use reference::ErrorReference;

@@ -32,6 +32,7 @@ impl ExecutionPipeline {
             check_context(context)?;
             stage(context)?;
         }
+
         check_context(context)
     }
 }
@@ -56,14 +57,17 @@ mod tests {
     #[test]
     fn empty_pipeline_succeeds() {
         let pipeline = ExecutionPipeline::new();
+
         assert!(pipeline.run(&context()).is_ok());
     }
 
     #[test]
     fn pipeline_runs_stages_in_order() {
         let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
         let first_order = order.clone();
         let second_order = order.clone();
+
         let pipeline = ExecutionPipeline::new()
             .with_stage(move |_| {
                 first_order.lock().unwrap().push(1);
@@ -83,6 +87,7 @@ mod tests {
     fn pipeline_stops_before_cancelled_stage() {
         let context = context();
         context.cancellation().cancel();
+
         let pipeline = ExecutionPipeline::new().with_stage(|_| panic!("stage ran"));
 
         assert_eq!(pipeline.run(&context), Err(PipelineError::Cancelled));
@@ -91,6 +96,7 @@ mod tests {
     #[test]
     fn pipeline_short_circuits_when_deadline_is_expired() {
         let context = context().with_deadline(Deadline::from_now(Duration::ZERO).unwrap());
+
         let pipeline = ExecutionPipeline::new().with_stage(|_| panic!("stage ran"));
 
         assert_eq!(pipeline.run(&context), Err(PipelineError::DeadlineExpired));
@@ -109,8 +115,10 @@ mod tests {
     fn pipeline_checks_context_between_stages() {
         let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let first_order = order.clone();
+
         let context = context();
         let context_for_stage = context.cancellation().clone();
+
         let pipeline = ExecutionPipeline::new()
             .with_stage(move |_| {
                 first_order.lock().unwrap().push(1);
@@ -123,11 +131,48 @@ mod tests {
             .with_stage(|_| panic!("stage ran"));
 
         assert_eq!(pipeline.run(&context), Err(PipelineError::Cancelled));
+
         assert_eq!(*order.lock().unwrap(), vec![1]);
     }
 
     #[test]
     fn pipeline_error_variants_are_distinct() {
         assert_ne!(PipelineError::Cancelled, PipelineError::DeadlineExpired);
+    }
+
+    #[test]
+    fn pipeline_rejects_when_deadline_expired_before_first_stage() {
+        let context = context().with_deadline(Deadline::from_now(Duration::ZERO).unwrap());
+
+        let pipeline = ExecutionPipeline::new().with_stage(|_| panic!("stage ran"));
+
+        assert_eq!(pipeline.run(&context), Err(PipelineError::DeadlineExpired));
+    }
+
+    #[test]
+    fn pipeline_allows_multiple_stages_after_context_check() {
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let first_order = order.clone();
+        let second_order = order.clone();
+        let third_order = order.clone();
+
+        let pipeline = ExecutionPipeline::new()
+            .with_stage(move |_| {
+                first_order.lock().unwrap().push(1);
+                Ok(())
+            })
+            .with_stage(move |_| {
+                second_order.lock().unwrap().push(2);
+                Ok(())
+            })
+            .with_stage(move |_| {
+                third_order.lock().unwrap().push(3);
+                Ok(())
+            });
+
+        pipeline.run(&context()).unwrap();
+
+        assert_eq!(*order.lock().unwrap(), vec![1, 2, 3]);
     }
 }

@@ -23,7 +23,7 @@ Implementation began with an existing Cargo library skeleton at the repository r
 | 4  | Logging System foundation                    | 4     | verified    |
 | 5  | Context execution infrastructure             | 5     | verified    |
 | 6  | Capability System                            | 6     | verified    |
-| 7  | Transport and universal client/server        | 7     | verified |
+| 7  | Transport and universal client/server        | 7     | verified    |
 | 8  | Engine Runtime                               | 8     | in progress |
 | 9  | Middleware and Security                      | 9     | not started |
 | 10 | Artifact and Provenance                      | 10    | not started |
@@ -843,7 +843,7 @@ Implemented the public `capability` module and exposed its surface through the p
 **Tests**
 
 * `tests/communication.rs`
-* `tests/contracts/rs`
+* `tests/contracts.rs`
 * `tests/runtime.rs`
 
 ### Boundary

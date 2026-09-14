@@ -15,6 +15,12 @@ use crate::{
 
 pub use crate::operation::{CancellationToken, Deadline};
 
+pub use background::BackgroundTasks;
+pub use concurrency::TaskScope;
+pub use engine::EngineRuntime;
+pub use lifecycle::{Lifecycle, LifecycleState};
+pub use pipeline::{ExecutionPipeline, PipelineError, PipelineStage};
+
 /// Shared context passed to capability and downstream execution.
 #[derive(Clone, Debug)]
 pub struct EngineContext {

@@ -98,7 +98,7 @@ impl ExecutionPipeline {
     where
         F: FnOnce(&EngineContext, &mut UniversalRequest) -> Result<UniversalResponse, E>,
     {
-        check_context(context).map_err(RequestPipelineError::Context)?;
+        self.run(context).map_err(RequestPipelineError::Context)?;
 
         if self.middleware.is_empty() {
             return Err(RequestPipelineError::Configuration(
@@ -106,9 +106,11 @@ impl ExecutionPipeline {
             ));
         }
 
-        self.middleware
-            .execute(context, request, downstream)
-            .map_err(RequestPipelineError::Middleware)
+        match self.middleware.execute(context, request, downstream) {
+            Ok(response) => Ok(response),
+            Err(MiddlewareChainError::Context(error)) => Err(RequestPipelineError::Context(error)),
+            Err(error) => Err(RequestPipelineError::Middleware(error)),
+        }
     }
 }
 
@@ -318,6 +320,38 @@ mod tests {
     }
 
     #[test]
+    fn request_pipeline_executes_registered_stages_before_middleware() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+
+        let stage_events = Arc::clone(&events);
+
+        let middleware_events = Arc::clone(&events);
+
+        let pipeline = ExecutionPipeline::new()
+            .with_stage(move |_| {
+                stage_events.lock().unwrap().push("stage");
+                Ok(())
+            })
+            .with_middleware(RecordingMiddleware {
+                events: middleware_events,
+            });
+
+        let mut context = context();
+        let mut request = request();
+
+        let result = pipeline.run_request(&mut context, &mut request, |_context, _request| {
+            events.lock().unwrap().push("downstream");
+            Ok::<_, &'static str>(response())
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["stage", "request", "downstream", "response"]
+        );
+    }
+
+    #[test]
     fn pipeline_allows_multiple_stages_after_context_check() {
         let order = Arc::new(Mutex::new(Vec::new()));
 
@@ -474,6 +508,37 @@ mod tests {
             ))
         );
         assert!(!downstream_called);
+    }
+
+    #[test]
+    fn request_pipeline_preserves_cancellation_after_middleware() {
+        #[derive(Debug)]
+        struct CancellingMiddleware;
+
+        impl Middleware for CancellingMiddleware {
+            fn on_request(
+                &self,
+                context: &mut EngineContext,
+                _request: &mut UniversalRequest,
+            ) -> MiddlewareResult {
+                context.cancellation().cancel();
+                MiddlewareResult::Continue
+            }
+        }
+
+        let pipeline = ExecutionPipeline::new().with_middleware(CancellingMiddleware);
+
+        let mut context = context();
+        let mut request = request();
+
+        let result = pipeline.run_request(&mut context, &mut request, |_context, _request| {
+            Ok::<_, &'static str>(response())
+        });
+
+        assert_eq!(
+            result,
+            Err(RequestPipelineError::Context(PipelineError::Cancelled))
+        );
     }
 
     #[test]

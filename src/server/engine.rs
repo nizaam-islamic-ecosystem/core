@@ -140,12 +140,20 @@ pub fn handle_request(
         return Ok(failure_response(request));
     }
 
+    let admitted_capability = request.envelope.metadata.descriptor.capability_id.clone();
+
     let mut context = EngineContext::new(request.envelope.operation_context.clone());
 
     match server
         .pipeline
-        .run_request(&mut context, &mut request, |_, request| {
-            let capability_id = request.envelope.metadata.descriptor.capability_id.clone();
+        .run_request(&mut context, &mut request, |context, request| {
+            if context.security().is_none()
+                || request.envelope.metadata.descriptor.capability_id != admitted_capability
+            {
+                return Ok::<UniversalResponse, ()>(failure_response(request.clone()));
+            }
+
+            let capability_id = admitted_capability.clone();
             let handler = {
                 let handlers_guard = server.handlers.lock().unwrap();
                 handlers_guard.get(&capability_id).cloned()
@@ -218,6 +226,7 @@ mod tests {
     use crate::middleware::stages::{Middleware, MiddlewareResult};
     use crate::operation::{Operation, OperationContext};
     use crate::runtime::EngineContext;
+    use crate::security::{PrincipalId, PrincipalIdentity, PrincipalType, SecurityContext};
     use crate::status::Status;
 
     #[derive(Debug)]
@@ -226,9 +235,18 @@ mod tests {
     impl Middleware for AdmissionMiddleware {
         fn on_request(
             &self,
-            _context: &mut EngineContext,
+            context: &mut EngineContext,
             _request: &mut UniversalRequest,
         ) -> MiddlewareResult {
+            let principal = PrincipalIdentity::new(
+                PrincipalType::Service,
+                PrincipalId::new("test-admission-service").unwrap(),
+            );
+
+            *context = context
+                .clone()
+                .with_security(SecurityContext::new(principal, None));
+
             MiddlewareResult::Continue
         }
     }
@@ -312,6 +330,80 @@ mod tests {
         let response = handle_request(&server, request).unwrap();
 
         assert_eq!(response.status, Status::Success);
+    }
+
+    #[test]
+    fn server_rejects_request_when_middleware_does_not_establish_security_context() {
+        #[derive(Debug)]
+        struct PassThroughMiddleware;
+
+        impl Middleware for PassThroughMiddleware {
+            fn on_request(
+                &self,
+                _context: &mut EngineContext,
+                _request: &mut UniversalRequest,
+            ) -> MiddlewareResult {
+                MiddlewareResult::Continue
+            }
+        }
+
+        let mut server = EngineServer::new(EngineId::new("server").unwrap())
+            .with_pipeline(ExecutionPipeline::new().with_middleware(PassThroughMiddleware));
+        let target = EngineId::new("server").unwrap();
+
+        server.register_handler(
+            CapabilityId::new("test-cap").unwrap(),
+            Arc::new(|_| panic!("unauthenticated request reached handler")),
+        );
+        server.start();
+
+        let request = make_request(&target, "msg-no-security");
+        let response = handle_request(&server, request).unwrap();
+
+        assert_eq!(response.status, Status::Failure);
+    }
+
+    #[test]
+    fn server_rejects_capability_mutation_after_middleware() {
+        #[derive(Debug)]
+        struct MutatingMiddleware;
+
+        impl Middleware for MutatingMiddleware {
+            fn on_request(
+                &self,
+                context: &mut EngineContext,
+                request: &mut UniversalRequest,
+            ) -> MiddlewareResult {
+                let principal = PrincipalIdentity::new(
+                    PrincipalType::Service,
+                    PrincipalId::new("test-mutating-service").unwrap(),
+                );
+
+                *context = context
+                    .clone()
+                    .with_security(SecurityContext::new(principal, None));
+
+                request.envelope.metadata.descriptor.capability_id =
+                    CapabilityId::new("mutated-capability").unwrap();
+
+                MiddlewareResult::Continue
+            }
+        }
+
+        let mut server = EngineServer::new(EngineId::new("server").unwrap())
+            .with_pipeline(ExecutionPipeline::new().with_middleware(MutatingMiddleware));
+        let target = EngineId::new("server").unwrap();
+
+        server.register_handler(
+            CapabilityId::new("test-cap").unwrap(),
+            Arc::new(|_| panic!("capability mutation bypassed authorization")),
+        );
+        server.start();
+
+        let request = make_request(&target, "msg-mutated-capability");
+        let response = handle_request(&server, request).unwrap();
+
+        assert_eq!(response.status, Status::Failure);
     }
 
     #[test]

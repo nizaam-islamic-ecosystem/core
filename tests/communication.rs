@@ -26,9 +26,13 @@ use nizaam_core::identity::{
     AttemptId, CapabilityId, ContractId, CorrelationId, EngineId, EngineInstanceId, MessageId,
     NodeId, OperationId, PlanId,
 };
-use nizaam_core::middleware::stages::{Middleware, MiddlewareResult};
 use nizaam_core::operation::{Operation, OperationContext};
 use nizaam_core::runtime::{EngineContext, ExecutionPipeline};
+use nizaam_core::security::{
+    AuthenticationError, AuthenticationRequest, Authenticator, AuthorizationDecision,
+    AuthorizationError, AuthorizationRequest, Authorizer, CredentialExtractor, PrincipalId,
+    PrincipalIdentity, PrincipalType, SecurityMiddleware,
+};
 use nizaam_core::server::{EngineServer, RequestHandler, ServerState, handle_request};
 use nizaam_core::status::Status;
 use nizaam_core::transport::stream::{ByteSourceState, MAX_FRAME_LENGTH};
@@ -159,23 +163,50 @@ fn response_for(request: UniversalRequest, status: Status, payload: Vec<u8>) -> 
 // Engine server helpers
 // ---------------------------------------------------------------------------
 
-/// Explicit mandatory middleware boundary used by the Phase 7 transport
+/// Minimal provider-neutral security components used by the Phase 7 transport
 /// integration tests now that the engine server enforces Phase 9 admission.
 #[derive(Debug)]
-struct AdmissionMiddleware;
+struct TestAuthenticator;
 
-impl Middleware for AdmissionMiddleware {
-    fn on_request(
+impl Authenticator for TestAuthenticator {
+    fn authenticate(
         &self,
-        _context: &mut EngineContext,
-        _request: &mut UniversalRequest,
-    ) -> MiddlewareResult {
-        MiddlewareResult::Continue
+        _request: &AuthenticationRequest<'_>,
+    ) -> Result<PrincipalIdentity, AuthenticationError> {
+        Ok(PrincipalIdentity::new(
+            PrincipalType::Engine,
+            PrincipalId::new("communication-test-engine").unwrap(),
+        ))
+    }
+}
+
+#[derive(Debug)]
+struct TestAuthorizer;
+
+impl Authorizer for TestAuthorizer {
+    fn authorize(
+        &self,
+        _request: &AuthorizationRequest<'_>,
+    ) -> Result<AuthorizationDecision, AuthorizationError> {
+        Ok(AuthorizationDecision::Allow)
+    }
+}
+
+#[derive(Debug)]
+struct TestCredentialExtractor;
+
+impl CredentialExtractor for TestCredentialExtractor {
+    fn extract(&self, _context: &EngineContext, _request: &UniversalRequest) -> Option<Vec<u8>> {
+        Some(vec![1])
     }
 }
 
 fn integration_pipeline() -> ExecutionPipeline {
-    ExecutionPipeline::new().with_middleware(AdmissionMiddleware)
+    ExecutionPipeline::new().with_middleware(SecurityMiddleware::new(
+        TestAuthenticator,
+        TestAuthorizer,
+        TestCredentialExtractor,
+    ))
 }
 
 /// A handler that echoes the request payload back with the given status.

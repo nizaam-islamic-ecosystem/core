@@ -22,6 +22,9 @@ use super::stages::{Middleware, MiddlewareError, MiddlewareRejection, Middleware
 /// category when constructing the final response.
 #[derive(Debug, PartialEq)]
 pub enum MiddlewareChainError<E> {
+    /// Request execution context became invalid before downstream execution.
+    Context(crate::runtime::PipelineError),
+
     /// Middleware intentionally rejected the request.
     Rejected(MiddlewareRejection),
 
@@ -122,6 +125,8 @@ impl MiddlewareChain {
             }
         }
 
+        crate::runtime::check_context(context).map_err(MiddlewareChainError::Context)?;
+
         let mut response =
             downstream(context, request).map_err(MiddlewareChainError::Downstream)?;
 
@@ -157,6 +162,7 @@ mod tests {
         },
         identity::{CapabilityId, ContractId, CorrelationId, EngineId, MessageId, OperationId},
         operation::{Operation, OperationContext},
+        runtime::Deadline,
         status::Status,
     };
     use std::sync::{Arc, Mutex};
@@ -651,6 +657,80 @@ mod tests {
         );
 
         assert_eq!(*events.lock().unwrap(), vec!["third", "second",]);
+    }
+
+    #[test]
+    fn invalid_context_after_request_middleware_stops_downstream() {
+        #[derive(Debug)]
+        struct CancellingMiddleware;
+
+        impl Middleware for CancellingMiddleware {
+            fn on_request(
+                &self,
+                context: &mut EngineContext,
+                _request: &mut UniversalRequest,
+            ) -> MiddlewareResult {
+                context.cancellation().cancel();
+                MiddlewareResult::Continue
+            }
+        }
+
+        let chain = MiddlewareChain::with_stage(CancellingMiddleware);
+
+        let mut request = request();
+        let mut context = context();
+        let mut downstream_called = false;
+
+        let result = chain.execute(&mut context, &mut request, |_context, _request| {
+            downstream_called = true;
+            Ok::<_, &'static str>(response())
+        });
+
+        assert_eq!(
+            result,
+            Err(MiddlewareChainError::Context(
+                crate::runtime::PipelineError::Cancelled
+            ))
+        );
+        assert!(!downstream_called);
+    }
+
+    #[test]
+    fn expired_context_after_request_middleware_stops_downstream() {
+        #[derive(Debug)]
+        struct ExpiringMiddleware;
+
+        impl Middleware for ExpiringMiddleware {
+            fn on_request(
+                &self,
+                context: &mut EngineContext,
+                _request: &mut UniversalRequest,
+            ) -> MiddlewareResult {
+                *context = context
+                    .clone()
+                    .with_deadline(Deadline::from_now(std::time::Duration::ZERO).unwrap());
+                MiddlewareResult::Continue
+            }
+        }
+
+        let chain = MiddlewareChain::with_stage(ExpiringMiddleware);
+
+        let mut request = request();
+        let mut context = context();
+        let mut downstream_called = false;
+
+        let result = chain.execute(&mut context, &mut request, |_context, _request| {
+            downstream_called = true;
+            Ok::<_, &'static str>(response())
+        });
+
+        assert_eq!(
+            result,
+            Err(MiddlewareChainError::Context(
+                crate::runtime::PipelineError::DeadlineExpired
+            ))
+        );
+        assert!(!downstream_called);
     }
 
     #[test]

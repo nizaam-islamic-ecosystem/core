@@ -18,6 +18,7 @@ pub struct EngineRuntime {
     lifecycle: Mutex<Lifecycle>,
     shutdown: CancellationToken,
     background: BackgroundTasks,
+    shutdown_lock: Mutex<bool>,
 }
 
 impl Default for EngineRuntime {
@@ -35,6 +36,7 @@ impl EngineRuntime {
             lifecycle: Mutex::new(Lifecycle::new()),
             background: BackgroundTasks::new(shutdown.clone()),
             shutdown,
+            shutdown_lock: Mutex::new(false),
         }
     }
 
@@ -71,9 +73,24 @@ impl EngineRuntime {
     ///
     /// `Stopped` is terminal and repeated shutdown calls are idempotent.
     pub fn shutdown(&self) -> Result<(), InvalidTransition> {
+        // Serialize the complete shutdown transaction so concurrent callers
+        // cannot observe an intermediate lifecycle state and race the
+        // Draining -> Stopped transition or background cleanup.
+        let mut shutdown_complete = self.shutdown_lock.lock().expect("shutdown lock poisoned");
+
+        if *shutdown_complete {
+            return Ok(());
+        }
+
         let state = self.state();
 
+        // `Stopped` can also be reached through the public lifecycle API. In
+        // that case runtime-owned background work may still be active, so
+        // shutdown must perform cleanup before treating the runtime as fully
+        // shut down.
         if state == LifecycleState::Stopped {
+            self.background.shutdown();
+            *shutdown_complete = true;
             return Ok(());
         }
 
@@ -87,8 +104,11 @@ impl EngineRuntime {
 
         // `STOPPED` is reached only after runtime-owned background work has
         // been signalled and joined.
-        self.transition(LifecycleState::Stopped)?;
+        if self.state() != LifecycleState::Stopped {
+            self.transition(LifecycleState::Stopped)?;
+        }
 
+        *shutdown_complete = true;
         Ok(())
     }
 }
@@ -186,6 +206,97 @@ mod tests {
 
         assert_eq!(runtime.state(), LifecycleState::Stopped);
         assert!(runtime.shutdown_token().is_cancelled());
+    }
+
+    #[test]
+    fn shutdown_cleans_up_background_work_when_already_stopped() {
+        let stopped = Arc::new(Mutex::new(false));
+        let stopped_by_task = Arc::clone(&stopped);
+        let runtime = serving_runtime();
+
+        runtime
+            .background_tasks()
+            .spawn(move |cancellation| {
+                while !cancellation.is_cancelled() {
+                    thread::yield_now();
+                }
+
+                *stopped_by_task.lock().unwrap() = true;
+            })
+            .unwrap();
+
+        runtime.transition(LifecycleState::Draining).unwrap();
+        runtime.transition(LifecycleState::Stopped).unwrap();
+
+        runtime.shutdown().unwrap();
+
+        assert!(*stopped.lock().unwrap());
+        assert!(runtime.shutdown_token().is_cancelled());
+        assert_eq!(runtime.state(), LifecycleState::Stopped);
+    }
+
+    #[test]
+    fn concurrent_shutdown_callers_serialize_and_wait_for_cleanup() {
+        use std::sync::mpsc;
+
+        let runtime = Arc::new(serving_runtime());
+        let (cancellation_seen_tx, cancellation_seen_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (first_result_tx, first_result_rx) = mpsc::channel();
+        let (second_result_tx, second_result_rx) = mpsc::channel();
+
+        runtime
+            .background_tasks()
+            .spawn(move |cancellation| {
+                while !cancellation.is_cancelled() {
+                    thread::yield_now();
+                }
+
+                cancellation_seen_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+            .unwrap();
+
+        let first_runtime = Arc::clone(&runtime);
+        let first = thread::spawn(move || {
+            first_result_tx.send(first_runtime.shutdown()).unwrap();
+        });
+
+        cancellation_seen_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first shutdown did not cancel background work");
+
+        let second_runtime = Arc::clone(&runtime);
+        let second = thread::spawn(move || {
+            second_result_tx.send(second_runtime.shutdown()).unwrap();
+        });
+
+        assert!(
+            second_result_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "second shutdown returned before the first shutdown completed"
+        );
+        assert_eq!(runtime.state(), LifecycleState::Draining);
+
+        release_tx.send(()).unwrap();
+
+        assert!(
+            first_result_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .is_ok()
+        );
+        assert!(
+            second_result_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .is_ok()
+        );
+        assert_eq!(runtime.state(), LifecycleState::Stopped);
+
+        first.join().unwrap();
+        second.join().unwrap();
     }
 
     #[test]

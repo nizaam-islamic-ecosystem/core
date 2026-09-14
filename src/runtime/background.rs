@@ -1,4 +1,11 @@
-use std::{sync::Mutex, thread::JoinHandle};
+use std::{
+    sync::{Arc, Mutex},
+    thread::JoinHandle,
+};
+
+thread_local! {
+    static BACKGROUND_OWNER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
 
 use super::CancellationToken;
 
@@ -8,6 +15,7 @@ use super::CancellationToken;
 pub struct BackgroundTasks {
     cancellation: CancellationToken,
     state: Mutex<BackgroundState>,
+    owner: Arc<()>,
 }
 
 #[derive(Debug, Default)]
@@ -24,6 +32,7 @@ impl BackgroundTasks {
         Self {
             cancellation,
             state: Mutex::new(BackgroundState::default()),
+            owner: Arc::new(()),
         }
     }
 
@@ -48,11 +57,38 @@ impl BackgroundTasks {
         }
 
         let token = self.cancellation.child_token();
-        let handle = std::thread::spawn(move || task(token));
+        let owner = Arc::clone(&self.owner);
+        let handle = std::thread::spawn(move || {
+            let owner_id = Arc::as_ptr(&owner) as usize;
+            BACKGROUND_OWNER.with(|current| {
+                let previous = current.replace(Some(owner_id));
+                task(token);
+                current.set(previous);
+            });
+        });
 
         state.handles.push(handle);
 
         Ok(())
+    }
+
+    /// Returns whether the current thread is one of this collection's background tasks.
+    pub(crate) fn is_current_task(&self) -> bool {
+        let owner_id = Arc::as_ptr(&self.owner) as usize;
+        BACKGROUND_OWNER.with(|current| current.get() == Some(owner_id))
+    }
+
+    /// Signals shutdown without joining tasks.
+    ///
+    /// This is used only for reentrant shutdown from a runtime-owned task. The
+    /// task must return so an external shutdown coordinator can join it later.
+    pub(crate) fn begin_shutdown(&self) {
+        let mut state = self.state.lock().expect("background task lock poisoned");
+        if state.closed {
+            return;
+        }
+        state.closed = true;
+        self.cancellation.cancel();
     }
 
     /// Signals all owned background tasks and waits for them to finish.
@@ -64,18 +100,18 @@ impl BackgroundTasks {
     /// If one or more tasks panic, all owned tasks are still joined before
     /// the first panic payload is resumed.
     pub fn shutdown(&self) {
+        if self.is_current_task() {
+            self.begin_shutdown();
+            return;
+        }
+
         let handles = {
             let mut state = self.state.lock().expect("background task lock poisoned");
 
-            if state.closed {
-                return;
+            if !state.closed {
+                state.closed = true;
+                self.cancellation.cancel();
             }
-
-            state.closed = true;
-
-            // Signal cancellation before taking the handles so every owned
-            // task observes shutdown before we wait for it.
-            self.cancellation.cancel();
 
             std::mem::take(&mut state.handles)
         };

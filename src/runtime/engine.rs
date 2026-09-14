@@ -73,6 +73,18 @@ impl EngineRuntime {
     ///
     /// `Stopped` is terminal and repeated shutdown calls are idempotent.
     pub fn shutdown(&self) -> Result<(), InvalidTransition> {
+        // A runtime-owned task cannot synchronously join itself. Reentrant
+        // shutdown therefore initiates draining and cancellation, then lets
+        // the task return so a later/external shutdown caller can finish the
+        // join and Stopped transition.
+        if self.background.is_current_task() {
+            if self.state() != LifecycleState::Draining {
+                self.transition(LifecycleState::Draining)?;
+            }
+            self.background.begin_shutdown();
+            return Ok(());
+        }
+
         // Serialize the complete shutdown transaction so concurrent callers
         // cannot observe an intermediate lifecycle state and race the
         // Draining -> Stopped transition or background cleanup.
@@ -297,6 +309,28 @@ mod tests {
 
         first.join().unwrap();
         second.join().unwrap();
+    }
+
+    #[test]
+    fn reentrant_shutdown_from_background_task_does_not_deadlock() {
+        let runtime = Arc::new(serving_runtime());
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        let task_runtime = Arc::clone(&runtime);
+        runtime
+            .background_tasks()
+            .spawn(move |_| {
+                task_runtime.shutdown().unwrap();
+                done_tx.send(()).unwrap();
+            })
+            .unwrap();
+
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("background task deadlocked during reentrant shutdown");
+
+        runtime.shutdown().unwrap();
+        assert_eq!(runtime.state(), LifecycleState::Stopped);
     }
 
     #[test]

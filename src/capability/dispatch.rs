@@ -116,6 +116,7 @@ mod tests {
             OperationId::new("op-1").unwrap(),
             CorrelationId::new("corr-1").unwrap(),
         );
+
         EngineContext::new(OperationContext::new(operation))
     }
 
@@ -140,6 +141,7 @@ mod tests {
             "Test Handler",
         )
         .unwrap();
+
         registry.register(def, make_handler()).unwrap();
     }
 
@@ -153,11 +155,51 @@ mod tests {
         let invocation = make_invocation(cap_id);
 
         let result = dispatch(&registry, &context, &invocation);
+
         assert!(result.is_ok());
 
         let outcome = result.into_outcome().unwrap();
         let bytes = outcome.into_bytes();
+
         assert_eq!(bytes, b"handler response");
+    }
+
+    #[test]
+    fn dispatch_passes_the_request_context_to_handler() {
+        let registry = CapabilityRegistry::new();
+        let cap_id = CapabilityId::new("context.cap").unwrap();
+
+        let observed_operation_id = Arc::new(std::sync::Mutex::new(None));
+        let observed_operation_id_by_handler = Arc::clone(&observed_operation_id);
+
+        let handler: Arc<dyn CapabilityHandler> =
+            arc_handler(move |context: &EngineContext, _: &CapabilityInvocation| {
+                *observed_operation_id_by_handler.lock().unwrap() =
+                    Some(context.operation().operation.id.clone());
+
+                Ok(CapabilityOutcome::new(b"context received".to_vec()))
+            });
+
+        let definition = CapabilityDefinition::new(
+            cap_id.clone(),
+            EngineId::new("test.engine").unwrap(),
+            "Context Handler",
+        )
+        .unwrap();
+
+        registry.register(definition, handler).unwrap();
+
+        let context = make_context();
+        let expected_operation_id = context.operation().operation.id.clone();
+        let invocation = make_invocation(cap_id);
+
+        let result = dispatch(&registry, &context, &invocation);
+
+        assert!(result.is_ok());
+        assert_eq!(
+            *observed_operation_id.lock().unwrap(),
+            Some(expected_operation_id)
+        );
     }
 
     #[test]
@@ -167,6 +209,7 @@ mod tests {
         let invocation = make_invocation(CapabilityId::new("missing").unwrap());
 
         let result = dispatch(&registry, &context, &invocation);
+
         assert!(result.is_err());
         assert!(matches!(result.as_error(), Some(CapabilityError::Unknown)));
     }
@@ -182,6 +225,7 @@ mod tests {
 
         let invocation = make_invocation(cap_id);
         let result = dispatch(&registry, &context, &invocation);
+
         assert!(matches!(
             result.as_error(),
             Some(CapabilityError::Cancelled)
@@ -198,6 +242,7 @@ mod tests {
 
         let invocation = make_invocation(cap_id);
         let result = dispatch(&registry, &context, &invocation);
+
         assert!(matches!(
             result.as_error(),
             Some(CapabilityError::DeadlineExpired)
@@ -207,7 +252,7 @@ mod tests {
     #[test]
     fn dispatch_propagates_handler_errors() {
         let failing_handler: Arc<dyn CapabilityHandler> =
-            arc_handler(|__: &EngineContext, _: &CapabilityInvocation| {
+            arc_handler(|_: &EngineContext, _: &CapabilityInvocation| {
                 Err(CapabilityError::HandlerFailed("handler crashed".into()))
             });
 
@@ -218,12 +263,14 @@ mod tests {
             "Failing Handler",
         )
         .unwrap();
+
         registry.register(def, failing_handler).unwrap();
 
         let context = make_context();
         let invocation = make_invocation(CapabilityId::new("failing.cap").unwrap());
 
         let result = dispatch(&registry, &context, &invocation);
+
         assert!(result.is_err());
         assert!(matches!(
             result.as_error(),
@@ -279,6 +326,7 @@ mod tests {
         assert!(result.as_error().is_none());
 
         let extracted = result.into_outcome();
+
         assert!(extracted.is_some());
         assert_eq!(extracted.unwrap().into_bytes(), b"accessor test");
     }
@@ -293,6 +341,7 @@ mod tests {
         assert!(result.as_error().is_some());
 
         let extracted = result.into_error();
+
         assert!(extracted.is_some());
         assert!(matches!(extracted.unwrap(), CapabilityError::Unknown));
     }

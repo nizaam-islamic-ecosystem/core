@@ -373,18 +373,14 @@ mod tests {
         });
 
         assert!(
-            second_rx
-                .recv_timeout(Duration::from_millis(50))
-                .is_err(),
+            second_rx.recv_timeout(Duration::from_millis(50)).is_err(),
             "second shutdown returned before cleanup completed"
         );
 
         release_tx.send(()).unwrap();
 
         first_rx.recv_timeout(Duration::from_millis(50)).unwrap();
-        second
-            .join()
-            .expect("second shutdown thread panicked");
+        second.join().expect("second shutdown thread panicked");
         first.join().expect("first shutdown thread panicked");
     }
 }

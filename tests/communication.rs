@@ -26,7 +26,9 @@ use nizaam_core::identity::{
     AttemptId, CapabilityId, ContractId, CorrelationId, EngineId, EngineInstanceId, MessageId,
     NodeId, OperationId, PlanId,
 };
+use nizaam_core::middleware::stages::{Middleware, MiddlewareResult};
 use nizaam_core::operation::{Operation, OperationContext};
+use nizaam_core::runtime::{EngineContext, ExecutionPipeline};
 use nizaam_core::server::{EngineServer, RequestHandler, ServerState, handle_request};
 use nizaam_core::status::Status;
 use nizaam_core::transport::stream::{ByteSourceState, MAX_FRAME_LENGTH};
@@ -157,6 +159,25 @@ fn response_for(request: UniversalRequest, status: Status, payload: Vec<u8>) -> 
 // Engine server helpers
 // ---------------------------------------------------------------------------
 
+/// Explicit mandatory middleware boundary used by the Phase 7 transport
+/// integration tests now that the engine server enforces Phase 9 admission.
+#[derive(Debug)]
+struct AdmissionMiddleware;
+
+impl Middleware for AdmissionMiddleware {
+    fn on_request(
+        &self,
+        _context: &mut EngineContext,
+        _request: &mut UniversalRequest,
+    ) -> MiddlewareResult {
+        MiddlewareResult::Continue
+    }
+}
+
+fn integration_pipeline() -> ExecutionPipeline {
+    ExecutionPipeline::new().with_middleware(AdmissionMiddleware)
+}
+
 /// A handler that echoes the request payload back with the given status.
 fn echo_handler(status: Status) -> RequestHandler {
     Arc::new(move |request: UniversalRequest| {
@@ -180,7 +201,7 @@ fn serving_engine(
     capability: &str,
     handler: RequestHandler,
 ) -> Arc<Mutex<EngineServer>> {
-    let mut server = EngineServer::new(engine.clone());
+    let mut server = EngineServer::new(engine.clone()).with_pipeline(integration_pipeline());
     server.register_handler(CapabilityId::new(capability).unwrap(), handler);
     server.start();
     Arc::new(Mutex::new(server))

@@ -22,12 +22,15 @@ pub use lifecycle::{Lifecycle, LifecycleState};
 pub use pipeline::{ExecutionPipeline, PipelineError, PipelineStage};
 
 /// Shared context passed to capability and downstream execution.
+///
+/// The security context is absent until authentication succeeds at the
+/// mandatory middleware boundary.
 #[derive(Clone, Debug)]
 pub struct EngineContext {
     operation: OperationContext,
     cancellation: CancellationToken,
     deadline: Option<Deadline>,
-    security: SecurityContext,
+    security: Option<SecurityContext>,
     provenance: ProvenanceContext,
 }
 
@@ -35,20 +38,25 @@ pub(crate) fn check_context(context: &EngineContext) -> Result<(), pipeline::Pip
     if context.cancellation().is_cancelled() {
         return Err(pipeline::PipelineError::Cancelled);
     }
+
     if context.is_expired() {
         return Err(pipeline::PipelineError::DeadlineExpired);
     }
+
     Ok(())
 }
 
 impl EngineContext {
     /// Creates an execution context from trusted operation and platform context.
+    ///
+    /// Authentication has not happened yet, so no security identity is
+    /// attached to the context at construction time.
     pub fn new(operation: OperationContext) -> Self {
         Self {
             operation,
             cancellation: CancellationToken::new(),
             deadline: None,
-            security: SecurityContext::new(),
+            security: None,
             provenance: ProvenanceContext::new(),
         }
     }
@@ -65,8 +73,9 @@ impl EngineContext {
         self.deadline
     }
 
-    pub fn security(&self) -> &SecurityContext {
-        &self.security
+    /// Returns the trusted security context when authentication has succeeded.
+    pub fn security(&self) -> Option<&SecurityContext> {
+        self.security.as_ref()
     }
 
     pub fn provenance(&self) -> &ProvenanceContext {
@@ -81,8 +90,9 @@ impl EngineContext {
         self
     }
 
+    /// Attaches the trusted security context established by authentication.
     pub fn with_security(mut self, security: SecurityContext) -> Self {
-        self.security = security;
+        self.security = Some(security);
         self
     }
 
@@ -103,10 +113,12 @@ impl EngineContext {
 
     pub fn child_with_deadline(&self, deadline: Deadline) -> Self {
         let mut child = self.child();
+
         child.deadline = Some(
             self.deadline
                 .map_or(deadline, |parent| parent.min_with(deadline)),
         );
+
         child
     }
 
@@ -134,6 +146,7 @@ mod tests {
         error::{ErrorClass, ErrorCode, ErrorOwner, Severity},
         identity::{CorrelationId, OperationId},
         operation::{Operation, OperationContext},
+        security::{PrincipalId, PrincipalIdentity, PrincipalType},
         status::Retryability,
     };
     use std::time::Duration;
@@ -149,6 +162,13 @@ mod tests {
         EngineContext::new(OperationContext::new(sample_operation()))
     }
 
+    fn sample_security_context() -> SecurityContext {
+        let principal =
+            PrincipalIdentity::new(PrincipalType::User, PrincipalId::new("user-1").unwrap());
+
+        SecurityContext::new(principal, None)
+    }
+
     #[test]
     fn new_context_has_no_deadline_and_active_cancellation() {
         let context = sample_context();
@@ -156,6 +176,7 @@ mod tests {
         assert!(context.deadline().is_none());
         assert!(!context.cancellation().is_cancelled());
         assert!(!context.is_expired());
+        assert!(context.security().is_none());
     }
 
     #[test]
@@ -180,17 +201,18 @@ mod tests {
         let context = sample_context().with_deadline(earlier).with_deadline(later);
 
         let deadline = context.deadline().unwrap();
+
         // The result must be the earlier deadline (10s), not the later one.
         assert_eq!(deadline, earlier);
         assert!(deadline.remaining() <= Duration::from_secs(10));
     }
 
     #[test]
-    fn with_security_replaces_security_context() {
-        let original = SecurityContext::new();
-        let context = sample_context().with_security(original.clone());
+    fn with_security_attaches_security_context() {
+        let security = sample_security_context();
+        let context = sample_context().with_security(security.clone());
 
-        assert_eq!(context.security(), &original);
+        assert_eq!(context.security(), Some(&security));
     }
 
     #[test]
@@ -208,17 +230,21 @@ mod tests {
             OperationId::new("operation-1").unwrap(),
             CorrelationId::new("correlation-1").unwrap(),
         );
+
+        let security = sample_security_context();
+
         let parent = EngineContext::new(OperationContext::new(operation))
             .with_deadline(Deadline::from_now(Duration::from_secs(1)).unwrap())
-            .with_security(SecurityContext::new())
+            .with_security(security.clone())
             .with_provenance(ProvenanceContext::new());
+
         let child = parent.child();
 
         assert_eq!(
             child.operation().operation.id,
             parent.operation().operation.id
         );
-        assert_eq!(child.security(), parent.security());
+        assert_eq!(child.security(), Some(&security));
         assert_eq!(child.provenance(), parent.provenance());
         assert_eq!(child.deadline(), parent.deadline());
 
@@ -228,13 +254,24 @@ mod tests {
     }
 
     #[test]
+    fn child_without_security_context_preserves_absence() {
+        let parent = sample_context();
+        let child = parent.child();
+
+        assert!(parent.security().is_none());
+        assert!(child.security().is_none());
+    }
+
+    #[test]
     fn child_with_deadline_keeps_the_earlier_parent_deadline() {
         let operation = Operation::new(
             OperationId::new("operation-cd-1").unwrap(),
             CorrelationId::new("correlation-cd-1").unwrap(),
         );
+
         let parent = EngineContext::new(OperationContext::new(operation))
             .with_deadline(Deadline::from_now(Duration::from_millis(50)).unwrap());
+
         let child =
             parent.child_with_deadline(Deadline::from_now(Duration::from_secs(10)).unwrap());
 
@@ -245,6 +282,7 @@ mod tests {
     fn expiration_error_returns_none_when_not_expired() {
         let context =
             sample_context().with_deadline(Deadline::from_now(Duration::from_secs(60)).unwrap());
+
         let definition = ErrorDefinition::new(
             ErrorCode::new("CORE.EXECUTION.001").unwrap(),
             ErrorOwner::new("CORE").unwrap(),
@@ -265,8 +303,10 @@ mod tests {
             OperationId::new("operation-2").unwrap(),
             CorrelationId::new("correlation-2").unwrap(),
         );
+
         let context = EngineContext::new(OperationContext::new(operation))
             .with_deadline(Deadline::from_now(Duration::ZERO).unwrap());
+
         let definition = ErrorDefinition::new(
             ErrorCode::new("CORE.EXECUTION.001").unwrap(),
             ErrorOwner::new("CORE").unwrap(),
@@ -286,13 +326,17 @@ mod tests {
 
     #[test]
     fn engine_context_supports_clone() {
+        let security = sample_security_context();
+
         let context = sample_context()
             .with_deadline(Deadline::from_now(Duration::from_secs(60)).unwrap())
-            .with_security(SecurityContext::new())
+            .with_security(security.clone())
             .with_provenance(ProvenanceContext::new().with_attribute("k", "v"));
+
         let clone = context.clone();
 
         assert_eq!(context.deadline(), clone.deadline());
+        assert_eq!(context.security(), clone.security());
         assert_eq!(context.provenance(), clone.provenance());
     }
 }

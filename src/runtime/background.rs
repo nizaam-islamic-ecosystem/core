@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
     thread::JoinHandle,
 };
 
@@ -15,12 +15,15 @@ use super::CancellationToken;
 pub struct BackgroundTasks {
     cancellation: CancellationToken,
     state: Mutex<BackgroundState>,
+    completion: Condvar,
     owner: Arc<()>,
 }
 
 #[derive(Debug, Default)]
 struct BackgroundState {
     closed: bool,
+    cleanup_started: bool,
+    cleanup_complete: bool,
     handles: Vec<JoinHandle<()>>,
 }
 
@@ -32,6 +35,7 @@ impl BackgroundTasks {
         Self {
             cancellation,
             state: Mutex::new(BackgroundState::default()),
+            completion: Condvar::new(),
             owner: Arc::new(()),
         }
     }
@@ -93,9 +97,8 @@ impl BackgroundTasks {
 
     /// Signals all owned background tasks and waits for them to finish.
     ///
-    /// Shutdown is idempotent. The first call closes the task collection,
-    /// cancels the shared scope, and joins every owned task. Later calls do
-    /// nothing.
+    /// Shutdown is idempotent. Concurrent callers wait for the first caller to
+    /// finish joining all owned task handles.
     ///
     /// If one or more tasks panic, all owned tasks are still joined before
     /// the first panic payload is resumed.
@@ -108,11 +111,25 @@ impl BackgroundTasks {
         let handles = {
             let mut state = self.state.lock().expect("background task lock poisoned");
 
+            if state.cleanup_complete {
+                return;
+            }
+
+            if state.cleanup_started {
+                while !state.cleanup_complete {
+                    state = self
+                        .completion
+                        .wait(state)
+                        .expect("background task lock poisoned");
+                }
+                return;
+            }
+
+            state.cleanup_started = true;
             if !state.closed {
                 state.closed = true;
                 self.cancellation.cancel();
             }
-
             std::mem::take(&mut state.handles)
         };
 
@@ -123,6 +140,11 @@ impl BackgroundTasks {
                 panic_payload.get_or_insert(payload);
             }
         }
+
+        let mut state = self.state.lock().expect("background task lock poisoned");
+        state.cleanup_complete = true;
+        self.completion.notify_all();
+        drop(state);
 
         if let Some(payload) = panic_payload {
             std::panic::resume_unwind(payload);
@@ -311,5 +333,58 @@ mod tests {
 
         assert_eq!(tasks.task_count(), 0);
         assert!(tasks.is_closed());
+    }
+
+    #[test]
+    fn concurrent_shutdown_callers_wait_for_cleanup() {
+        use std::sync::mpsc;
+
+        let tasks = Arc::new(BackgroundTasks::new(CancellationToken::new()));
+        let (release_tx, release_rx) = mpsc::channel();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (first_tx, first_rx) = mpsc::channel();
+        let (second_tx, second_rx) = mpsc::channel();
+
+        tasks
+            .spawn(move |cancellation| {
+                while !cancellation.is_cancelled() {
+                    thread::yield_now();
+                }
+
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+            .unwrap();
+
+        let first_tasks = Arc::clone(&tasks);
+        let first = thread::spawn(move || {
+            first_tx.send(()).unwrap();
+            first_tasks.shutdown();
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first shutdown did not reach the background task");
+
+        let second_tasks = Arc::clone(&tasks);
+        let second = thread::spawn(move || {
+            second_tasks.shutdown();
+            second_tx.send(()).unwrap();
+        });
+
+        assert!(
+            second_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "second shutdown returned before cleanup completed"
+        );
+
+        release_tx.send(()).unwrap();
+
+        first_rx.recv_timeout(Duration::from_millis(50)).unwrap();
+        second
+            .join()
+            .expect("second shutdown thread panicked");
+        first.join().expect("first shutdown thread panicked");
     }
 }

@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 
 use super::{
     CancellationToken,
@@ -18,7 +18,16 @@ pub struct EngineRuntime {
     lifecycle: Mutex<Lifecycle>,
     shutdown: CancellationToken,
     background: BackgroundTasks,
-    shutdown_lock: Mutex<bool>,
+    shutdown_state: Mutex<ShutdownState>,
+    shutdown_complete: Condvar,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShutdownState {
+    NotStarted,
+    Initiated,
+    Coordinating,
+    Complete,
 }
 
 impl Default for EngineRuntime {
@@ -36,7 +45,8 @@ impl EngineRuntime {
             lifecycle: Mutex::new(Lifecycle::new()),
             background: BackgroundTasks::new(shutdown.clone()),
             shutdown,
-            shutdown_lock: Mutex::new(false),
+            shutdown_state: Mutex::new(ShutdownState::NotStarted),
+            shutdown_complete: Condvar::new(),
         }
     }
 
@@ -49,7 +59,35 @@ impl EngineRuntime {
     }
 
     /// Transitions the runtime lifecycle to `next`.
+    ///
+    /// Lifecycle changes are coordinated with shutdown. Direct transitions to
+    /// `Stopped` are reserved for the shutdown cleanup path.
     pub fn transition(&self, next: LifecycleState) -> Result<(), InvalidTransition> {
+        let shutdown_state = self
+            .shutdown_state
+            .lock()
+            .expect("shutdown state lock poisoned");
+
+        if *shutdown_state != ShutdownState::NotStarted {
+            let current = self.state();
+            return Err(InvalidTransition::new(
+                format!("{current:?}"),
+                format!("{next:?}"),
+            ));
+        }
+
+        if next == LifecycleState::Stopped {
+            let current = self.state();
+            return Err(InvalidTransition::new(
+                format!("{current:?}"),
+                format!("{next:?}"),
+            ));
+        }
+
+        self.transition_lifecycle(next)
+    }
+
+    fn transition_lifecycle(&self, next: LifecycleState) -> Result<(), InvalidTransition> {
         self.lifecycle
             .lock()
             .expect("lifecycle lock poisoned")
@@ -72,56 +110,98 @@ impl EngineRuntime {
     /// work, waits for that work to finish, and only then enters `Stopped`.
     ///
     /// `Stopped` is terminal and repeated shutdown calls are idempotent.
-    pub fn shutdown(&self) -> Result<(), InvalidTransition> {
-        // A runtime-owned task cannot synchronously join itself. Reentrant
-        // shutdown therefore initiates draining and cancellation, then lets
-        // the task return so a later/external shutdown caller can finish the
-        // join and Stopped transition.
+    ///
+    /// Returns `true` when shutdown completed and `false` when a runtime-owned
+    /// background task initiated shutdown and an external coordinator must
+    /// finish cleanup.
+    pub fn shutdown(&self) -> Result<bool, InvalidTransition> {
         if self.background.is_current_task() {
-            if self.state() != LifecycleState::Draining {
-                self.transition(LifecycleState::Draining)?;
+            let mut shutdown_state = self
+                .shutdown_state
+                .lock()
+                .expect("shutdown state lock poisoned");
+
+            if *shutdown_state == ShutdownState::Complete {
+                return Ok(true);
             }
+
+            if *shutdown_state == ShutdownState::NotStarted {
+                if self.state() != LifecycleState::Draining {
+                    self.transition_lifecycle(LifecycleState::Draining)?;
+                }
+                *shutdown_state = ShutdownState::Initiated;
+            }
+
+            drop(shutdown_state);
             self.background.begin_shutdown();
-            return Ok(());
+            return Ok(false);
         }
 
-        // Serialize the complete shutdown transaction so concurrent callers
-        // cannot observe an intermediate lifecycle state and race the
-        // Draining -> Stopped transition or background cleanup.
-        let mut shutdown_complete = self.shutdown_lock.lock().expect("shutdown lock poisoned");
+        let mut shutdown_state = self
+            .shutdown_state
+            .lock()
+            .expect("shutdown state lock poisoned");
 
-        if *shutdown_complete {
-            return Ok(());
+        loop {
+            match *shutdown_state {
+                ShutdownState::Complete => return Ok(true),
+                ShutdownState::Coordinating => {
+                    shutdown_state = self
+                        .shutdown_complete
+                        .wait(shutdown_state)
+                        .expect("shutdown state lock poisoned");
+                }
+                ShutdownState::Initiated => {
+                    *shutdown_state = ShutdownState::Coordinating;
+                    break;
+                }
+                ShutdownState::NotStarted => {
+                    if self.state() != LifecycleState::Draining {
+                        self.transition_lifecycle(LifecycleState::Draining)?;
+                    }
+                    *shutdown_state = ShutdownState::Coordinating;
+                    break;
+                }
+            }
         }
 
-        let state = self.state();
+        drop(shutdown_state);
 
-        // `Stopped` can also be reached through the public lifecycle API. In
-        // that case runtime-owned background work may still be active, so
-        // shutdown must perform cleanup before treating the runtime as fully
-        // shut down.
-        if state == LifecycleState::Stopped {
+        let cleanup_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.background.shutdown();
-            *shutdown_complete = true;
-            return Ok(());
+        }));
+
+        if let Err(payload) = cleanup_result {
+            let mut shutdown_state = self
+                .shutdown_state
+                .lock()
+                .expect("shutdown state lock poisoned");
+            *shutdown_state = ShutdownState::NotStarted;
+            self.shutdown_complete.notify_all();
+            drop(shutdown_state);
+            std::panic::resume_unwind(payload);
         }
 
-        if state != LifecycleState::Draining {
-            self.transition(LifecycleState::Draining)?;
-        }
-
-        // `BackgroundTasks::shutdown` cancels runtime-owned background work
-        // through the shared shutdown token and joins all owned task handles.
-        self.background.shutdown();
-
-        // `STOPPED` is reached only after runtime-owned background work has
-        // been signalled and joined.
         if self.state() != LifecycleState::Stopped {
-            self.transition(LifecycleState::Stopped)?;
+            if let Err(error) = self.transition_lifecycle(LifecycleState::Stopped) {
+                let mut shutdown_state = self
+                    .shutdown_state
+                    .lock()
+                    .expect("shutdown state lock poisoned");
+                *shutdown_state = ShutdownState::NotStarted;
+                self.shutdown_complete.notify_all();
+                return Err(error);
+            }
         }
 
-        *shutdown_complete = true;
-        Ok(())
+        let mut shutdown_state = self
+            .shutdown_state
+            .lock()
+            .expect("shutdown state lock poisoned");
+        *shutdown_state = ShutdownState::Complete;
+        self.shutdown_complete.notify_all();
+
+        Ok(true)
     }
 }
 
@@ -158,7 +238,7 @@ mod tests {
     fn engine_runtime_shutdown_stops_background_work() {
         let runtime = serving_runtime();
 
-        runtime.shutdown().unwrap();
+        assert!(runtime.shutdown().unwrap());
 
         assert_eq!(runtime.state(), LifecycleState::Stopped);
         assert!(runtime.shutdown_token().is_cancelled());
@@ -191,7 +271,7 @@ mod tests {
     fn shutdown_transitions_through_draining_when_active() {
         let runtime = serving_runtime();
 
-        runtime.shutdown().unwrap();
+        assert!(runtime.shutdown().unwrap());
 
         assert_eq!(runtime.state(), LifecycleState::Stopped);
         assert!(runtime.shutdown_token().is_cancelled());
@@ -203,7 +283,7 @@ mod tests {
 
         runtime.transition(LifecycleState::Draining).unwrap();
 
-        runtime.shutdown().unwrap();
+        assert!(runtime.shutdown().unwrap());
 
         assert_eq!(runtime.state(), LifecycleState::Stopped);
         assert!(runtime.shutdown_token().is_cancelled());
@@ -213,8 +293,8 @@ mod tests {
     fn shutdown_is_idempotent_after_stopped() {
         let runtime = serving_runtime();
 
-        runtime.shutdown().unwrap();
-        runtime.shutdown().unwrap();
+        assert!(runtime.shutdown().unwrap());
+        assert!(runtime.shutdown().unwrap());
 
         assert_eq!(runtime.state(), LifecycleState::Stopped);
         assert!(runtime.shutdown_token().is_cancelled());
@@ -238,9 +318,14 @@ mod tests {
             .unwrap();
 
         runtime.transition(LifecycleState::Draining).unwrap();
-        runtime.transition(LifecycleState::Stopped).unwrap();
 
-        runtime.shutdown().unwrap();
+        assert_eq!(
+            runtime.transition(LifecycleState::Stopped),
+            Err(InvalidTransition::new("Draining", "Stopped"))
+        );
+        assert!(!*stopped.lock().unwrap());
+
+        assert!(runtime.shutdown().unwrap());
 
         assert!(*stopped.lock().unwrap());
         assert!(runtime.shutdown_token().is_cancelled());
@@ -297,13 +382,13 @@ mod tests {
             first_result_rx
                 .recv_timeout(Duration::from_secs(1))
                 .unwrap()
-                .is_ok()
+                .unwrap()
         );
         assert!(
             second_result_rx
                 .recv_timeout(Duration::from_secs(1))
                 .unwrap()
-                .is_ok()
+                .unwrap()
         );
         assert_eq!(runtime.state(), LifecycleState::Stopped);
 
@@ -314,23 +399,41 @@ mod tests {
     #[test]
     fn reentrant_shutdown_from_background_task_does_not_deadlock() {
         let runtime = Arc::new(serving_runtime());
+        let (status_tx, status_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
 
         let task_runtime = Arc::clone(&runtime);
         runtime
             .background_tasks()
             .spawn(move |_| {
-                task_runtime.shutdown().unwrap();
+                status_tx.send(task_runtime.shutdown()).unwrap();
                 done_tx.send(()).unwrap();
             })
             .unwrap();
 
+        assert!(
+            !status_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .unwrap()
+        );
         done_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("background task deadlocked during reentrant shutdown");
 
-        runtime.shutdown().unwrap();
+        assert!(runtime.shutdown().unwrap());
         assert_eq!(runtime.state(), LifecycleState::Stopped);
+    }
+
+    #[test]
+    fn shutdown_rejects_direct_stopped_transition() {
+        let runtime = serving_runtime();
+
+        assert_eq!(
+            runtime.transition(LifecycleState::Stopped),
+            Err(InvalidTransition::new("Serving", "Stopped"))
+        );
+        assert_eq!(runtime.state(), LifecycleState::Serving);
     }
 
     #[test]
@@ -352,7 +455,7 @@ mod tests {
             })
             .unwrap();
 
-        runtime.shutdown().unwrap();
+        assert!(runtime.shutdown().unwrap());
 
         assert_eq!(runtime.state(), LifecycleState::Stopped);
         assert!(*finished.lock().unwrap());

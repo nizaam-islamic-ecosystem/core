@@ -103,6 +103,14 @@ fn serving_runtime() -> EngineRuntime {
     runtime
 }
 
+fn invocation_from_request(request: &UniversalRequest) -> CapabilityInvocation {
+    CapabilityInvocation::new(
+        request.envelope.metadata.descriptor.capability_id.clone(),
+        request.envelope.metadata.descriptor.contract_id.clone(),
+        request.envelope.payload.bytes().to_vec(),
+    )
+}
+
 fn registry_with_handler(
     handler: Arc<dyn nizaam_core::capability::CapabilityHandler>,
 ) -> (CapabilityRegistry, CapabilityId) {
@@ -142,7 +150,7 @@ fn serving_runtime_can_execute_a_validated_universal_request() {
         },
     );
 
-    let (registry, capability_id) = registry_with_handler(handler);
+    let (registry, _capability_id) = registry_with_handler(handler);
 
     let operation = operation_context("runtime-op-1", "runtime-corr-1");
     let request = request(
@@ -160,11 +168,7 @@ fn serving_runtime_can_execute_a_validated_universal_request() {
     // context carried by the universal request.
     let context = EngineContext::new(request.envelope.operation_context.clone());
 
-    let invocation = CapabilityInvocation::new(
-        capability_id,
-        request.envelope.metadata.descriptor.contract_id.clone(),
-        request.envelope.payload.bytes().to_vec(),
-    );
+    let invocation = invocation_from_request(&request);
 
     let result = dispatch(&registry, &context, &invocation);
 
@@ -180,6 +184,76 @@ fn serving_runtime_can_execute_a_validated_universal_request() {
 
     runtime.shutdown().unwrap();
     assert_eq!(runtime.state(), LifecycleState::Stopped);
+}
+
+#[test]
+fn runtime_dispatch_uses_request_capability_for_handler_selection() {
+    let runtime = serving_runtime();
+
+    let requested_capability = "runtime.requested";
+    let registered_capability = "runtime.registered";
+
+    let requested_handler_called = Arc::new(AtomicBool::new(false));
+    let registered_handler_called = Arc::new(AtomicBool::new(false));
+
+    let requested_called = Arc::clone(&requested_handler_called);
+    let registered_called = Arc::clone(&registered_handler_called);
+
+    let registry = CapabilityRegistry::new();
+
+    let requested_definition = CapabilityDefinition::new(
+        CapabilityId::new(requested_capability).unwrap(),
+        EngineId::new(ENGINE).unwrap(),
+        "Requested Capability",
+    )
+    .unwrap();
+
+    registry
+        .register(
+            requested_definition,
+            arc_handler(move |_: &EngineContext, _: &CapabilityInvocation| {
+                requested_called.store(true, Ordering::SeqCst);
+                Ok(CapabilityOutcome::new(b"requested".to_vec()))
+            }),
+        )
+        .unwrap();
+
+    let registered_definition = CapabilityDefinition::new(
+        CapabilityId::new(registered_capability).unwrap(),
+        EngineId::new(ENGINE).unwrap(),
+        "Registered Capability",
+    )
+    .unwrap();
+
+    registry
+        .register(
+            registered_definition,
+            arc_handler(move |_: &EngineContext, _: &CapabilityInvocation| {
+                registered_called.store(true, Ordering::SeqCst);
+                Ok(CapabilityOutcome::new(b"registered".to_vec()))
+            }),
+        )
+        .unwrap();
+
+    let request = request(
+        "runtime-routing-msg",
+        requested_capability,
+        b"routing payload",
+        operation_context("runtime-routing-op", "runtime-routing-corr"),
+    );
+    let context = EngineContext::new(request.envelope.operation_context.clone());
+    let invocation = invocation_from_request(&request);
+
+    let result = dispatch(&registry, &context, &invocation);
+
+    assert_eq!(
+        result.into_outcome().unwrap().into_bytes(),
+        b"requested"
+    );
+    assert!(requested_handler_called.load(Ordering::SeqCst));
+    assert!(!registered_handler_called.load(Ordering::SeqCst));
+
+    runtime.shutdown().unwrap();
 }
 
 #[test]

@@ -24,7 +24,7 @@ Implementation began with an existing Cargo library skeleton at the repository r
 | 5  | Context execution infrastructure             | 5     | verified    |
 | 6  | Capability System                            | 6     | verified    |
 | 7  | Transport and universal client/server        | 7     | verified    |
-| 8  | Engine Runtime                               | 8     | in progress |
+| 8  | Engine Runtime                               | 8     | verified    |
 | 9  | Middleware and Security                      | 9     | not started |
 | 10 | Artifact and Provenance                      | 10    | not started |
 | 11 | Observability, Health, Configuration         | 11    | not started |
@@ -1766,6 +1766,82 @@ STOPPED
 ```
 
 with failure able to occur from the startup states and ultimately lead to `STOPPED`.
+
+---
+
+### Phase 8 Completion Record
+
+The following completion record is appended to the original Phase 8 specification. Existing Phase 8 requirements, boundaries, non-goals, and decisions above remain unchanged.
+
+### Done When
+
+* [x] Start a runtime through the defined lifecycle.
+* [x] Progress through `STARTING`, `CONFIGURING`, `DEPENDENCIES`, `CAPABILITIES`, `REGISTERING`, `READY`, `SERVING`, `DRAINING`, and `STOPPED` according to the legal lifecycle model.
+* [x] Keep `READY` distinct from `SERVING` so readiness does not itself admit normal work.
+* [x] Reject normal work outside `SERVING` and prevent capability dispatch after lifecycle admission rejection.
+* [x] Preserve the request execution boundary using universal request validation, execution context association, cancellation/deadline checks, capability resolution, dispatch, handler execution, and universal response construction.
+* [x] Preserve cancellation-before-deadline precedence and prevent handler execution when the request context is already cancelled or expired.
+* [x] Propagate `EngineContext` through runtime execution and capability dispatch without introducing a competing context mechanism.
+* [x] Integrate the existing Capability System for capability registration, lookup, and dispatch without introducing a second capability mechanism.
+* [x] Allow independent admitted work to execute concurrently with isolated task scopes and without a mandatory global concurrency limit.
+* [x] Provide runtime-owned background task lifecycle integration with cancellation and joining during shutdown.
+* [x] Implement draining semantics so new work is stopped while already-admitted work can complete according to its execution context.
+* [x] Ensure runtime-owned background work is signalled and joined before the runtime reaches `STOPPED`.
+* [x] Coordinate concurrent shutdown callers and protect shutdown completion from lifecycle races.
+* [x] Handle runtime-owned reentrant shutdown without deadlocking the shutdown/join path.
+* [x] Preserve all previously verified Core phase behavior.
+
+Phase 8 completion is supported by unit and integration coverage across lifecycle, runtime context, pipeline, task scopes, background task ownership, capability dispatch, shutdown coordination, concurrent shutdown, reentrant shutdown, request routing, and regression behavior.
+
+### Architectural Decisions
+
+* The Engine Runtime remains the owner of lifecycle validity, request admission, execution coordination, context propagation, capability dispatch, concurrency mechanisms, readiness boundaries, dependency lifecycle participation, and shutdown coordination. Engine domain state, workflows, business rules, payload semantics, storage, and domain-specific synchronization remain engine-owned.
+* `FAILED` remains a lifecycle failure condition rather than a normal lifecycle state.
+* `READY` and `SERVING` remain separate states. Reaching `READY` does not begin normal request admission.
+* `DRAINING` is a shutdown/drain state, not immediate cancellation. New normal work is rejected while already-admitted work remains eligible to finish according to its context.
+* `STOPPED` remains terminal and is reached only through the runtime shutdown/cleanup path.
+* Runtime shutdown is coordinated as a complete transaction so concurrent callers cannot race lifecycle transitions or observe an intermediate shutdown state as completed.
+* Runtime-owned background tasks are cancelled/signalled and joined before shutdown completion. Reentrant shutdown from a runtime-owned task must not deadlock against the join path.
+* Core continues to use the existing `EngineContext`, cancellation, deadline, capability registry, and dispatch mechanisms rather than introducing competing implementations.
+* Core does not commit Phase 8 to a specific async runtime, executor, worker pool, scheduler, or mandatory global concurrency policy.
+* `InvalidTransition` is owned by the Nizaam Error System and is exposed from `nizaam_core::error`; implementing Rust's standard `std::error::Error` interoperability does not transfer ownership to Rust's standard library error model.
+* Phase 7 `EngineServer` remains a communication boundary and is not merged into the Phase 8 Engine Runtime lifecycle state machine.
+* Capability registration/dispatch remains distinct from engine registration/lifecycle ownership. Control Plane routing remains deferred to Phase 15.
+* Capability request routing tests must derive the invocation target from the request descriptor so that a mismatch between the request and registry cannot accidentally be hidden by constructing the invocation from a registry lookup.
+
+### Open Questions
+
+None currently for Phase 8.
+
+Production transport, async runtime/executor, advanced resource-aware concurrency, sophisticated background scheduling, retry/recovery, middleware/security policy, observability/health, Control Plane routing, and Engine SDK design remain intentionally deferred to their respective phases rather than being unresolved Phase 8 architecture.
+
+### Corrections / Changes
+
+* Added the Nizaam-owned technical `InvalidTransition` error to the Error System and moved lifecycle transition errors away from runtime-owned error definitions without coupling the Error System back to the runtime lifecycle.
+* Updated lifecycle/runtime tests to use the Error System's `InvalidTransition` representation and preserve the legal lifecycle transition contract.
+* Corrected shutdown behavior so runtime-owned background cleanup is not bypassed when the runtime has already reached `STOPPED`.
+* Added per-runtime shutdown coordination so concurrent shutdown callers cannot race `SERVING`/`DRAINING`/`STOPPED` transitions or repeat cleanup.
+* Added explicit shutdown completion coordination so shutdown completion is not reported before runtime-owned background work has been joined.
+* Corrected the reentrant background-task shutdown path so a runtime-owned task cannot deadlock by attempting to reacquire shutdown coordination while the shutdown caller is joining owned work.
+* Added regression coverage for concurrent shutdown callers waiting for cleanup completion and for reentrant shutdown from runtime-owned background work.
+* Corrected the runtime integration capability-routing test so the invocation capability is derived from the request descriptor and distinct capability IDs/handlers can expose routing mismatches.
+* Preserved the existing Phase 5, Phase 6, and Phase 7 boundaries while integrating their context, capability, and communication mechanisms into the Phase 8 runtime foundation.
+
+### Current State
+
+Phase 8, Engine Runtime, is implemented and verified. The runtime foundation now provides the shared lifecycle owner, lifecycle admission boundary, execution context integration, cancellation/deadline checks, execution pipeline, capability dispatch integration, concurrent task scopes, runtime-owned background task lifecycle, and coordinated shutdown behavior. The lifecycle remains explicit from `Created` through the startup stages to `READY`, `SERVING`, `DRAINING`, and terminal `STOPPED`. The implementation preserves the separation between Core runtime mechanisms and engine-owned semantics.
+
+The Phase 8 work also includes shutdown correctness for concurrent callers and runtime-owned reentrant callers, with cleanup completion coordinated before `STOPPED` is reported. Capability routing integration tests exercise request-derived capability selection rather than masking routing mismatches with registry-derived invocation data.
+
+Phase 8 has been reviewed against automated CodeRabbit and Greptile findings. Genuine correctness and test-quality findings were fixed, including shutdown cleanup, concurrent shutdown coordination, reentrant shutdown behavior, lifecycle transition protection, and capability routing coverage. Additional speculative edge-case hardening is intentionally not being pursued without a concrete engine requirement or demonstrated correctness issue.
+
+The complete Core verification was run successfully before merge preparation, with the workspace build/check/test/lint/format pipeline passing and all unit and integration suites green, including the Phase 8 runtime and lifecycle suites.
+
+### Next Step
+
+Phase 8 is complete and ready to remain merged as the shared runtime foundation.
+
+Proceed to **Phase 9: Middleware and Security**, while preserving the Phase 8 lifecycle, admission, context, capability-dispatch, concurrency, and shutdown boundaries. Any future Phase 8 change should be driven by a concrete requirement or an actual correctness issue discovered while implementing or operating later phases, rather than by pursuing theoretical completeness.
 
 ---
 
@@ -17276,6 +17352,43 @@ architecture.
 * `EngineServer` provides the server-side communication boundary, including handler registration, capability-based request dispatch, and serving/draining/stopped request-admission behavior.
 * Phase 7 integrates with the existing Capability System rather than introducing a second capability registry or dispatch mechanism. The server routes universal requests into the established capability handler boundary.
 * The Phase 7 in-memory transport is an implementation used to verify the abstract transport contract. It does not establish an architectural commitment to a concrete network transport, async runtime, serialization provider, or persistence system.
+* The Engine Runtime owns the engine lifecycle state machine and controls lifecycle transition validity.
+* The canonical engine lifecycle is `Created → Starting → Configuring → Dependencies → Capabilities → Registering → Ready → Serving → Draining → Stopped`.
+* `Created` is the runtime's initial construction state and is not part of the normal startup progression after runtime creation.
+* `FAILED` is a lifecycle failure condition rather than a normal lifecycle state. Startup failures must not allow an engine to reach `READY` or `SERVING` while unresolved.
+* A terminal startup failure must ultimately reach `STOPPED` through the defined shutdown path. Phase 8 does not introduce automatic startup retry loops.
+* `READY` and `SERVING` are distinct states. `READY` means required initialization is complete and the engine is eligible to serve, while `SERVING` means normal request admission is active.
+* Only an engine in `SERVING` may accept new normal requests. Startup states, `READY`, `DRAINING`, and `STOPPED` reject new normal work.
+* Lifecycle admission occurs before request validation, capability resolution, or capability handler invocation.
+* Requests already admitted before `DRAINING` remain runtime-owned work and may continue according to their existing execution context, cancellation, and deadline rules.
+* `DRAINING` cannot transition back to `SERVING`, and `STOPPED` is terminal.
+* The Engine Runtime provides the shared request execution coordination mechanism but does not own engine-specific workflows, business rules, domain state, payload semantics, or domain synchronization.
+* The Phase 8 request path preserves the established Core boundaries: transport reconstructs messages, runtime performs admission and execution coordination, contracts provide structural validation, context provides execution state, capability dispatch resolves and invokes handlers, and engines retain ownership of handler semantics.
+* The runtime must not resolve or dispatch a capability for a request that has already failed lifecycle admission.
+* Universal request structural validation occurs before capability handler invocation.
+* Existing cancellation and deadline mechanisms from Phase 5 remain the authoritative execution-boundary mechanisms. Phase 8 does not introduce a competing cancellation or deadline system.
+* Cancellation and deadline precedence is preserved before capability resolution and handler execution.
+* The Engine Runtime permits independent admitted requests to execute concurrently and must not introduce global serialization of engine capability handlers.
+* Request execution contexts remain isolated between unrelated requests. Operation, cancellation, deadline, security, and provenance context must not be shared mutably between unrelated requests.
+* Core does not mandate a specific executor, async runtime, worker pool, scheduler, or thread model for request execution.
+* Phase 8 does not establish a mandatory global concurrency limit. Resource-aware bounded concurrency and advanced scheduling remain deferred to Phase 12.
+* Engine shutdown follows `SERVING → DRAINING → STOPPED`. Shutdown first stops new request admission, then signals runtime-owned background work, allows already-admitted work to finish, joins runtime-owned work, and finally reaches `STOPPED`.
+* `DRAINING` is a graceful shutdown state and does not mean immediate cancellation of already-admitted work.
+* Runtime-owned background tasks participate in runtime shutdown through cancellation signaling and joining. Advanced scheduling, resource accounting, and execution policy remain deferred to Phase 12.
+* Required and optional dependency behavior remains distinct. Required dependency initialization must succeed before `READY`; optional dependency absence may not block readiness when the engine can still provide its required behavior.
+* Phase 8 does not introduce automatic dependency retry loops. Dependency cycles must fail deterministically rather than causing indefinite startup waiting.
+* Loss of a dependency after the engine is already serving does not automatically force the runtime to `STOPPED` solely because of that dependency loss.
+* Capability registration and capability availability remain distinct. A capability may be registered during startup but is normally callable only when its engine is `SERVING`.
+* Required capability initialization failures prevent the engine from reaching `READY`, while optional capability failures may permit readiness when required engine behavior remains valid.
+* Engine registration and capability registration remain separate mechanisms. Engine registration establishes runtime participation, while capability registration establishes the capabilities provided by the engine.
+* Phase 8 does not introduce an independent global routing or destination system. Detailed destination resolution and inter-engine routing remain deferred to Phase 15 Control Plane.
+* The Engine Runtime may invoke engine-owned capability handlers but must not implement, interpret, or manipulate their domain workflows or domain state.
+* Runtime-owned shutdown uses the same Core cancellation mechanism established for operation and task contexts.
+* `InvalidTransition` is a Nizaam-owned technical error type provided by the Core Error System. Lifecycle transition validation does not define a competing runtime-specific error system.
+* `InvalidTransition` remains independent of lifecycle implementation details and is represented through the Nizaam Error System without coupling the Error System back to the Runtime module.
+* Phase 8 does not implement retry, idempotency, advanced streaming, security middleware/authorization policy, artifact persistence, detailed observability/health, Internal Events, Control Plane routing, Engine SDK, domain workflows, engine-specific storage, or a mandatory global concurrency policy.
+* Phase 8 integration tests verify composition of the already implemented Core mechanisms rather than requiring a production engine implementation. This keeps runtime behavior testable without introducing engine-specific semantics into Core.
+* Phase 8 completion does not require Core to model every possible future engine edge case. Additional engine-specific and cross-system edge cases can be covered progressively as actual engines and later Core phases introduce concrete requirements.
 
 ## Corrections / Changes
 
@@ -17287,8 +17400,8 @@ None currently. Concrete trait signatures, provider choices, serialization, asyn
 
 ## Current State
 
-Phase 7, Transport and universal client/server, is implemented and verified on the `phase-7-transport-and-universal-client-server` branch. The shared communication boundary now includes the abstract transport, connection, stream, binary framing, bounded frame handling, logical-message fragmentation/reassembly, universal client, and engine server. The implementation integrates with the existing Capability System for request routing without introducing a second capability mechanism. Phase 7 integration tests cover end-to-end universal request/response flow, addressed engine routing, connection lifecycle, fixed 20-byte framing, fragmentation/reassembly, large logical payloads, opaque binary payload preservation, operation context and contract metadata preservation, engine instance identity preservation, and server lifecycle admission behavior. The dedicated communication suite passes with `33 passed; 0 failed`, and the broader Core regression suite remains green. Phase 6, Capability System, remains verified. Phase 5, Context execution infrastructure, remains verified. Phase 4, the Logging System foundation, remains verified. Error and Logging remain independent peer systems.
+Phase 8, Engine Runtime, is implemented and verified. The Core repository now has verified foundations through Phase 8: workspace/library foundation, identity and operation foundations, Universal Contract Layer, Error System, Logging System, Context execution infrastructure, Capability System, Transport and universal client/server, and Engine Runtime. Phase 8 establishes the shared runtime lifecycle, admission, execution coordination, context propagation, capability dispatch, concurrency mechanisms, background task lifecycle, and shutdown coordination while preserving engine ownership of domain semantics. Automated review findings were verified and genuine issues were fixed before merge preparation. No unresolved Phase 8 architectural question remains.
 
 ## Next Step
 
-Phase 8: Engine Runtime.
+Phase 9: Middleware and Security.

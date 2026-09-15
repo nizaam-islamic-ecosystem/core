@@ -23,7 +23,7 @@ pub mod error;
 pub(crate) mod events;
 pub(crate) mod health;
 pub(crate) mod idempotency;
-pub(crate) mod middleware;
+pub mod middleware;
 pub(crate) mod observability;
 pub mod provenance;
 pub(crate) mod retry;

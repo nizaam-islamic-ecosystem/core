@@ -32,10 +32,16 @@ use nizaam_core::identity::{
     CapabilityId, ContractId, CorrelationId, EngineId, MessageId, OperationId,
 };
 use nizaam_core::operation::{Operation, OperationContext};
-use nizaam_core::prelude::{ProvenanceContext, SecurityContext, Status, Version};
+use nizaam_core::prelude::{ProvenanceContext, Status, Version};
+use nizaam_core::runtime::pipeline::RequestPipelineError;
 use nizaam_core::runtime::{
     BackgroundTasks, Deadline, EngineContext, EngineRuntime, ExecutionPipeline, LifecycleState,
     TaskScope,
+};
+use nizaam_core::security::{
+    AuthenticationError, AuthenticationRequest, Authenticator, AuthorizationDecision,
+    AuthorizationError, AuthorizationRequest, Authorizer, CredentialExtractor, PrincipalId,
+    PrincipalIdentity, PrincipalType, SecurityContext, SecurityMiddleware,
 };
 
 // ---------------------------------------------------------------------------
@@ -246,10 +252,7 @@ fn runtime_dispatch_uses_request_capability_for_handler_selection() {
 
     let result = dispatch(&registry, &context, &invocation);
 
-    assert_eq!(
-        result.into_outcome().unwrap().into_bytes(),
-        b"requested"
-    );
+    assert_eq!(result.into_outcome().unwrap().into_bytes(), b"requested");
     assert!(requested_handler_called.load(Ordering::SeqCst));
     assert!(!registered_handler_called.load(Ordering::SeqCst));
 
@@ -268,7 +271,13 @@ fn runtime_context_preserves_operation_security_and_provenance_during_dispatch()
         "runtime-context-op",
         "runtime-context-corr",
     ))
-    .with_security(SecurityContext::new())
+    .with_security(SecurityContext::new(
+        PrincipalIdentity::new(
+            PrincipalType::User,
+            PrincipalId::new("runtime-test-user").unwrap(),
+        ),
+        None,
+    ))
     .with_provenance(provenance.clone())
     .with_deadline(Deadline::from_now(Duration::from_secs(5)).unwrap());
 
@@ -632,6 +641,396 @@ fn dispatched_capability_outcome_can_become_a_structurally_valid_universal_respo
     assert!(response.has_response_interaction());
     assert_eq!(response.status, Status::Success);
     assert_eq!(response.envelope.payload.bytes(), b"runtime response");
+
+    runtime.shutdown().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Phase 9: runtime request security boundary
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct TestCredentialExtractor {
+    credentials: Option<Vec<u8>>,
+}
+
+impl CredentialExtractor for TestCredentialExtractor {
+    fn extract(&self, _context: &EngineContext, _request: &UniversalRequest) -> Option<Vec<u8>> {
+        self.credentials.clone()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TestAuthenticator {
+    result: Result<PrincipalIdentity, AuthenticationError>,
+}
+
+impl Authenticator for TestAuthenticator {
+    fn authenticate(
+        &self,
+        _request: &AuthenticationRequest<'_>,
+    ) -> Result<PrincipalIdentity, AuthenticationError> {
+        self.result.clone()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TestAuthorizer {
+    result: Result<AuthorizationDecision, AuthorizationError>,
+}
+
+impl Authorizer for TestAuthorizer {
+    fn authorize(
+        &self,
+        _request: &AuthorizationRequest<'_>,
+    ) -> Result<AuthorizationDecision, AuthorizationError> {
+        self.result
+    }
+}
+
+struct RecordingAuthorizer {
+    expected_capability: CapabilityId,
+    expected_principal: PrincipalIdentity,
+    expected_calling_service: Option<PrincipalIdentity>,
+    observed: Arc<Mutex<bool>>,
+    result: AuthorizationDecision,
+}
+
+impl Authorizer for RecordingAuthorizer {
+    fn authorize(
+        &self,
+        request: &AuthorizationRequest<'_>,
+    ) -> Result<AuthorizationDecision, AuthorizationError> {
+        assert_eq!(request.capability(), &self.expected_capability);
+        assert_eq!(request.principal(), &self.expected_principal);
+        assert_eq!(
+            request.calling_service(),
+            self.expected_calling_service.as_ref(),
+        );
+        *self.observed.lock().unwrap() = true;
+        Ok(self.result)
+    }
+}
+
+fn response_for_request(request: &UniversalRequest, payload: &[u8]) -> UniversalResponse {
+    let mut envelope = request.envelope.clone();
+    envelope.metadata.descriptor.interaction = Interaction::Response;
+    envelope.payload = EncodedPayload::new(
+        envelope.metadata.descriptor.payload.clone(),
+        payload.to_vec(),
+    );
+
+    UniversalResponse::new(envelope, Status::Success)
+}
+
+fn user_principal(id: &str) -> PrincipalIdentity {
+    PrincipalIdentity::new(PrincipalType::User, PrincipalId::new(id).unwrap())
+}
+
+fn service_principal(id: &str) -> PrincipalIdentity {
+    PrincipalIdentity::new(PrincipalType::Service, PrincipalId::new(id).unwrap())
+}
+
+#[test]
+fn runtime_request_pipeline_authenticates_authorizes_and_dispatches() {
+    let runtime = serving_runtime();
+    let request = request(
+        "runtime-security-happy-msg",
+        CAPABILITY,
+        b"secure payload",
+        operation_context("runtime-security-happy-op", "runtime-security-happy-corr"),
+    );
+
+    let principal = user_principal("runtime-security-user");
+    let calling_service = service_principal("runtime-security-service");
+
+    let authorization_observed = Arc::new(Mutex::new(false));
+    let authorizer = RecordingAuthorizer {
+        expected_capability: CapabilityId::new(CAPABILITY).unwrap(),
+        expected_principal: principal.clone(),
+        expected_calling_service: Some(calling_service.clone()),
+        observed: Arc::clone(&authorization_observed),
+        result: AuthorizationDecision::Allow,
+    };
+
+    let middleware = SecurityMiddleware::new(
+        TestAuthenticator {
+            result: Ok(principal.clone()),
+        },
+        authorizer,
+        TestCredentialExtractor {
+            credentials: Some(b"opaque credentials".to_vec()),
+        },
+    );
+
+    let initial_context = EngineContext::new(request.envelope.operation_context.clone())
+        .with_security(SecurityContext::new(
+            service_principal("initial-caller-placeholder"),
+            Some(calling_service.clone()),
+        ));
+
+    let mut context = initial_context;
+    let mut request = request;
+
+    let handler_observed = Arc::new(Mutex::new(false));
+    let handler_observed_by_downstream = Arc::clone(&handler_observed);
+    let principal_observed_by_downstream = principal.clone();
+    let calling_service_observed_by_downstream = calling_service.clone();
+
+    let pipeline = ExecutionPipeline::new().with_middleware(middleware);
+
+    let result: Result<UniversalResponse, RequestPipelineError<_>> = pipeline.run_request(
+        &mut context,
+        &mut request,
+        move |context, request| -> Result<UniversalResponse, ()> {
+            *handler_observed_by_downstream.lock().unwrap() = true;
+
+            let security = context
+                .security()
+                .expect("successful authentication must establish security context");
+
+            assert_eq!(security.principal(), &principal_observed_by_downstream);
+            assert_eq!(
+                security.calling_service(),
+                Some(&calling_service_observed_by_downstream),
+            );
+
+            Ok(response_for_request(request, b"secure response"))
+        },
+    );
+
+    let response = result.expect("authenticated and authorized request must dispatch");
+    assert_eq!(response.status, Status::Success);
+    assert_eq!(response.envelope.payload.bytes(), b"secure response");
+    assert!(*authorization_observed.lock().unwrap());
+    assert!(*handler_observed.lock().unwrap());
+
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn runtime_request_pipeline_rejects_authentication_failure_before_dispatch() {
+    let runtime = serving_runtime();
+    let request = request(
+        "runtime-security-auth-reject-msg",
+        CAPABILITY,
+        b"secure payload",
+        operation_context(
+            "runtime-security-auth-reject-op",
+            "runtime-security-auth-reject-corr",
+        ),
+    );
+
+    let middleware = SecurityMiddleware::new(
+        TestAuthenticator {
+            result: Err(AuthenticationError::InvalidCredentials),
+        },
+        TestAuthorizer {
+            result: Ok(AuthorizationDecision::Allow),
+        },
+        TestCredentialExtractor {
+            credentials: Some(b"invalid credentials".to_vec()),
+        },
+    );
+
+    let mut context = EngineContext::new(request.envelope.operation_context.clone());
+    let mut request = request;
+    let handler_called = Arc::new(AtomicBool::new(false));
+    let handler_called_by_downstream = Arc::clone(&handler_called);
+
+    let pipeline = ExecutionPipeline::new().with_middleware(middleware);
+
+    let result: Result<UniversalResponse, RequestPipelineError<_>> = pipeline.run_request(
+        &mut context,
+        &mut request,
+        move |_context, _request| -> Result<UniversalResponse, ()> {
+            handler_called_by_downstream.store(true, Ordering::SeqCst);
+            Ok(response_for_request(_request, b"must not dispatch"))
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(RequestPipelineError::Middleware(
+            nizaam_core::middleware::chain::MiddlewareChainError::Rejected(_)
+        ))
+    ));
+    assert!(!handler_called.load(Ordering::SeqCst));
+    assert!(context.security().is_none());
+
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn runtime_request_pipeline_fails_on_authentication_subsystem_failure_before_dispatch() {
+    let runtime = serving_runtime();
+    let request = request(
+        "runtime-security-auth-fail-msg",
+        CAPABILITY,
+        b"secure payload",
+        operation_context(
+            "runtime-security-auth-fail-op",
+            "runtime-security-auth-fail-corr",
+        ),
+    );
+
+    let middleware = SecurityMiddleware::new(
+        TestAuthenticator {
+            result: Err(AuthenticationError::Failed),
+        },
+        TestAuthorizer {
+            result: Ok(AuthorizationDecision::Allow),
+        },
+        TestCredentialExtractor {
+            credentials: Some(b"credentials".to_vec()),
+        },
+    );
+
+    let mut context = EngineContext::new(request.envelope.operation_context.clone());
+    let mut request = request;
+    let handler_called = Arc::new(AtomicBool::new(false));
+    let handler_called_by_downstream = Arc::clone(&handler_called);
+
+    let pipeline = ExecutionPipeline::new().with_middleware(middleware);
+
+    let result = pipeline.run_request(
+        &mut context,
+        &mut request,
+        move |_context, _request| -> Result<UniversalResponse, ()> {
+            handler_called_by_downstream.store(true, Ordering::SeqCst);
+            Ok(response_for_request(_request, b"must not dispatch"))
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(RequestPipelineError::Middleware(
+            nizaam_core::middleware::chain::MiddlewareChainError::Middleware(_)
+        ))
+    ));
+    assert!(!handler_called.load(Ordering::SeqCst));
+    assert!(context.security().is_none());
+
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn runtime_request_pipeline_rejects_authorization_deny_before_dispatch() {
+    let runtime = serving_runtime();
+    let request = request(
+        "runtime-security-authz-deny-msg",
+        CAPABILITY,
+        b"secure payload",
+        operation_context(
+            "runtime-security-authz-deny-op",
+            "runtime-security-authz-deny-corr",
+        ),
+    );
+
+    let principal = user_principal("runtime-security-denied-user");
+
+    let middleware = SecurityMiddleware::new(
+        TestAuthenticator {
+            result: Ok(principal),
+        },
+        TestAuthorizer {
+            result: Ok(AuthorizationDecision::Deny),
+        },
+        TestCredentialExtractor {
+            credentials: Some(b"valid credentials".to_vec()),
+        },
+    );
+
+    let mut context = EngineContext::new(request.envelope.operation_context.clone());
+    let mut request = request;
+    let handler_called = Arc::new(AtomicBool::new(false));
+    let handler_called_by_downstream = Arc::clone(&handler_called);
+
+    let pipeline = ExecutionPipeline::new().with_middleware(middleware);
+
+    let result: Result<UniversalResponse, RequestPipelineError<_>> = pipeline.run_request(
+        &mut context,
+        &mut request,
+        move |_context, _request| -> Result<UniversalResponse, ()> {
+            handler_called_by_downstream.store(true, Ordering::SeqCst);
+            Ok(response_for_request(_request, b"must not dispatch"))
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(RequestPipelineError::Middleware(
+            nizaam_core::middleware::chain::MiddlewareChainError::Rejected(_)
+        ))
+    ));
+    assert!(!handler_called.load(Ordering::SeqCst));
+
+    let security = context
+        .security()
+        .expect("authentication succeeds before authorization denial");
+    assert_eq!(
+        security.principal(),
+        &user_principal("runtime-security-denied-user"),
+    );
+
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn runtime_request_pipeline_fails_on_authorization_subsystem_failure_before_dispatch() {
+    let runtime = serving_runtime();
+    let request = request(
+        "runtime-security-authz-fail-msg",
+        CAPABILITY,
+        b"secure payload",
+        operation_context(
+            "runtime-security-authz-fail-op",
+            "runtime-security-authz-fail-corr",
+        ),
+    );
+
+    let principal = user_principal("runtime-security-failing-user");
+
+    let middleware = SecurityMiddleware::new(
+        TestAuthenticator {
+            result: Ok(principal.clone()),
+        },
+        TestAuthorizer {
+            result: Err(AuthorizationError::Failed),
+        },
+        TestCredentialExtractor {
+            credentials: Some(b"valid credentials".to_vec()),
+        },
+    );
+
+    let mut context = EngineContext::new(request.envelope.operation_context.clone());
+    let mut request = request;
+    let handler_called = Arc::new(AtomicBool::new(false));
+    let handler_called_by_downstream = Arc::clone(&handler_called);
+
+    let pipeline = ExecutionPipeline::new().with_middleware(middleware);
+
+    let result: Result<UniversalResponse, RequestPipelineError<_>> = pipeline.run_request(
+        &mut context,
+        &mut request,
+        move |_context, _request| -> Result<UniversalResponse, ()> {
+            handler_called_by_downstream.store(true, Ordering::SeqCst);
+            Ok(response_for_request(_request, b"must not dispatch"))
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(RequestPipelineError::Middleware(
+            nizaam_core::middleware::chain::MiddlewareChainError::Middleware(_)
+        ))
+    ));
+    assert!(!handler_called.load(Ordering::SeqCst));
+
+    let security = context
+        .security()
+        .expect("authentication succeeds before authorization failure");
+    assert_eq!(security.principal(), &principal);
 
     runtime.shutdown().unwrap();
 }

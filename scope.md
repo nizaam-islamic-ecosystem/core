@@ -25,7 +25,7 @@ Implementation began with an existing Cargo library skeleton at the repository r
 | 6  | Capability System                            | 6     | verified    |
 | 7  | Transport and universal client/server        | 7     | verified    |
 | 8  | Engine Runtime                               | 8     | verified    |
-| 9  | Middleware and Security                      | 9     | not started |
+| 9  | Middleware and Security                      | 9     | in progress |
 | 10 | Artifact and Provenance                      | 10    | not started |
 | 11 | Observability, Health, Configuration         | 11    | not started |
 | 12 | Streaming, Concurrency, Background Tasks     | 12    | not started |
@@ -305,13 +305,15 @@ Before declaring a phase complete, the agent must verify the phase against:
 
 The minimum completion verification for every implementation phase is:
 
-    cargo test --workspace
-    cargo test --workspace --all-targets
-    cargo test --workspace --doc
-    cargo check --workspace
-    cargo build --workspace
-    cargo fmt --all --check
-    cargo clippy --workspace --all-targets -- -D warnings
+   {
+      cargo test --workspace &&
+      cargo test --workspace --all-targets &&
+      cargo test --workspace --doc &&
+      cargo check --workspace &&
+      cargo build --workspace &&
+      cargo fmt --all --check &&
+      cargo clippy --workspace --all-targets -- -D warnings
+   } > cargo-check.log 2>&1
 
 These checks must be run from the repository root.
 

@@ -243,11 +243,13 @@ fn engine_runtime_exposes_the_same_ordered_lifecycle() {
         LifecycleState::Ready,
         LifecycleState::Serving,
         LifecycleState::Draining,
-        LifecycleState::Stopped,
     ] {
         runtime.transition(state).unwrap();
         assert_eq!(runtime.state(), state);
     }
+
+    runtime.shutdown().unwrap();
+    assert_eq!(runtime.state(), LifecycleState::Stopped);
 }
 
 #[test]

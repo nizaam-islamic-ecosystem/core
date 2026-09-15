@@ -1,6 +1,17 @@
 use std::time::Duration;
 
 use nizaam_core::prelude::*;
+use nizaam_core::security::{PrincipalId, PrincipalIdentity, PrincipalType};
+
+fn test_security_context() -> SecurityContext {
+    SecurityContext::new(
+        PrincipalIdentity::new(
+            PrincipalType::User,
+            PrincipalId::new("context-test-user").unwrap(),
+        ),
+        None,
+    )
+}
 
 #[test]
 fn consumer_can_propagate_engine_context_to_downstream_work() {
@@ -11,7 +22,7 @@ fn consumer_can_propagate_engine_context_to_downstream_work() {
     let provenance = ProvenanceContext::new().with_attribute("source", "test");
     let context = EngineContext::new(OperationContext::new(operation))
         .with_deadline(Deadline::from_now(Duration::from_secs(1)).unwrap())
-        .with_security(SecurityContext::new())
+        .with_security(test_security_context())
         .with_provenance(provenance);
     let child = context.child_with_deadline(Deadline::from_now(Duration::from_secs(2)).unwrap());
 
@@ -167,7 +178,7 @@ fn security_context_propagates_to_child() {
         CorrelationId::new("security-corr").unwrap(),
     );
     let context =
-        EngineContext::new(OperationContext::new(operation)).with_security(SecurityContext::new());
+        EngineContext::new(OperationContext::new(operation)).with_security(test_security_context());
     let child = context.child();
     assert_eq!(child.security(), context.security());
 }

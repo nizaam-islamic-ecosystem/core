@@ -11,9 +11,7 @@ pub mod operation;
 pub mod prelude;
 pub mod status;
 
-// These private module boundaries establish the approved Core structure. They
-// become public only when their corresponding phase has a deliberate API.
-pub(crate) mod artifacts;
+pub mod artifact;
 pub mod client;
 pub(crate) mod config;
 pub(crate) mod conformance;

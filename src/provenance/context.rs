@@ -36,11 +36,13 @@ mod tests {
         assert_eq!(context.attribute("source"), Some("fixture"));
         assert_eq!(context.attribute("stage"), None);
         assert_eq!(derived.attribute("stage"), Some("decode"));
+        assert_eq!(derived.attribute("source"), Some("fixture"));
     }
 
     #[test]
     fn empty_context_returns_none_for_missing_keys() {
         let context = ProvenanceContext::new();
+
         assert_eq!(context.attribute("missing"), None);
     }
 

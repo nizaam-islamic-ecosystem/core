@@ -1,0 +1,6 @@
+{
+  "strictness": 3,
+  "commentTypes": ["logic", "syntax"],
+  "triggerOnUpdates": true,
+  "instructions": "Only report genuine, actionable issues supported by the actual code, tests, architecture, or documented contracts. Do not report hypothetical, speculative, theoretical, stylistic, or low-confidence concerns. When uncertain whether an issue is real, do not report it."
+}

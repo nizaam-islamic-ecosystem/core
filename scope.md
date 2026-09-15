@@ -305,15 +305,15 @@ Before declaring a phase complete, the agent must verify the phase against:
 
 The minimum completion verification for every implementation phase is:
 
+   set -o pipefail
    {
-      cargo test --workspace &&
-      cargo test --workspace --all-targets &&
-      cargo test --workspace --doc &&
-      cargo check --workspace &&
-      cargo build --workspace &&
       cargo fmt --all --check &&
-      cargo clippy --workspace --all-targets -- -D warnings
-   } > cargo-check.log 2>&1
+      cargo clippy --workspace --all-targets -- -D warnings &&
+      cargo build --workspace &&
+      cargo check --workspace &&
+      cargo test --workspace --all-targets &&
+      cargo test --workspace --doc
+   } 2>&1 | tee cargo-check.log
 
 These checks must be run from the repository root.
 
@@ -17458,4 +17458,4 @@ Phase 9, Middleware and Security, is now implemented, reviewed, verified, and me
 
 ## Next Step
 
-Phase 10 may now rely on the verified Phase 9 security boundary but must continue to preserve the same Core/engine boundaries and the explicit STOP → EXPLAIN → ASK → WAIT → IMPLEMENT rule whenever a requirement or architectural choice is not already defined.
+Phase 10 : Artifact and Provenance

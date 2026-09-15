@@ -25,9 +25,9 @@ Implementation began with an existing Cargo library skeleton at the repository r
 | 6  | Capability System                            | 6     | verified    |
 | 7  | Transport and universal client/server        | 7     | verified    |
 | 8  | Engine Runtime                               | 8     | verified    |
-| 9  | Middleware and Security                      | 9     | in progress |
-| 10 | Artifact and Provenance                      | 10    | not started |
-| 11 | Observability, Health, Configuration         | 11    | not started |
+| 9  | Middleware and Security                      | 9     | verified    |
+| 10 | Artifact and Provenance                      | 10    | verified    |
+| 11 | Observability, Health, Configuration         | 11    | in progress |
 | 12 | Streaming, Concurrency, Background Tasks     | 12    | not started |
 | 13 | Retry and Idempotency                        | 13    | not started |
 | 14 | Internal Events                              | 14    | not started |
@@ -3900,6 +3900,34 @@ reference resolution, immutability, publication, retrieval, integrity
 verification, lifecycle transitions, security enforcement, provenance
 relationships, historical provenance behavior, large-content access, and
 Phase 7 transport integration.
+
+* [x] Implement artifact identity and stable `ArtifactId` handling
+* [x] Implement distinct `Artifact`, `ArtifactVersion`, and `ArtifactReference` concepts
+* [x] Implement immutable artifact version mechanics
+* [x] Implement exact-version and mutable-alias references
+* [x] Implement deterministic artifact resolution
+* [x] Implement provider-neutral `ContentReference`
+* [x] Implement generic artifact structural validation
+* [x] Implement content digest and integrity verification
+* [x] Require verified integrity evidence for publication
+* [x] Implement artifact lifecycle transitions
+* [x] Implement publication through the dedicated validated-to-published transition
+* [x] Prevent unpublished versions from normal published resolution
+* [x] Implement provider-neutral artifact storage and retrieval abstractions
+* [x] Preserve support for large artifacts without requiring complete Core-memory materialization
+* [x] Implement alias management without mutating exact artifact versions
+* [x] Implement superseded, archived, and revoked lifecycle semantics
+* [x] Reuse the Phase 9 security boundary for artifact access
+* [x] Implement provenance records and provenance relationships
+* [x] Preserve historical provenance across later artifact lifecycle changes
+* [x] Preserve exact artifact versions for reproducible execution and provenance
+* [x] Keep artifact/content identity independent from transport frame boundaries
+* [x] Preserve distinct artifact failure categories
+* [x] Add unit tests for artifact and provenance modules
+* [x] Add public integration coverage in `tests/artifact.rs`, `tests/provenance.rs`, and `tests/integration.rs`
+* [x] Preserve previously verified Phase 0–9 behavior
+* [x] Complete implementation review and resolve genuine findings before merge
+* [x] Complete full workspace verification before merge
 
 ---
 
@@ -17436,6 +17464,30 @@ architecture.
 * Authentication request debugging is redacted. Credential bytes are represented as `[REDACTED]` in `Debug` output so debug formatting cannot disclose authentication material.
 * Security processing remains independent from transport implementation, serialization provider, storage, domain authorization, and Control Plane routing.
 * Phase 9 does not add retry, idempotency, artifact persistence, advanced streaming/concurrency policy, Internal Events, Control Plane routing, Engine SDK behavior, or domain workflows.
+* Core manages artifact identity, versioning, references, lifecycle mechanics, integrity mechanisms, publication, resolution, retrieval abstractions, access mechanisms, and provenance linkage without owning artifact domain semantics.
+* `Artifact`, `ArtifactVersion`, and `ArtifactReference` are distinct concepts and must not be collapsed into one type.
+* `ArtifactId` provides stable logical artifact identity across versions. Version identity and content digest remain distinct from artifact identity.
+* An `ArtifactVersion` represents one exact immutable logical content state and may reference a physical content representation through `ContentReference`.
+* Artifact versions do not imply ordering or Semantic Versioning semantics unless explicitly authorized later.
+* A published artifact version is immutable with respect to its content, content identity, version identity, and integrity information. Content changes require creation of a new version.
+* One logical artifact version may have multiple physical representations. Physical representation differences do not automatically create new logical artifact versions.
+* `ContentReference` remains provider-neutral. Core does not become an object-storage, database, filesystem, S3, or other storage-provider implementation.
+* Artifact retrieval must remain compatible with large content and must not require complete artifact materialization in Core memory.
+* Resolution and retrieval are separate mechanisms. Resolution identifies an exact artifact version; retrieval obtains content; integrity verification determines whether retrieved content matches the recorded integrity information.
+* Artifact versions must contain verifiable integrity information before successful publication.
+* Publication is distinct from creation and must behave as an externally atomic `VALIDATED → PUBLISHED` transition.
+* Unpublished versions must remain outside the normal published-artifact resolution path.
+* Mutable aliases are resolution metadata and do not modify artifact versions. Exact versions remain independently addressable and immutable.
+* Exact artifact versions are canonical for executable provenance and reproducibility. Mutable aliases may be retained as submission/history metadata but must not replace the resolved exact version.
+* A running operation must not silently switch artifact versions because a mutable alias changes.
+* `SUPERSEDED`, `ARCHIVED`, and `REVOKED` have distinct meanings. Supersession does not erase historical validity, while revocation prevents normal trusted use according to applicable policy.
+* Historical provenance is append-oriented and must not be silently rewritten when artifact lifecycle state changes later.
+* Provenance records reference artifacts and exact versions rather than duplicating artifact content.
+* Provenance remains extensible for operation attempts introduced by Phase 13 without implementing retry semantics in Phase 10.
+* Artifact access and authorization reuse the Phase 9 security boundary. Phase 10 does not introduce an independent artifact authorization framework.
+* Artifact identity and content remain independent from individual Phase 7 transport frames. Large artifacts may span multiple bounded transport frames without becoming multiple artifact versions.
+* Physical deduplication and content-addressable storage are optional provider concerns. Equal content digests do not make logical artifact versions identical.
+* Artifact failure conditions remain semantically distinct, including not found, invalid reference, integrity failure, validation failure, resolution failure, publication failure, retrieval failure, access denial, and revoked artifact conditions.
 
 ## Corrections / Changes
 
@@ -17454,8 +17506,16 @@ None currently. Concrete trait signatures, provider choices, serialization, asyn
 
 ## Current State
 
-Phase 9, Middleware and Security, is now implemented, reviewed, verified, and merged. The verified Core foundation therefore extends through Phase 9.
+Phase 10, Artifact and Provenance, is now implemented, reviewed, verified, and merged. The verified Core foundation therefore extends through Phase 10.
+
+The completed Phase 10 implementation provides the shared artifact and provenance mechanisms for artifact identity, immutable versioning, lightweight exact/alias references, provider-neutral content references, integrity verification, lifecycle management, validated publication, storage, resolution, retrieval boundaries, and historical provenance relationships. Published artifact versions require verified integrity evidence, lifecycle publication remains atomic, exact versions remain canonical for execution and provenance, and provenance remains independent of later artifact lifecycle changes.
+
+Phase 10 was reviewed against automated CodeRabbit and Greptile findings. Genuine correctness and test-quality findings were fixed, including publication lifecycle error handling, provenance lifecycle test ordering, and published-content integrity verification. The `scope.md` pipefail verification issue was already corrected separately and was intentionally not changed as part of the Phase 10 code fixes. The repository was then fully verified with the required workspace formatting, Clippy, build, check, test, all-targets, and documentation checks before merge.
+
+The Phase 10 implementation preserves all previously verified Phase 0–9 contracts and boundaries. No hypothetical edge-case hardening was added without a concrete correctness requirement or demonstrated issue.
 
 ## Next Step
 
-Phase 10 : Artifact and Provenance
+Phase 10 is complete and remains merged as the shared artifact and provenance foundation.
+
+Proceed to **Phase 11: Observability, Health, and Configuration**, while preserving the verified Phase 0–10 architecture, contracts, and boundaries. Phase 11 should build on the existing Error, Logging, Context, Runtime, Security, Artifact, and Provenance mechanisms without replacing or duplicating them.

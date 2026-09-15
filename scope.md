@@ -2602,6 +2602,29 @@ middleware enforcement, authentication and authorization behavior, security
 context propagation, identity separation, rejection/failure handling,
 concurrent request isolation, and integration with the Phase 8 runtime.
 
+* [x] Implement mandatory request middleware enforcement.
+* [x] Integrate mandatory middleware into the Engine Runtime request boundary.
+* [x] Preserve deterministic request/response middleware ordering.
+* [x] Stop downstream execution on middleware rejection or failure.
+* [x] Support provider-neutral user, service, and engine identities.
+* [x] Establish trusted `SecurityContext` after successful authentication.
+* [x] Preserve calling-service identity where applicable.
+* [x] Propagate security context through child execution contexts.
+* [x] Perform capability identification separately from executable capability resolution.
+* [x] Perform generic Core authorization before executable capability resolution.
+* [x] Prevent unauthorized requests from reaching capability handlers.
+* [x] Preserve request-scoped context isolation for concurrent requests.
+* [x] Preserve cancellation and deadline precedence after middleware processing.
+* [x] Prevent capability identity mutation between authorization and dispatch.
+* [x] Produce universal failure responses when the communication contract remains usable.
+* [x] Preserve distinctions between security, pipeline, transport, capability, and handler failures.
+* [x] Add basic tracing and metrics middleware integration points.
+* [x] Redact authentication credentials from debug output.
+* [x] Log pipeline failures through the existing Core Logging System without credential leakage.
+* [x] Add or update unit, integration, and conformance coverage.
+* [x] Preserve previously verified Phase 0–8 behavior.
+* [x] Complete implementation review and resolve genuine findings before merge.
+
 ---
 
 ## Phase 10: Artifact and Provenance
@@ -17391,10 +17414,39 @@ architecture.
 * Phase 8 does not implement retry, idempotency, advanced streaming, security middleware/authorization policy, artifact persistence, detailed observability/health, Internal Events, Control Plane routing, Engine SDK, domain workflows, engine-specific storage, or a mandatory global concurrency policy.
 * Phase 8 integration tests verify composition of the already implemented Core mechanisms rather than requiring a production engine implementation. This keeps runtime behavior testable without introducing engine-specific semantics into Core.
 * Phase 8 completion does not require Core to model every possible future engine edge case. Additional engine-specific and cross-system edge cases can be covered progressively as actual engines and later Core phases introduce concrete requirements.
+* Mandatory middleware is enforced by the Core runtime request path rather than by application convention.
+* An empty/unconfigured middleware pipeline is fail-closed for externally handled runtime requests because the Phase 9 security boundary is mandatory.
+* `EngineServer` integrates the `ExecutionPipeline` directly rather than creating a second request-processing system.
+* Security middleware uses provider-neutral `Authenticator`, `Authorizer`, and credential-extraction abstractions. No JWT, OAuth, API key, mTLS, OIDC, external IdP, or concrete security provider is selected by Core.
+* `SecurityContext` contains the authenticated principal and optional calling-service identity. This preserves both original caller identity and intermediate service identity when both are relevant.
+* `EngineContext.security` remains optional before authentication. Core does not invent an anonymous or fake principal merely to satisfy the context shape.
+* Child `EngineContext` values preserve the trusted `SecurityContext`, keeping security context propagation aligned with the established Phase 5 context model.
+* Generic Core authorization consumes the requested `CapabilityId` identified from the universal request descriptor and does not require resolving the executable handler before authorization.
+* `CapabilityId` used by security/runtime integration comes from the established identity module and is not redefined by the Capability System.
+* The universal request constructor remains explicit through `UniversalRequest::new(MessageEnvelope::new(...))`; no implicit conversion from `MessageEnvelope` is introduced.
+* Middleware may inspect or enrich shared runtime state, but request-specific security state remains scoped to the current `EngineContext` and must not be stored as mutable global current-request state.
+* Request middleware runs in registration order. Response middleware runs in reverse registration order, giving outer middleware the expected response-finalization symmetry.
+* Middleware rejection and middleware failure both stop downstream capability execution. The distinction is preserved in the pipeline error model.
+* Middleware cannot be treated as a substitute for capability/domain authorization. Engine-owned authorization may still apply after generic Core authorization and before domain handler execution.
+* The server captures the admitted capability identity and rejects a middleware path that attempts to change that capability before handler dispatch. This prevents authorization of one capability followed by execution of another.
+* A request that continues through middleware without establishing trusted security context is rejected before capability dispatch. This is a deliberate fail-closed rule for the externally admitted runtime path.
+* Cancellation and deadline checks remain owned by the established Phase 5 context mechanisms. Phase 9 integrates with them rather than creating a second security-specific timeout or cancellation mechanism.
+* Basic tracing and metrics integration remain middleware concerns in Phase 9; complete telemetry, health, diagnostics, and configuration remain Phase 11 responsibilities.
+* Pipeline failures are logged through the existing Core `LoggingSystem` as structured errors while credential material is excluded from logs.
+* Authentication request debugging is redacted. Credential bytes are represented as `[REDACTED]` in `Debug` output so debug formatting cannot disclose authentication material.
+* Security processing remains independent from transport implementation, serialization provider, storage, domain authorization, and Control Plane routing.
+* Phase 9 does not add retry, idempotency, artifact persistence, advanced streaming/concurrency policy, Internal Events, Control Plane routing, Engine SDK behavior, or domain workflows.
 
 ## Corrections / Changes
 
 * The Cargo package is `core` and its library target is `nizaam_core`; the existing directory, library root, and private module scaffold remain in place.
+* Runtime execution ordering was corrected so configured runtime stages execute before request middleware, while the middleware boundary still remains mandatory before capability dispatch.
+* Cancellation and deadline state is re-checked after request middleware so middleware cannot continue a request that has become cancelled or expired into downstream capability execution.
+* The communication integration path was updated to use an actual test `SecurityMiddleware` stack rather than a pass-through middleware that would violate the fail-closed trusted-context contract.
+* The security integration test imports and uses the public `Authorizer` contract correctly.
+* Authentication credential material is redacted from `AuthenticationRequest` debug formatting.
+* `EngineServer` records `RequestPipelineError` through the existing Core Logging System before returning the failure response where the communication contract remains usable.
+* The server imports `MiddlewareChainError` from its actual defining module rather than relying on a private re-export.
 
 ## Open Questions
 
@@ -17402,8 +17454,8 @@ None currently. Concrete trait signatures, provider choices, serialization, asyn
 
 ## Current State
 
-Phase 8, Engine Runtime, is implemented and verified. The Core repository now has verified foundations through Phase 8: workspace/library foundation, identity and operation foundations, Universal Contract Layer, Error System, Logging System, Context execution infrastructure, Capability System, Transport and universal client/server, and Engine Runtime. Phase 8 establishes the shared runtime lifecycle, admission, execution coordination, context propagation, capability dispatch, concurrency mechanisms, background task lifecycle, and shutdown coordination while preserving engine ownership of domain semantics. Automated review findings were verified and genuine issues were fixed before merge preparation. No unresolved Phase 8 architectural question remains.
+Phase 9, Middleware and Security, is now implemented, reviewed, verified, and merged. The verified Core foundation therefore extends through Phase 9.
 
 ## Next Step
 
-Phase 9: Middleware and Security.
+Phase 10 may now rely on the verified Phase 9 security boundary but must continue to preserve the same Core/engine boundaries and the explicit STOP → EXPLAIN → ASK → WAIT → IMPLEMENT rule whenever a requirement or architectural choice is not already defined.

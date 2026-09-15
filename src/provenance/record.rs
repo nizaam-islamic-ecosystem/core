@@ -7,6 +7,10 @@
 //! source → relation → target
 //! ```
 //!
+//! Historical provenance must preserve exact artifact versions. Mutable
+//! aliases may be used before recording, but must be resolved to exact
+//! version references before a record is considered valid.
+//!
 //! The record does not resolve references, access content, perform
 //! authorization, or contain retry/attempt state.
 //!
@@ -58,9 +62,16 @@ impl ProvenanceRecord {
         &self.target
     }
 
-    /// Returns whether both artifact references are structurally valid.
+    /// Returns whether the record contains valid, exact artifact references.
+    ///
+    /// Mutable aliases are intentionally rejected because their targets can
+    /// change after the historical fact is recorded. Callers should resolve
+    /// aliases before constructing executable or historical provenance.
     pub fn is_valid(&self) -> bool {
-        self.source.is_valid() && self.target.is_valid()
+        self.source.is_valid()
+            && self.target.is_valid()
+            && self.source.is_exact()
+            && self.target.is_exact()
     }
 }
 
@@ -126,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn alias_references_are_preserved_without_resolution() {
+    fn alias_references_are_not_valid_historical_provenance() {
         let source = ArtifactReference::with_selector(
             ArtifactId::new("source-artifact").unwrap(),
             crate::artifact::VersionSelector::alias("latest"),
@@ -138,7 +149,7 @@ mod tests {
 
         assert_eq!(record.source(), &source);
         assert!(record.source().is_alias());
-        assert!(record.is_valid());
+        assert!(!record.is_valid());
     }
 
     #[test]

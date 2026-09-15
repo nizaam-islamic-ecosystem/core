@@ -4,7 +4,8 @@
 //!
 //! Created → Validating → Validated → Published → Superseded → Archived
 //!
-//! `Revoked` is an exceptional trust/usage state reachable from `Published`.
+//! `Revoked` is an exceptional trust/usage state reachable from `Published`
+//! or `Superseded`.
 //!
 //! Not every artifact version must pass through every state.
 //!
@@ -94,8 +95,8 @@ pub fn can_transition(from: LifecycleState, to: LifecycleState) -> Result<(), Li
         (LifecycleState::Validated, LifecycleState::Published) => Ok(()),
         (LifecycleState::Published, LifecycleState::Superseded) => Ok(()),
         (LifecycleState::Superseded, LifecycleState::Archived) => Ok(()),
-
         (LifecycleState::Published, LifecycleState::Revoked) => Ok(()),
+        (LifecycleState::Superseded, LifecycleState::Revoked) => Ok(()),
 
         _ => Err(LifecycleError::new(from, to)),
     }
@@ -120,19 +121,20 @@ mod tests {
     #[test]
     fn valid_forward_transitions_are_allowed() {
         assert!(transition(LifecycleState::Created, LifecycleState::Validating).is_ok());
-
         assert!(transition(LifecycleState::Validating, LifecycleState::Validated).is_ok());
-
         assert!(transition(LifecycleState::Validated, LifecycleState::Published).is_ok());
-
         assert!(transition(LifecycleState::Published, LifecycleState::Superseded).is_ok());
-
         assert!(transition(LifecycleState::Superseded, LifecycleState::Archived).is_ok());
     }
 
     #[test]
     fn published_version_can_be_revoked() {
         assert!(transition(LifecycleState::Published, LifecycleState::Revoked).is_ok());
+    }
+
+    #[test]
+    fn superseded_version_can_be_revoked() {
+        assert!(transition(LifecycleState::Superseded, LifecycleState::Revoked).is_ok());
     }
 
     #[test]
@@ -155,28 +157,18 @@ mod tests {
     #[test]
     fn backward_transitions_are_rejected() {
         assert!(transition(LifecycleState::Validating, LifecycleState::Created).is_err());
-
         assert!(transition(LifecycleState::Validated, LifecycleState::Validating).is_err());
-
         assert!(transition(LifecycleState::Published, LifecycleState::Validated).is_err());
-
         assert!(transition(LifecycleState::Superseded, LifecycleState::Published).is_err());
-
         assert!(transition(LifecycleState::Archived, LifecycleState::Superseded).is_err());
     }
 
     #[test]
     fn invalid_cross_state_transitions_are_rejected() {
         assert!(transition(LifecycleState::Created, LifecycleState::Published).is_err());
-
         assert!(transition(LifecycleState::Created, LifecycleState::Revoked).is_err());
-
         assert!(transition(LifecycleState::Validated, LifecycleState::Superseded).is_err());
-
         assert!(transition(LifecycleState::Validated, LifecycleState::Revoked).is_err());
-
-        assert!(transition(LifecycleState::Superseded, LifecycleState::Revoked).is_err());
-
         assert!(transition(LifecycleState::Archived, LifecycleState::Revoked).is_err());
     }
 
@@ -215,7 +207,6 @@ mod tests {
     #[test]
     fn lifecycle_error_preserves_transition_states() {
         let error = LifecycleError::new(LifecycleState::Created, LifecycleState::Published);
-
         assert_eq!(error.from(), LifecycleState::Created);
         assert_eq!(error.to(), LifecycleState::Published);
     }
@@ -223,9 +214,7 @@ mod tests {
     #[test]
     fn lifecycle_error_display_describes_transition() {
         let error = LifecycleError::new(LifecycleState::Created, LifecycleState::Published);
-
         let message = error.to_string();
-
         assert!(message.contains("Created"));
         assert!(message.contains("Published"));
         assert!(message.contains("invalid artifact lifecycle transition"));

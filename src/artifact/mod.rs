@@ -24,7 +24,9 @@ pub use publication::{PublicationError, publish};
 pub use reference::{ArtifactReference, VersionSelector};
 pub use resolution::{ResolutionError, resolve};
 pub use store::{ArtifactStore, InMemoryArtifactStore, StoreError};
-pub use version::ArtifactVersion;
+pub use version::{
+    ArtifactVersion, ArtifactVersionError, ArtifactVersionRecord, ArtifactVersionRestoreError,
+};
 
 #[cfg(test)]
 mod tests {
@@ -97,9 +99,9 @@ mod tests {
 
         assert_eq!(validated.lifecycle(), &LifecycleState::Validated);
 
-        let published = store
-            .transition_lifecycle(&artifact_id(), "v1", LifecycleState::Published)
-            .unwrap();
+        publish(&artifact_id(), "v1", &store).unwrap();
+
+        let published = store.get(&artifact_id(), "v1").unwrap().unwrap();
 
         assert_eq!(published.lifecycle(), &LifecycleState::Published);
 

@@ -8,8 +8,10 @@
 //! Mutable aliases are resolved through the artifact store's explicit alias
 //! mapping. Resolution never infers version ordering from version identifiers.
 //!
-//! Once resolution returns an exact version, that version is the concrete
-//! execution reference and must not silently change during the operation.
+//! The store boundary restores persisted records into validated live versions
+//! before they are returned here. Once resolution returns an exact version,
+//! that version is the concrete execution reference and must not silently
+//! change during the operation.
 
 use crate::artifact::reference::{ArtifactReference, VersionSelector};
 use crate::artifact::store::{ArtifactStore, StoreError};
@@ -135,6 +137,9 @@ fn map_store_error(error: StoreError) -> ResolutionError {
         StoreError::NotFound => ResolutionError::VersionNotFound,
         StoreError::AlreadyExists
         | StoreError::InvalidLifecycleTransition { .. }
+        | StoreError::RestorationFailed
+        | StoreError::PublicationRequired
+        | StoreError::InvalidContentReference
         | StoreError::LockPoisoned => ResolutionError::ResolutionFailure,
     }
 }

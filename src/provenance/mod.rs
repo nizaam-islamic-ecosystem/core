@@ -68,7 +68,7 @@ mod tests {
     }
 
     #[test]
-    fn provenance_record_can_preserve_an_alias_reference() {
+    fn provenance_record_rejects_an_alias_reference_as_historical_state() {
         let source = ArtifactReference::with_selector(
             ArtifactId::new("source-artifact").unwrap(),
             VersionSelector::alias("latest"),
@@ -80,7 +80,7 @@ mod tests {
             target_reference(),
         );
 
-        assert!(record.is_valid());
+        assert!(!record.is_valid());
         assert_eq!(record.source(), &source);
         assert!(record.source().is_alias());
     }

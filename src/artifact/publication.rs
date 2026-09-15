@@ -59,8 +59,8 @@ impl std::error::Error for PublicationError {}
 
 /// Publishes a validated artifact version.
 ///
-/// The operation first verifies publication prerequisites and then delegates
-/// the lifecycle mutation to the artifact store.
+/// The operation verifies publication prerequisites and then uses the store's
+/// atomic `Validated → Published` compare-and-transition operation.
 pub fn publish(
     artifact_id: &ArtifactId,
     version: &str,
@@ -82,7 +82,7 @@ pub fn publish(
     }
 
     store
-        .transition_lifecycle(artifact_id, version, LifecycleState::Published)
+        .publish_validated(artifact_id, version)
         .map_err(map_store_error)?;
 
     Ok(())
@@ -92,10 +92,12 @@ pub fn publish(
 fn map_store_error(error: StoreError) -> PublicationError {
     match error {
         StoreError::NotFound | StoreError::InvalidVersion => PublicationError::NotFound,
-
+        StoreError::InvalidContentReference => PublicationError::InvalidContentReference,
         StoreError::InvalidAlias
         | StoreError::AlreadyExists
         | StoreError::InvalidLifecycleTransition { .. }
+        | StoreError::PublicationRequired
+        | StoreError::RestorationFailed
         | StoreError::LockPoisoned => PublicationError::Failed,
     }
 }
@@ -205,27 +207,56 @@ mod tests {
     }
 
     #[test]
-    fn invalid_content_reference_prevents_publication() {
-        let store = InMemoryArtifactStore::new();
+    fn concurrent_publication_allows_only_one_winner() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
 
-        let mut version = ArtifactVersion::new(
-            artifact_id(),
-            "v1",
-            ContentReference::new("", ""),
-            ContentDigest::new(b"artifact content"),
-            16,
+        let store = Arc::new(InMemoryArtifactStore::new());
+        store.store(validated_version()).unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+
+        for _ in 0..2 {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                publish(&artifact_id(), "v1", store.as_ref())
+            }));
+        }
+
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+        assert_eq!(
+            store
+                .get(&artifact_id(), "v1")
+                .unwrap()
+                .unwrap()
+                .lifecycle(),
+            &LifecycleState::Published
         );
+    }
 
-        version.set_lifecycle(LifecycleState::Validated);
-        store.store(version).unwrap();
+    #[test]
+    fn publication_rejects_a_stale_validated_expectation() {
+        let store = InMemoryArtifactStore::new();
+        store.store(validated_version()).unwrap();
+
+        publish(&artifact_id(), "v1", &store).unwrap();
 
         assert_eq!(
             publish(&artifact_id(), "v1", &store),
-            Err(PublicationError::InvalidContentReference)
+            Err(PublicationError::InvalidState {
+                actual: LifecycleState::Published
+            })
         );
-
-        let stored = store.get(&artifact_id(), "v1").unwrap().unwrap();
-        assert_eq!(stored.lifecycle(), &LifecycleState::Validated);
     }
 
     #[test]

@@ -21,33 +21,35 @@ fn content(value: &str) -> ContentReference {
     ContentReference::new("test-provider", format!("content/{value}"))
 }
 
-fn version(artifact_id: &ArtifactId, version_id: &str, bytes: &[u8]) -> ArtifactVersion {
+fn version(artifact_id: &ArtifactId, version: &str, bytes: &[u8]) -> ArtifactVersion {
     ArtifactVersion::new(
         artifact_id.clone(),
-        version_id,
-        content(version_id),
+        version,
+        content(version),
         ContentDigest::new(bytes),
         bytes.len() as u64,
     )
 }
 
 fn validated_version(artifact_id: &ArtifactId, version_id: &str, bytes: &[u8]) -> ArtifactVersion {
-    let artifact_version =
-        version(artifact_id, version_id, bytes).with_metadata("environment", "integration-test");
+    let artifact_version = version(artifact_id, version_id, bytes)
+        .with_metadata("environment", "integration-test")
+        .unwrap();
 
+    // `set_lifecycle` is intentionally crate-visible, so repository-level
+    // integration tests must use the public store lifecycle transition API.
     let store = InMemoryArtifactStore::new();
     store.store(artifact_version).unwrap();
-
     store
         .transition_lifecycle(artifact_id, version_id, LifecycleState::Validating)
         .unwrap();
-
     store
         .transition_lifecycle(artifact_id, version_id, LifecycleState::Validated)
         .unwrap();
 
     store.get(artifact_id, version_id).unwrap().unwrap()
 }
+
 #[test]
 fn logical_artifact_identity_is_stable_across_multiple_versions() {
     let id = artifact_id("dataset.example");
@@ -81,8 +83,12 @@ fn artifact_store_preserves_multiple_versions_and_their_metadata() {
     let id = artifact_id("model.example");
     let store = InMemoryArtifactStore::new();
 
-    let v1 = version(&id, "v1", b"model-v1").with_metadata("format", "binary");
-    let v2 = version(&id, "v2", b"model-v2").with_metadata("format", "binary");
+    let v1 = version(&id, "v1", b"model-v1")
+        .with_metadata("format", "binary")
+        .unwrap();
+    let v2 = version(&id, "v2", b"model-v2")
+        .with_metadata("format", "binary")
+        .unwrap();
 
     store.store(v1.clone()).unwrap();
     store.store(v2.clone()).unwrap();
@@ -239,6 +245,26 @@ fn publication_transitions_validated_version_without_changing_immutable_data() {
 }
 
 #[test]
+fn generic_lifecycle_transition_cannot_publish_a_validated_version() {
+    let id = artifact_id("artifact.publication-boundary");
+    let store = InMemoryArtifactStore::new();
+
+    store
+        .store(validated_version(&id, "v1", b"validated-content"))
+        .unwrap();
+
+    assert_eq!(
+        store.transition_lifecycle(&id, "v1", LifecycleState::Published),
+        Err(StoreError::PublicationRequired)
+    );
+
+    assert_eq!(
+        store.get(&id, "v1").unwrap().unwrap().lifecycle(),
+        &LifecycleState::Validated
+    );
+}
+
+#[test]
 fn publishing_a_created_version_fails_without_changing_lifecycle() {
     let id = artifact_id("artifact.invalid-publication");
     let store = InMemoryArtifactStore::new();
@@ -283,6 +309,31 @@ fn superseded_exact_version_remains_resolvable() {
 
     assert_eq!(resolved.version(), "v1");
     assert_eq!(resolved.lifecycle(), &LifecycleState::Superseded);
+}
+
+#[test]
+fn superseded_version_can_be_revoked_and_then_is_rejected_by_resolution() {
+    let id = artifact_id("artifact.superseded-revoked");
+    let store = InMemoryArtifactStore::new();
+
+    store
+        .store(validated_version(&id, "v1", b"old-version"))
+        .unwrap();
+    publish(&id, "v1", &store).unwrap();
+
+    store
+        .transition_lifecycle(&id, "v1", LifecycleState::Superseded)
+        .unwrap();
+    store
+        .transition_lifecycle(&id, "v1", LifecycleState::Revoked)
+        .unwrap();
+
+    let reference = ArtifactReference::new(id, "v1");
+
+    assert_eq!(
+        resolve(&reference, &store),
+        Err(ResolutionError::RevokedArtifact)
+    );
 }
 
 #[test]

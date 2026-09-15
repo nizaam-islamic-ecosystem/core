@@ -6,8 +6,11 @@
 //!
 //! The relation vocabulary is intentionally small and provider-neutral.
 
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
 /// A historical relationship between two provenance entities.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProvenanceRelation {
     /// The target was directly produced from the source.
     ProducedFrom,
@@ -34,6 +37,42 @@ impl ProvenanceRelation {
             Self::TransformedFrom => "transformed_from",
             Self::Referenced => "referenced",
             Self::Supersedes => "supersedes",
+        }
+    }
+}
+
+impl Serialize for ProvenanceRelation {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ProvenanceRelation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+
+        match value.as_str() {
+            "produced_from" => Ok(Self::ProducedFrom),
+            "derived_from" => Ok(Self::DerivedFrom),
+            "transformed_from" => Ok(Self::TransformedFrom),
+            "referenced" => Ok(Self::Referenced),
+            "supersedes" => Ok(Self::Supersedes),
+            other => Err(D::Error::unknown_variant(
+                other,
+                &[
+                    "produced_from",
+                    "derived_from",
+                    "transformed_from",
+                    "referenced",
+                    "supersedes",
+                ],
+            )),
         }
     }
 }
@@ -98,6 +137,13 @@ mod tests {
     }
 
     #[test]
+    fn relation_serializes_using_stable_wire_value() {
+        let serialized = serde_json::to_string(&ProvenanceRelation::ProducedFrom).unwrap();
+
+        assert_eq!(serialized, "\"produced_from\"");
+    }
+
+    #[test]
     fn relation_serialization_round_trips() {
         let relation = ProvenanceRelation::TransformedFrom;
 
@@ -105,5 +151,12 @@ mod tests {
         let deserialized = serde_json::from_str::<ProvenanceRelation>(&serialized).unwrap();
 
         assert_eq!(deserialized, relation);
+    }
+
+    #[test]
+    fn relation_deserialization_rejects_unknown_wire_value() {
+        let result = serde_json::from_str::<ProvenanceRelation>("\"ProducedFrom\"");
+
+        assert!(result.is_err());
     }
 }

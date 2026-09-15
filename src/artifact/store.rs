@@ -9,7 +9,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use crate::artifact::lifecycle::{LifecycleState, transition};
-use crate::artifact::version::ArtifactVersion;
+use crate::artifact::version::{
+    ArtifactVersion, ArtifactVersionRecord, ArtifactVersionRestoreError,
+};
 use crate::identity::ArtifactId;
 
 /// Errors produced by artifact storage operations.
@@ -33,6 +35,15 @@ pub enum StoreError {
         to: LifecycleState,
     },
 
+    /// Publishing must use the dedicated publication operation.
+    PublicationRequired,
+
+    /// The artifact content reference is invalid.
+    InvalidContentReference,
+
+    /// The persisted artifact version could not be trusted and restored.
+    RestorationFailed,
+
     /// Internal synchronization state could not be acquired.
     LockPoisoned,
 }
@@ -49,12 +60,30 @@ impl std::fmt::Display for StoreError {
                 "invalid artifact lifecycle transition from {:?} to {:?}",
                 from, to
             ),
+            Self::PublicationRequired => write!(
+                formatter,
+                "artifact publication requires the dedicated publication operation"
+            ),
+            Self::InvalidContentReference => {
+                write!(formatter, "artifact content reference is invalid")
+            }
+            Self::RestorationFailed => write!(formatter, "artifact version restoration failed"),
             Self::LockPoisoned => write!(formatter, "artifact store lock is poisoned"),
         }
     }
 }
 
 impl std::error::Error for StoreError {}
+
+fn map_restoration_error(error: ArtifactVersionRestoreError) -> StoreError {
+    match error {
+        ArtifactVersionRestoreError::InvalidContentReference => StoreError::InvalidContentReference,
+        ArtifactVersionRestoreError::InvalidVersion
+        | ArtifactVersionRestoreError::InvalidLifecycleTransition { .. } => {
+            StoreError::RestorationFailed
+        }
+    }
+}
 
 /// Storage abstraction for artifact versions.
 pub trait ArtifactStore: Send + Sync {
@@ -75,11 +104,26 @@ pub trait ArtifactStore: Send + Sync {
 
     /// Atomically applies a valid lifecycle transition and returns the
     /// resulting version.
+    ///
+    /// The `Validated → Published` transition is reserved for
+    /// [`ArtifactStore::publish_validated`].
     fn transition_lifecycle(
         &self,
         artifact_id: &ArtifactId,
         version: &str,
         target: LifecycleState,
+    ) -> Result<ArtifactVersion, StoreError>;
+
+    /// Atomically publishes a version only when its stored state is
+    /// `Validated`.
+    ///
+    /// This compare-and-transition primitive is the only store operation that
+    /// can enter `Published`, preventing callers from bypassing publication
+    /// prerequisites through a generic lifecycle update.
+    fn publish_validated(
+        &self,
+        artifact_id: &ArtifactId,
+        version: &str,
     ) -> Result<ArtifactVersion, StoreError>;
 
     /// Associates an alias with one exact version.
@@ -104,7 +148,7 @@ pub trait ArtifactStore: Send + Sync {
 /// Deterministic in-memory artifact store.
 #[derive(Clone, Default)]
 pub struct InMemoryArtifactStore {
-    versions: Arc<RwLock<BTreeMap<(String, String), ArtifactVersion>>>,
+    versions: Arc<RwLock<BTreeMap<(String, String), ArtifactVersionRecord>>>,
     aliases: Arc<RwLock<BTreeMap<(String, String), String>>>,
 }
 
@@ -135,7 +179,7 @@ impl ArtifactStore for InMemoryArtifactStore {
             return Err(StoreError::AlreadyExists);
         }
 
-        versions.insert(key, version);
+        versions.insert(key, (&version).into());
         Ok(())
     }
 
@@ -150,19 +194,24 @@ impl ArtifactStore for InMemoryArtifactStore {
 
         let versions = self.versions.read().map_err(|_| StoreError::LockPoisoned)?;
 
-        Ok(versions
+        versions
             .get(&(artifact_id.as_str().to_string(), version.to_string()))
-            .cloned())
+            .cloned()
+            .map(ArtifactVersion::restore)
+            .transpose()
+            .map_err(map_restoration_error)
     }
 
     fn list_versions(&self, artifact_id: &ArtifactId) -> Result<Vec<ArtifactVersion>, StoreError> {
         let versions = self.versions.read().map_err(|_| StoreError::LockPoisoned)?;
 
-        Ok(versions
+        versions
             .iter()
             .filter(|((stored_artifact_id, _), _)| stored_artifact_id == artifact_id.as_str())
-            .map(|(_, version)| version.clone())
-            .collect())
+            .map(|(_, record)| {
+                ArtifactVersion::restore(record.clone()).map_err(map_restoration_error)
+            })
+            .collect()
     }
 
     fn transition_lifecycle(
@@ -176,13 +225,19 @@ impl ArtifactStore for InMemoryArtifactStore {
         }
 
         let key = (artifact_id.as_str().to_string(), version.to_string());
-
         let mut versions = self
             .versions
             .write()
             .map_err(|_| StoreError::LockPoisoned)?;
 
-        let current = versions.get(&key).ok_or(StoreError::NotFound)?;
+        let current_record = versions.get(&key).ok_or(StoreError::NotFound)?;
+        let current =
+            ArtifactVersion::restore(current_record.clone()).map_err(map_restoration_error)?;
+
+        if *current.lifecycle() == LifecycleState::Validated && target == LifecycleState::Published
+        {
+            return Err(StoreError::PublicationRequired);
+        }
 
         let next_state = transition(*current.lifecycle(), target).map_err(|error| {
             StoreError::InvalidLifecycleTransition {
@@ -191,10 +246,54 @@ impl ArtifactStore for InMemoryArtifactStore {
             }
         })?;
 
-        let mut updated = current.clone();
+        let mut updated = current;
         updated.set_lifecycle(next_state);
+        versions.insert(key, (&updated).into());
 
-        versions.insert(key, updated.clone());
+        Ok(updated)
+    }
+
+    fn publish_validated(
+        &self,
+        artifact_id: &ArtifactId,
+        version: &str,
+    ) -> Result<ArtifactVersion, StoreError> {
+        if version.trim().is_empty() {
+            return Err(StoreError::InvalidVersion);
+        }
+
+        let key = (artifact_id.as_str().to_string(), version.to_string());
+        let mut versions = self
+            .versions
+            .write()
+            .map_err(|_| StoreError::LockPoisoned)?;
+
+        let current_record = versions.get(&key).ok_or(StoreError::NotFound)?;
+        let current =
+            ArtifactVersion::restore(current_record.clone()).map_err(map_restoration_error)?;
+
+        if *current.lifecycle() != LifecycleState::Validated {
+            return Err(StoreError::InvalidLifecycleTransition {
+                from: *current.lifecycle(),
+                to: LifecycleState::Published,
+            });
+        }
+
+        if !current.content().is_valid() {
+            return Err(StoreError::InvalidContentReference);
+        }
+
+        let next_state =
+            transition(LifecycleState::Validated, LifecycleState::Published).map_err(|error| {
+                StoreError::InvalidLifecycleTransition {
+                    from: error.from(),
+                    to: error.to(),
+                }
+            })?;
+
+        let mut updated = current;
+        updated.set_lifecycle(next_state);
+        versions.insert(key, (&updated).into());
 
         Ok(updated)
     }
@@ -316,17 +415,28 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_transition_updates_existing_version() {
+    fn lifecycle_transition_cannot_bypass_publication() {
         let store = InMemoryArtifactStore::new();
 
         let mut item = version("v1");
         item.set_lifecycle(LifecycleState::Validated);
-
         store.store(item).unwrap();
 
-        let updated = store
-            .transition_lifecycle(&artifact_id(), "v1", LifecycleState::Published)
-            .unwrap();
+        assert_eq!(
+            store.transition_lifecycle(&artifact_id(), "v1", LifecycleState::Published),
+            Err(StoreError::PublicationRequired)
+        );
+    }
+
+    #[test]
+    fn publish_validated_atomically_updates_existing_version() {
+        let store = InMemoryArtifactStore::new();
+
+        let mut item = version("v1");
+        item.set_lifecycle(LifecycleState::Validated);
+        store.store(item).unwrap();
+
+        let updated = store.publish_validated(&artifact_id(), "v1").unwrap();
 
         assert_eq!(updated.lifecycle(), &LifecycleState::Published);
 
@@ -349,6 +459,25 @@ mod tests {
                 to: LifecycleState::Published
             })
         ));
+    }
+
+    #[test]
+    fn publish_validated_rejects_a_stale_state() {
+        let store = InMemoryArtifactStore::new();
+
+        let mut item = version("v1");
+        item.set_lifecycle(LifecycleState::Validated);
+        store.store(item).unwrap();
+
+        store.publish_validated(&artifact_id(), "v1").unwrap();
+
+        assert_eq!(
+            store.publish_validated(&artifact_id(), "v1"),
+            Err(StoreError::InvalidLifecycleTransition {
+                from: LifecycleState::Published,
+                to: LifecycleState::Published,
+            })
+        );
     }
 
     #[test]

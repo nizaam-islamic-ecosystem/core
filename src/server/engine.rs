@@ -6,7 +6,14 @@
 
 use crate::contracts::{UniversalRequest, UniversalResponse};
 use crate::identity::{CapabilityId, EngineId};
-use crate::runtime::{EngineContext, ExecutionPipeline};
+use crate::logging::{
+    LogContext, LogEvent, LogEventType, LogLevel, LogScope, LogSource, LoggingSystem,
+};
+use crate::middleware::chain::MiddlewareChainError;
+use crate::runtime::{
+    EngineContext, ExecutionPipeline,
+    pipeline::{PipelineConfigurationError, PipelineError, RequestPipelineError},
+};
 use crate::status::Status;
 use crate::transport::TransportError;
 use std::collections::HashMap;
@@ -46,6 +53,7 @@ pub struct EngineServer {
     state: ServerState,
     handlers: Arc<Mutex<HashMap<CapabilityId, RequestHandler>>>,
     pipeline: ExecutionPipeline,
+    logging: Arc<LoggingSystem>,
 }
 
 impl EngineServer {
@@ -56,6 +64,7 @@ impl EngineServer {
             state: ServerState::Starting,
             handlers: Arc::new(Mutex::new(HashMap::new())),
             pipeline: ExecutionPipeline::new(),
+            logging: Arc::new(LoggingSystem::new(64).expect("valid logging capacity")),
         }
     }
 
@@ -113,6 +122,11 @@ impl EngineServer {
         &self.pipeline
     }
 
+    /// Returns the Core logging system used by this server.
+    pub fn logging(&self) -> &LoggingSystem {
+        &self.logging
+    }
+
     /// Returns the engine ID of this server.
     pub fn engine_id(&self) -> &EngineId {
         &self.engine_id
@@ -165,8 +179,64 @@ pub fn handle_request(
             }
         }) {
         Ok(response) => Ok(response),
-        Err(_) => Ok(failure_response(request)),
+        Err(error) => {
+            log_pipeline_error(server, &request, &error);
+            Ok(failure_response(request))
+        }
     }
+}
+
+fn log_pipeline_error(
+    server: &EngineServer,
+    request: &UniversalRequest,
+    error: &RequestPipelineError<()>,
+) {
+    let error_key: &str = match error {
+        RequestPipelineError::Context(PipelineError::Cancelled) => {
+            "request_pipeline.context.cancelled"
+        }
+        RequestPipelineError::Context(PipelineError::DeadlineExpired) => {
+            "request_pipeline.context.deadline_expired"
+        }
+        RequestPipelineError::Configuration(
+            PipelineConfigurationError::MandatoryMiddlewareNotConfigured,
+        ) => "request_pipeline.configuration.mandatory_middleware_not_configured",
+        RequestPipelineError::Middleware(MiddlewareChainError::Context(
+            PipelineError::Cancelled,
+        )) => "request_pipeline.middleware.context.cancelled",
+        RequestPipelineError::Middleware(MiddlewareChainError::Context(
+            PipelineError::DeadlineExpired,
+        )) => "request_pipeline.middleware.context.deadline_expired",
+        RequestPipelineError::Middleware(MiddlewareChainError::Rejected(_)) => {
+            "request_pipeline.middleware.rejected"
+        }
+        RequestPipelineError::Middleware(MiddlewareChainError::Middleware(_)) => {
+            "request_pipeline.middleware.failed"
+        }
+        RequestPipelineError::Middleware(MiddlewareChainError::Downstream(_)) => {
+            "request_pipeline.downstream.failed"
+        }
+    };
+
+    let context = LogContext::new(request.envelope.operation_context.clone())
+        .for_message(request.envelope.message_id.clone());
+
+    let event = match LogEvent::new(
+        request.envelope.message_id.clone(),
+        LogLevel::Error,
+        LogSource::Core,
+        LogScope::Global,
+        "engine-server",
+        context,
+        error_key,
+        LogEventType::Diagnostic,
+    ) {
+        Ok(event) => event,
+        Err(_) => return,
+    };
+
+    let instance = server.logging().instance(LogScope::Global, LogSource::Core);
+    let _ = instance.publish(event);
 }
 
 fn failure_response(request: UniversalRequest) -> UniversalResponse {
@@ -253,6 +323,14 @@ mod tests {
 
     fn pipeline() -> ExecutionPipeline {
         ExecutionPipeline::new().with_middleware(AdmissionMiddleware)
+    }
+
+    struct TestLogSink(std::sync::mpsc::Sender<crate::logging::LogEvent>);
+
+    impl crate::logging::LogSink for TestLogSink {
+        fn publish(&self, event: &crate::logging::LogEvent) {
+            self.0.send(event.clone()).unwrap();
+        }
     }
 
     fn make_request(target: &EngineId, message_id: &str) -> UniversalRequest {
@@ -404,6 +482,31 @@ mod tests {
         let response = handle_request(&server, request).unwrap();
 
         assert_eq!(response.status, Status::Failure);
+    }
+
+    #[test]
+    fn server_records_pipeline_failures_without_exposing_credentials() {
+        let mut server = EngineServer::new(EngineId::new("server").unwrap());
+        let target = EngineId::new("server").unwrap();
+        server.start();
+
+        let request = make_request(&target, "msg-logging-failure");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        server
+            .logging()
+            .subscribe(std::sync::Arc::new(TestLogSink(sender)));
+
+        let response = handle_request(&server, request).unwrap();
+        assert_eq!(response.status, Status::Failure);
+
+        let event = receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("pipeline failure must produce a log event");
+        let rendered = format!("{event:?}");
+        assert!(
+            rendered.contains("request_pipeline.configuration.mandatory_middleware_not_configured")
+        );
+        assert_eq!(event.event_type, crate::logging::LogEventType::Diagnostic);
     }
 
     #[test]

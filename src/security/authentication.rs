@@ -19,9 +19,18 @@ use core::fmt;
 ///
 /// The input is borrowed because the authenticator does not own the original
 /// authentication material.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct AuthenticationRequest<'a> {
     credentials: &'a [u8],
+}
+
+impl fmt::Debug for AuthenticationRequest<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthenticationRequest")
+            .field("credentials", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl<'a> AuthenticationRequest<'a> {
@@ -189,6 +198,15 @@ mod tests {
 
         assert!(request.is_empty());
         assert_eq!(request.credentials(), b"");
+    }
+
+    #[test]
+    fn authentication_request_debug_redacts_credentials() {
+        let request = AuthenticationRequest::new(b"super-secret-token");
+        let rendered = format!("{request:?}");
+
+        assert!(rendered.contains("[REDACTED]"));
+        assert!(!rendered.contains("super-secret-token"));
     }
 
     #[test]

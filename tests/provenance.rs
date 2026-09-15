@@ -4,7 +4,10 @@
 //! would use it. Provenance records are required to preserve exact artifact
 //! versions so later alias changes cannot mutate historical meaning.
 
-use nizaam_core::artifact::{ArtifactReference, VersionSelector};
+use nizaam_core::artifact::{
+    ArtifactReference, ArtifactStore, ArtifactVersion, ContentDigest, ContentReference,
+    InMemoryArtifactStore, IntegrityProof, LifecycleState, VersionSelector, publish,
+};
 use nizaam_core::identity::ArtifactId;
 use nizaam_core::provenance::{ProvenanceContext, ProvenanceRecord, ProvenanceRelation};
 
@@ -18,6 +21,34 @@ fn exact_reference(id: &ArtifactId, version: &str) -> ArtifactReference {
 
 fn alias_reference(id: &ArtifactId, alias: &str) -> ArtifactReference {
     ArtifactReference::with_selector(id.clone(), VersionSelector::alias(alias))
+}
+
+fn artifact_version(id: &ArtifactId, version: &str) -> ArtifactVersion {
+    let content = b"provenance artifact content";
+
+    ArtifactVersion::new(
+        id.clone(),
+        version,
+        ContentReference::new("test-provider", format!("content/{version}")),
+        ContentDigest::new(content),
+        content.len() as u64,
+    )
+}
+
+fn verified_proof() -> IntegrityProof {
+    let content = b"provenance artifact content";
+    IntegrityProof::verify(content, &ContentDigest::new(content)).unwrap()
+}
+
+fn publish_fixture(store: &InMemoryArtifactStore, id: &ArtifactId, version: &str) {
+    store.store(artifact_version(id, version)).unwrap();
+    store
+        .transition_lifecycle(id, version, LifecycleState::Validating)
+        .unwrap();
+    store
+        .transition_lifecycle(id, version, LifecycleState::Validated)
+        .unwrap();
+    publish(id, version, store, &verified_proof()).unwrap();
 }
 
 #[test]
@@ -165,26 +196,54 @@ fn provenance_context_attributes_are_preserved_across_cloning() {
 
 #[test]
 fn historical_provenance_is_unchanged_after_artifact_supersession() {
+    let source_id = artifact_id("source");
+    let target_id = artifact_id("target");
+    let store = InMemoryArtifactStore::new();
+
+    publish_fixture(&store, &source_id, "v1");
+    publish_fixture(&store, &target_id, "v1");
+    store
+        .transition_lifecycle(&target_id, "v1", LifecycleState::Superseded)
+        .unwrap();
+
     let record = ProvenanceRecord::new(
-        exact_reference(&artifact_id("source"), "v1"),
+        exact_reference(&source_id, "v1"),
         ProvenanceRelation::ProducedFrom,
-        exact_reference(&artifact_id("target"), "v1"),
+        exact_reference(&target_id, "v1"),
     );
     let snapshot = record.clone();
 
+    assert_eq!(
+        store.get(&target_id, "v1").unwrap().unwrap().lifecycle(),
+        &LifecycleState::Superseded
+    );
     assert_eq!(record, snapshot);
     assert!(record.is_valid());
 }
 
 #[test]
 fn historical_provenance_is_unchanged_after_artifact_revocation() {
+    let source_id = artifact_id("source");
+    let target_id = artifact_id("target");
+    let store = InMemoryArtifactStore::new();
+
+    publish_fixture(&store, &source_id, "v1");
+    publish_fixture(&store, &target_id, "v1");
+    store
+        .transition_lifecycle(&target_id, "v1", LifecycleState::Revoked)
+        .unwrap();
+
     let record = ProvenanceRecord::new(
-        exact_reference(&artifact_id("source"), "v1"),
+        exact_reference(&source_id, "v1"),
         ProvenanceRelation::DerivedFrom,
-        exact_reference(&artifact_id("target"), "v1"),
+        exact_reference(&target_id, "v1"),
     );
     let snapshot = record.clone();
 
+    assert_eq!(
+        store.get(&target_id, "v1").unwrap().unwrap().lifecycle(),
+        &LifecycleState::Revoked
+    );
     assert_eq!(record, snapshot);
     assert!(record.is_valid());
 }

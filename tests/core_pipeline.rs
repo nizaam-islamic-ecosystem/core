@@ -9,8 +9,8 @@
 
 use nizaam_core::artifact::{
     Artifact, ArtifactReference, ArtifactStore, ArtifactVersion, ContentDigest, ContentReference,
-    InMemoryArtifactStore, LifecycleState, PublicationError, ResolutionError, VersionSelector,
-    publish, resolve, verify_integrity,
+    InMemoryArtifactStore, IntegrityProof, LifecycleState, PublicationError, ResolutionError,
+    VersionSelector, publish, resolve, verify_integrity,
 };
 use nizaam_core::identity::{ArtifactId, CorrelationId, OperationId};
 use nizaam_core::operation::{Operation, OperationContext};
@@ -32,6 +32,10 @@ fn artifact_version(id: &ArtifactId, version_id: &str, content: &[u8]) -> Artifa
         ContentDigest::new(content),
         content.len() as u64,
     )
+}
+
+fn integrity_proof(content: &[u8]) -> IntegrityProof {
+    IntegrityProof::verify(content, &ContentDigest::new(content)).unwrap()
 }
 
 fn store_validated_version(
@@ -60,7 +64,7 @@ fn publish_version(
     content: &[u8],
 ) {
     store_validated_version(store, id, version_id, content);
-    publish(id, version_id, store).unwrap();
+    publish(id, version_id, store, &integrity_proof(content)).unwrap();
 }
 
 fn engine_context() -> EngineContext {
@@ -91,7 +95,7 @@ fn artifact_lifecycle_works_across_identity_storage_publication_and_resolution()
     assert_eq!(validated.version(), "v1");
     assert_eq!(validated.lifecycle(), &LifecycleState::Validated);
 
-    publish(&id, "v1", &store).unwrap();
+    publish(&id, "v1", &store, &integrity_proof(bytes)).unwrap();
 
     let reference = ArtifactReference::new(id.clone(), "v1");
     let resolved = resolve(&reference, &store).unwrap();
@@ -197,7 +201,7 @@ fn publication_preserves_version_identity_content_and_integrity() {
 
     let before = store.get(&id, "v1").unwrap().unwrap();
 
-    publish(&id, "v1", &store).unwrap();
+    publish(&id, "v1", &store, &integrity_proof(bytes)).unwrap();
 
     let after = store.get(&id, "v1").unwrap().unwrap();
 
@@ -221,7 +225,8 @@ fn created_version_cannot_be_published() {
         .store(artifact_version(&id, "v1", b"created artifact"))
         .unwrap();
 
-    let result = publish(&id, "v1", &store);
+    let content = b"created artifact";
+    let result = publish(&id, "v1", &store, &integrity_proof(content));
 
     assert_eq!(
         result,

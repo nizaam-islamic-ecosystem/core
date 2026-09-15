@@ -18,7 +18,9 @@ mod version;
 
 pub use content::ContentReference;
 pub use identity::Artifact;
-pub use integrity::{ContentDigest, IntegrityError, SHA256_DIGEST_LENGTH, verify_integrity};
+pub use integrity::{
+    ContentDigest, IntegrityError, IntegrityProof, SHA256_DIGEST_LENGTH, verify_integrity,
+};
 pub use lifecycle::{LifecycleError, LifecycleState, can_transition, transition};
 pub use publication::{PublicationError, publish};
 pub use reference::{ArtifactReference, VersionSelector};
@@ -47,6 +49,11 @@ mod tests {
             ContentDigest::new(content),
             content.len() as u64,
         )
+    }
+
+    fn integrity_proof() -> IntegrityProof {
+        let content = b"artifact module integration content";
+        IntegrityProof::verify(content, &ContentDigest::new(content)).unwrap()
     }
 
     fn validate_version(store: &InMemoryArtifactStore, version: &str) {
@@ -99,7 +106,7 @@ mod tests {
 
         assert_eq!(validated.lifecycle(), &LifecycleState::Validated);
 
-        publish(&artifact_id(), "v1", &store).unwrap();
+        publish(&artifact_id(), "v1", &store, &integrity_proof()).unwrap();
 
         let published = store.get(&artifact_id(), "v1").unwrap().unwrap();
 
@@ -117,7 +124,7 @@ mod tests {
 
         validate_version(&store, "v1");
 
-        publish(&artifact_id(), "v1", &store).unwrap();
+        publish(&artifact_id(), "v1", &store, &integrity_proof()).unwrap();
 
         let version = store.get(&artifact_id(), "v1").unwrap().unwrap();
 
@@ -130,7 +137,7 @@ mod tests {
 
         store.store(new_version("v1")).unwrap();
 
-        let result = publish(&artifact_id(), "v1", &store);
+        let result = publish(&artifact_id(), "v1", &store, &integrity_proof());
 
         assert_eq!(
             result,
@@ -149,7 +156,7 @@ mod tests {
         let store = InMemoryArtifactStore::new();
 
         validate_version(&store, "v1");
-        publish(&artifact_id(), "v1", &store).unwrap();
+        publish(&artifact_id(), "v1", &store, &integrity_proof()).unwrap();
 
         let reference = ArtifactReference::new(artifact_id(), "v1");
 
@@ -169,8 +176,8 @@ mod tests {
         validate_version(&store, "v1");
         validate_version(&store, "v2");
 
-        publish(&artifact_id(), "v1", &store).unwrap();
-        publish(&artifact_id(), "v2", &store).unwrap();
+        publish(&artifact_id(), "v1", &store, &integrity_proof()).unwrap();
+        publish(&artifact_id(), "v2", &store, &integrity_proof()).unwrap();
 
         store.set_alias(&artifact_id(), "latest", "v2").unwrap();
 
@@ -193,8 +200,8 @@ mod tests {
         validate_version(&store, "v1");
         validate_version(&store, "v2");
 
-        publish(&artifact_id(), "v1", &store).unwrap();
-        publish(&artifact_id(), "v2", &store).unwrap();
+        publish(&artifact_id(), "v1", &store, &integrity_proof()).unwrap();
+        publish(&artifact_id(), "v2", &store, &integrity_proof()).unwrap();
 
         store.set_alias(&artifact_id(), "latest", "v1").unwrap();
 
@@ -231,7 +238,7 @@ mod tests {
         let store = InMemoryArtifactStore::new();
 
         validate_version(&store, "v1");
-        publish(&artifact_id(), "v1", &store).unwrap();
+        publish(&artifact_id(), "v1", &store, &integrity_proof()).unwrap();
 
         store
             .transition_lifecycle(&artifact_id(), "v1", LifecycleState::Revoked)
@@ -250,7 +257,7 @@ mod tests {
         let store = InMemoryArtifactStore::new();
 
         validate_version(&store, "v1");
-        publish(&artifact_id(), "v1", &store).unwrap();
+        publish(&artifact_id(), "v1", &store, &integrity_proof()).unwrap();
 
         store
             .transition_lifecycle(&artifact_id(), "v1", LifecycleState::Superseded)

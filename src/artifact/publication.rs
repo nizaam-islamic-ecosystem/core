@@ -18,6 +18,7 @@
 //! Authorization is intentionally not implemented here. Artifact access
 //! authorization is provided by the Phase 9 security boundary.
 
+use crate::artifact::integrity::IntegrityProof;
 use crate::artifact::lifecycle::LifecycleState;
 use crate::artifact::store::{ArtifactStore, StoreError};
 use crate::identity::ArtifactId;
@@ -33,6 +34,9 @@ pub enum PublicationError {
 
     /// The content reference is invalid.
     InvalidContentReference,
+
+    /// The supplied integrity evidence does not match the recorded content.
+    IntegrityFailure,
 
     /// The underlying artifact store failed.
     Failed,
@@ -50,6 +54,10 @@ impl std::fmt::Display for PublicationError {
             Self::InvalidContentReference => {
                 write!(formatter, "artifact content reference is invalid")
             }
+            Self::IntegrityFailure => write!(
+                formatter,
+                "artifact publication failed integrity verification"
+            ),
             Self::Failed => write!(formatter, "artifact publication failed"),
         }
     }
@@ -65,6 +73,7 @@ pub fn publish(
     artifact_id: &ArtifactId,
     version: &str,
     store: &impl ArtifactStore,
+    proof: &IntegrityProof,
 ) -> Result<(), PublicationError> {
     let artifact_version = store
         .get(artifact_id, version)
@@ -82,7 +91,7 @@ pub fn publish(
     }
 
     store
-        .publish_validated(artifact_id, version)
+        .publish_validated(artifact_id, version, proof)
         .map_err(map_store_error)?;
 
     Ok(())
@@ -93,9 +102,12 @@ fn map_store_error(error: StoreError) -> PublicationError {
     match error {
         StoreError::NotFound | StoreError::InvalidVersion => PublicationError::NotFound,
         StoreError::InvalidContentReference => PublicationError::InvalidContentReference,
+        StoreError::IntegrityFailure => PublicationError::IntegrityFailure,
+        StoreError::InvalidLifecycleTransition { from, .. } => {
+            PublicationError::InvalidState { actual: from }
+        }
         StoreError::InvalidAlias
         | StoreError::AlreadyExists
-        | StoreError::InvalidLifecycleTransition { .. }
         | StoreError::PublicationRequired
         | StoreError::RestorationFailed
         | StoreError::LockPoisoned => PublicationError::Failed,
@@ -107,12 +119,20 @@ mod tests {
     use super::*;
 
     use crate::artifact::content::ContentReference;
-    use crate::artifact::integrity::ContentDigest;
+    use crate::artifact::integrity::{ContentDigest, IntegrityProof};
     use crate::artifact::store::{ArtifactStore, InMemoryArtifactStore};
     use crate::artifact::version::ArtifactVersion;
 
     fn artifact_id() -> ArtifactId {
         ArtifactId::new("test-artifact").unwrap()
+    }
+
+    fn content() -> &'static [u8] {
+        b"artifact content"
+    }
+
+    fn proof() -> IntegrityProof {
+        IntegrityProof::verify(content(), &ContentDigest::new(content())).unwrap()
     }
 
     fn validated_version() -> ArtifactVersion {
@@ -133,7 +153,7 @@ mod tests {
         let store = InMemoryArtifactStore::new();
         store.store(validated_version()).unwrap();
 
-        assert_eq!(publish(&artifact_id(), "v1", &store), Ok(()));
+        assert_eq!(publish(&artifact_id(), "v1", &store, &proof()), Ok(()));
 
         let published = store.get(&artifact_id(), "v1").unwrap().unwrap();
 
@@ -145,7 +165,7 @@ mod tests {
         let store = InMemoryArtifactStore::new();
 
         assert_eq!(
-            publish(&artifact_id(), "missing", &store),
+            publish(&artifact_id(), "missing", &store, &proof()),
             Err(PublicationError::NotFound)
         );
     }
@@ -165,7 +185,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            publish(&artifact_id(), "v1", &store),
+            publish(&artifact_id(), "v1", &store, &proof()),
             Err(PublicationError::InvalidState {
                 actual: LifecycleState::Created
             })
@@ -182,7 +202,7 @@ mod tests {
         store.store(version).unwrap();
 
         assert_eq!(
-            publish(&artifact_id(), "v1", &store),
+            publish(&artifact_id(), "v1", &store, &proof()),
             Err(PublicationError::InvalidState {
                 actual: LifecycleState::Published
             })
@@ -199,7 +219,7 @@ mod tests {
         store.store(version).unwrap();
 
         assert_eq!(
-            publish(&artifact_id(), "v1", &store),
+            publish(&artifact_id(), "v1", &store, &proof()),
             Err(PublicationError::InvalidState {
                 actual: LifecycleState::Revoked
             })
@@ -217,13 +237,16 @@ mod tests {
         let barrier = Arc::new(Barrier::new(2));
         let mut handles = Vec::new();
 
+        let proof = Arc::new(proof());
+
         for _ in 0..2 {
             let store = Arc::clone(&store);
             let barrier = Arc::clone(&barrier);
+            let proof = Arc::clone(&proof);
 
             handles.push(thread::spawn(move || {
                 barrier.wait();
-                publish(&artifact_id(), "v1", store.as_ref())
+                publish(&artifact_id(), "v1", store.as_ref(), proof.as_ref())
             }));
         }
 
@@ -234,6 +257,14 @@ mod tests {
 
         assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
         assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+        assert!(results.iter().any(|result| {
+            matches!(
+                result,
+                Err(PublicationError::InvalidState {
+                    actual: LifecycleState::Published
+                })
+            )
+        }));
         assert_eq!(
             store
                 .get(&artifact_id(), "v1")
@@ -245,14 +276,47 @@ mod tests {
     }
 
     #[test]
+    fn publication_rejects_unverified_content() {
+        let store = InMemoryArtifactStore::new();
+        store.store(validated_version()).unwrap();
+
+        let wrong_proof = IntegrityProof::verify(
+            b"tampered content",
+            &ContentDigest::new(b"artifact content"),
+        );
+
+        assert!(wrong_proof.is_err());
+
+        let proof_for_wrong_digest = IntegrityProof::verify(
+            b"tampered content",
+            &ContentDigest::new(b"tampered content"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            publish(&artifact_id(), "v1", &store, &proof_for_wrong_digest),
+            Err(PublicationError::IntegrityFailure)
+        );
+
+        assert_eq!(
+            store
+                .get(&artifact_id(), "v1")
+                .unwrap()
+                .unwrap()
+                .lifecycle(),
+            &LifecycleState::Validated
+        );
+    }
+
+    #[test]
     fn publication_rejects_a_stale_validated_expectation() {
         let store = InMemoryArtifactStore::new();
         store.store(validated_version()).unwrap();
 
-        publish(&artifact_id(), "v1", &store).unwrap();
+        publish(&artifact_id(), "v1", &store, &proof()).unwrap();
 
         assert_eq!(
-            publish(&artifact_id(), "v1", &store),
+            publish(&artifact_id(), "v1", &store, &proof()),
             Err(PublicationError::InvalidState {
                 actual: LifecycleState::Published
             })
@@ -265,7 +329,7 @@ mod tests {
         let version = validated_version();
 
         store.store(version.clone()).unwrap();
-        publish(&artifact_id(), "v1", &store).unwrap();
+        publish(&artifact_id(), "v1", &store, &proof()).unwrap();
 
         let published = store.get(&artifact_id(), "v1").unwrap().unwrap();
 

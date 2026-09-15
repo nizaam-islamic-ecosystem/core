@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
+use crate::artifact::integrity::IntegrityProof;
 use crate::artifact::lifecycle::{LifecycleState, transition};
 use crate::artifact::version::{
     ArtifactVersion, ArtifactVersionRecord, ArtifactVersionRestoreError,
@@ -44,6 +45,9 @@ pub enum StoreError {
     /// The persisted artifact version could not be trusted and restored.
     RestorationFailed,
 
+    /// The supplied integrity proof does not match the recorded content.
+    IntegrityFailure,
+
     /// Internal synchronization state could not be acquired.
     LockPoisoned,
 }
@@ -68,6 +72,9 @@ impl std::fmt::Display for StoreError {
                 write!(formatter, "artifact content reference is invalid")
             }
             Self::RestorationFailed => write!(formatter, "artifact version restoration failed"),
+            Self::IntegrityFailure => {
+                write!(formatter, "artifact content integrity verification failed")
+            }
             Self::LockPoisoned => write!(formatter, "artifact store lock is poisoned"),
         }
     }
@@ -124,6 +131,7 @@ pub trait ArtifactStore: Send + Sync {
         &self,
         artifact_id: &ArtifactId,
         version: &str,
+        proof: &IntegrityProof,
     ) -> Result<ArtifactVersion, StoreError>;
 
     /// Associates an alias with one exact version.
@@ -257,6 +265,7 @@ impl ArtifactStore for InMemoryArtifactStore {
         &self,
         artifact_id: &ArtifactId,
         version: &str,
+        proof: &IntegrityProof,
     ) -> Result<ArtifactVersion, StoreError> {
         if version.trim().is_empty() {
             return Err(StoreError::InvalidVersion);
@@ -281,6 +290,10 @@ impl ArtifactStore for InMemoryArtifactStore {
 
         if !current.content().is_valid() {
             return Err(StoreError::InvalidContentReference);
+        }
+
+        if !proof.matches(current.digest(), current.size()) {
+            return Err(StoreError::IntegrityFailure);
         }
 
         let next_state =
@@ -365,7 +378,7 @@ mod tests {
     use super::*;
 
     use crate::artifact::content::ContentReference;
-    use crate::artifact::integrity::ContentDigest;
+    use crate::artifact::integrity::{ContentDigest, IntegrityProof};
 
     fn artifact_id() -> ArtifactId {
         ArtifactId::new("test-artifact").unwrap()
@@ -436,12 +449,44 @@ mod tests {
         item.set_lifecycle(LifecycleState::Validated);
         store.store(item).unwrap();
 
-        let updated = store.publish_validated(&artifact_id(), "v1").unwrap();
+        let content = b"content";
+        let proof = IntegrityProof::verify(content, &ContentDigest::new(content)).unwrap();
+        let updated = store
+            .publish_validated(&artifact_id(), "v1", &proof)
+            .unwrap();
 
         assert_eq!(updated.lifecycle(), &LifecycleState::Published);
 
         let stored = store.get(&artifact_id(), "v1").unwrap().unwrap();
         assert_eq!(stored.lifecycle(), &LifecycleState::Published);
+    }
+
+    #[test]
+    fn publish_validated_rejects_an_integrity_mismatch() {
+        let store = InMemoryArtifactStore::new();
+
+        let mut item = version("v1");
+        item.set_lifecycle(LifecycleState::Validated);
+        store.store(item).unwrap();
+
+        let proof = IntegrityProof::verify(
+            b"tampered content",
+            &ContentDigest::new(b"tampered content"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.publish_validated(&artifact_id(), "v1", &proof),
+            Err(StoreError::IntegrityFailure)
+        );
+        assert_eq!(
+            store
+                .get(&artifact_id(), "v1")
+                .unwrap()
+                .unwrap()
+                .lifecycle(),
+            &LifecycleState::Validated
+        );
     }
 
     #[test]
@@ -469,10 +514,15 @@ mod tests {
         item.set_lifecycle(LifecycleState::Validated);
         store.store(item).unwrap();
 
-        store.publish_validated(&artifact_id(), "v1").unwrap();
+        let content = b"content";
+        let proof = IntegrityProof::verify(content, &ContentDigest::new(content)).unwrap();
+
+        store
+            .publish_validated(&artifact_id(), "v1", &proof)
+            .unwrap();
 
         assert_eq!(
-            store.publish_validated(&artifact_id(), "v1"),
+            store.publish_validated(&artifact_id(), "v1", &proof),
             Err(StoreError::InvalidLifecycleTransition {
                 from: LifecycleState::Published,
                 to: LifecycleState::Published,

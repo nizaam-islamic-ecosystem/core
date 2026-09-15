@@ -8,8 +8,8 @@
 
 use nizaam_core::artifact::{
     Artifact, ArtifactReference, ArtifactStore, ArtifactVersion, ContentDigest, ContentReference,
-    InMemoryArtifactStore, LifecycleState, PublicationError, ResolutionError, StoreError,
-    VersionSelector, publish, resolve, verify_integrity,
+    InMemoryArtifactStore, IntegrityProof, LifecycleState, PublicationError, ResolutionError,
+    StoreError, VersionSelector, publish, resolve, verify_integrity,
 };
 use nizaam_core::identity::ArtifactId;
 
@@ -29,6 +29,10 @@ fn version(artifact_id: &ArtifactId, version: &str, bytes: &[u8]) -> ArtifactVer
         ContentDigest::new(bytes),
         bytes.len() as u64,
     )
+}
+
+fn integrity_proof(bytes: &[u8]) -> IntegrityProof {
+    IntegrityProof::verify(bytes, &ContentDigest::new(bytes)).unwrap()
 }
 
 fn validated_version(artifact_id: &ArtifactId, version_id: &str, bytes: &[u8]) -> ArtifactVersion {
@@ -130,7 +134,7 @@ fn exact_reference_resolves_to_the_requested_published_version() {
     let validated = validated_version(&id, "v1", b"exact-version");
     store.store(validated).unwrap();
 
-    publish(&id, "v1", &store).unwrap();
+    publish(&id, "v1", &store, &integrity_proof(b"exact-version")).unwrap();
 
     let reference = ArtifactReference::new(id.clone(), "v1");
     let resolved = resolve(&reference, &store).unwrap();
@@ -152,8 +156,8 @@ fn alias_resolution_uses_explicit_store_mapping() {
         .store(validated_version(&id, "v2", b"version-two"))
         .unwrap();
 
-    publish(&id, "v1", &store).unwrap();
-    publish(&id, "v2", &store).unwrap();
+    publish(&id, "v1", &store, &integrity_proof(b"version-one")).unwrap();
+    publish(&id, "v2", &store, &integrity_proof(b"version-two")).unwrap();
 
     store.set_alias(&id, "latest", "v2").unwrap();
 
@@ -185,8 +189,8 @@ fn exact_version_remains_bound_after_alias_target_changes() {
         .store(validated_version(&id, "v2", b"version-two"))
         .unwrap();
 
-    publish(&id, "v1", &store).unwrap();
-    publish(&id, "v2", &store).unwrap();
+    publish(&id, "v1", &store, &integrity_proof(b"version-one")).unwrap();
+    publish(&id, "v2", &store, &integrity_proof(b"version-two")).unwrap();
 
     store.set_alias(&id, "latest", "v2").unwrap();
 
@@ -231,7 +235,7 @@ fn publication_transitions_validated_version_without_changing_immutable_data() {
     let validated = validated_version(&id, "v1", bytes);
     store.store(validated.clone()).unwrap();
 
-    publish(&id, "v1", &store).unwrap();
+    publish(&id, "v1", &store, &integrity_proof(b"publication-content")).unwrap();
 
     let published = store.get(&id, "v1").unwrap().unwrap();
 
@@ -271,7 +275,7 @@ fn publishing_a_created_version_fails_without_changing_lifecycle() {
 
     store.store(version(&id, "v1", b"created-content")).unwrap();
 
-    let result = publish(&id, "v1", &store);
+    let result = publish(&id, "v1", &store, &integrity_proof(b"created-content"));
 
     assert_eq!(
         result,
@@ -297,8 +301,8 @@ fn superseded_exact_version_remains_resolvable() {
         .store(validated_version(&id, "v2", b"new-version"))
         .unwrap();
 
-    publish(&id, "v1", &store).unwrap();
-    publish(&id, "v2", &store).unwrap();
+    publish(&id, "v1", &store, &integrity_proof(b"old-version")).unwrap();
+    publish(&id, "v2", &store, &integrity_proof(b"new-version")).unwrap();
 
     store
         .transition_lifecycle(&id, "v1", LifecycleState::Superseded)
@@ -319,7 +323,7 @@ fn superseded_version_can_be_revoked_and_then_is_rejected_by_resolution() {
     store
         .store(validated_version(&id, "v1", b"old-version"))
         .unwrap();
-    publish(&id, "v1", &store).unwrap();
+    publish(&id, "v1", &store, &integrity_proof(b"old-version")).unwrap();
 
     store
         .transition_lifecycle(&id, "v1", LifecycleState::Superseded)
@@ -345,7 +349,7 @@ fn revoked_version_is_rejected_by_normal_resolution() {
         .store(validated_version(&id, "v1", b"unsafe-version"))
         .unwrap();
 
-    publish(&id, "v1", &store).unwrap();
+    publish(&id, "v1", &store, &integrity_proof(b"unsafe-version")).unwrap();
 
     store
         .transition_lifecycle(&id, "v1", LifecycleState::Revoked)
@@ -398,7 +402,7 @@ fn removing_alias_does_not_remove_the_underlying_artifact_version() {
         .store(validated_version(&id, "v1", b"persistent-version"))
         .unwrap();
 
-    publish(&id, "v1", &store).unwrap();
+    publish(&id, "v1", &store, &integrity_proof(b"persistent-version")).unwrap();
     store.set_alias(&id, "latest", "v1").unwrap();
 
     assert_eq!(

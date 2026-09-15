@@ -140,6 +140,7 @@ fn map_store_error(error: StoreError) -> ResolutionError {
         | StoreError::RestorationFailed
         | StoreError::PublicationRequired
         | StoreError::InvalidContentReference
+        | StoreError::IntegrityFailure
         | StoreError::LockPoisoned => ResolutionError::ResolutionFailure,
     }
 }

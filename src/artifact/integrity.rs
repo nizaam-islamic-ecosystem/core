@@ -59,6 +59,50 @@ impl ContentDigest {
     }
 }
 
+/// Evidence that concrete content was verified against an expected digest.
+///
+/// The fields are private so callers cannot construct a proof by supplying an
+/// arbitrary digest or size. A proof can only be created through
+/// [`IntegrityProof::verify`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntegrityProof {
+    digest: ContentDigest,
+    size: u64,
+}
+
+impl IntegrityProof {
+    /// Verifies concrete content against the expected digest and records the
+    /// content size as part of the proof.
+    pub fn verify(content: &[u8], expected: &ContentDigest) -> Result<Self, IntegrityError> {
+        let actual = ContentDigest::new(content);
+
+        if actual != *expected {
+            return Err(IntegrityError::new(expected.clone(), actual));
+        }
+
+        Ok(Self {
+            digest: actual,
+            size: content.len() as u64,
+        })
+    }
+
+    /// Returns the digest established by the verification.
+    pub fn digest(&self) -> &ContentDigest {
+        &self.digest
+    }
+
+    /// Returns the size established by the verification.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Returns whether this proof exactly matches the recorded artifact
+    /// integrity information.
+    pub fn matches(&self, expected: &ContentDigest, expected_size: u64) -> bool {
+        self.digest == *expected && self.size == expected_size
+    }
+}
+
 /// Failure during integrity verification.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IntegrityError {
@@ -100,6 +144,25 @@ pub fn verify_integrity(content: &[u8], expected: &ContentDigest) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integrity_proof_requires_matching_content() {
+        let content = b"trusted content";
+        let expected = ContentDigest::new(content);
+
+        let proof = IntegrityProof::verify(content, &expected).unwrap();
+
+        assert!(proof.matches(&expected, content.len() as u64));
+        assert_eq!(proof.digest(), &expected);
+        assert_eq!(proof.size(), content.len() as u64);
+    }
+
+    #[test]
+    fn integrity_proof_rejects_mismatched_content() {
+        let expected = ContentDigest::new(b"trusted content");
+
+        assert!(IntegrityProof::verify(b"tampered content", &expected).is_err());
+    }
 
     #[test]
     fn digest_uses_sha256() {

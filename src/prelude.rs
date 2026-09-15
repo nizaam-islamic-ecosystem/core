@@ -1,4 +1,4 @@
-//! The intentionally small set of Phase 1 through 6 types convenient for engine users.
+//! The intentionally small set of commonly used Core types convenient for engine users.
 
 pub use crate::capability::{
     CapabilityDefinition, CapabilityDefinitionError, CapabilityDispatchResult, CapabilityEntry,

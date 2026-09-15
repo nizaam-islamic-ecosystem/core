@@ -1,0 +1,38 @@
+reviews:
+  profile: assertive
+
+  instructions: |
+    Review this repository for genuine, actionable issues only.
+
+    IMPORTANT REVIEW POLICY:
+    - Report only issues that are actually supported by the code, repository context, or tests.
+    - Do not report hypothetical, speculative, or extremely unlikely edge cases.
+    - Do not report issues merely because something could theoretically be improved.
+    - Do not report stylistic preferences, subjective refactoring suggestions, naming preferences,
+      readability suggestions, or unnecessary defensive programming.
+    - Do not invent failure scenarios that are not realistically reachable.
+    - Do not report a problem unless you can explain a concrete execution path that causes it.
+    - Verify the relevant code and surrounding implementation before reporting an issue.
+    - Check existing tests before reporting behavior as broken.
+    - Respect existing architecture and contracts unless the current change clearly violates them.
+    - Do not suggest redesigning working architecture without a concrete correctness, security,
+      integrity, concurrency, reliability, or maintainability reason.
+    - Prefer no finding over a weak finding.
+
+    For every reported issue:
+    1. Identify the exact code involved.
+    2. Explain the realistic failure scenario.
+    3. Explain the concrete impact.
+    4. Explain why the issue is a genuine problem.
+    5. Give a practical fix direction.
+
+    Severity must reflect actual impact:
+    - P0: critical/blocking issue
+    - P1: high-impact genuine issue
+    - P2: genuine but lower-impact issue
+
+    When uncertain whether something is a real issue or merely a hypothetical edge case,
+    DO NOT REPORT IT.
+
+    Review the repository's existing architecture, tests, and documentation before making
+    architectural recommendations.

@@ -173,6 +173,10 @@ impl ArtifactStore for InMemoryArtifactStore {
             return Err(StoreError::InvalidVersion);
         }
 
+        if !version.content().is_valid() {
+            return Err(StoreError::InvalidContentReference);
+        }
+
         let key = (
             version.artifact_id().as_str().to_string(),
             version.version().to_string(),

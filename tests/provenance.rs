@@ -202,9 +202,6 @@ fn historical_provenance_is_unchanged_after_artifact_supersession() {
 
     publish_fixture(&store, &source_id, "v1");
     publish_fixture(&store, &target_id, "v1");
-    store
-        .transition_lifecycle(&target_id, "v1", LifecycleState::Superseded)
-        .unwrap();
 
     let record = ProvenanceRecord::new(
         exact_reference(&source_id, "v1"),
@@ -212,6 +209,10 @@ fn historical_provenance_is_unchanged_after_artifact_supersession() {
         exact_reference(&target_id, "v1"),
     );
     let snapshot = record.clone();
+
+    store
+        .transition_lifecycle(&target_id, "v1", LifecycleState::Superseded)
+        .unwrap();
 
     assert_eq!(
         store.get(&target_id, "v1").unwrap().unwrap().lifecycle(),
@@ -229,9 +230,6 @@ fn historical_provenance_is_unchanged_after_artifact_revocation() {
 
     publish_fixture(&store, &source_id, "v1");
     publish_fixture(&store, &target_id, "v1");
-    store
-        .transition_lifecycle(&target_id, "v1", LifecycleState::Revoked)
-        .unwrap();
 
     let record = ProvenanceRecord::new(
         exact_reference(&source_id, "v1"),
@@ -239,6 +237,10 @@ fn historical_provenance_is_unchanged_after_artifact_revocation() {
         exact_reference(&target_id, "v1"),
     );
     let snapshot = record.clone();
+
+    store
+        .transition_lifecycle(&target_id, "v1", LifecycleState::Revoked)
+        .unwrap();
 
     assert_eq!(
         store.get(&target_id, "v1").unwrap().unwrap().lifecycle(),

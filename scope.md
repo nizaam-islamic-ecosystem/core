@@ -305,14 +305,15 @@ Before declaring a phase complete, the agent must verify the phase against:
 
 The minimum completion verification for every implementation phase is:
 
+   set -o pipefail
    {
-  cargo fmt --all --check &&
-  cargo clippy --workspace --all-targets -- -D warnings &&
-  cargo build --workspace &&
-  cargo check --workspace &&
-  cargo test --workspace --all-targets &&
-  cargo test --workspace --doc
-} 2>&1 | tee cargo-check.log
+      cargo fmt --all --check &&
+      cargo clippy --workspace --all-targets -- -D warnings &&
+      cargo build --workspace &&
+      cargo check --workspace &&
+      cargo test --workspace --all-targets &&
+      cargo test --workspace --doc
+   } 2>&1 | tee cargo-check.log
 
 These checks must be run from the repository root.
 

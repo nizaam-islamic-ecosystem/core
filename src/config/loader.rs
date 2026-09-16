@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
-use super::environment::{Environment, EnvironmentSnapshot};
+use super::environment::{Environment, EnvironmentError, EnvironmentSnapshot};
 
 /// Loads raw configuration data from supported configuration sources.
 ///
@@ -18,17 +19,29 @@ impl ConfigurationLoader {
     }
 
     /// Loads the current process environment as raw configuration.
-    pub fn load_environment(&self, environment: &Environment) -> LoadedConfiguration {
-        let snapshot = environment.snapshot();
-        LoadedConfiguration::from_environment(snapshot)
+    pub fn load_environment(
+        &self,
+        environment: &Environment,
+    ) -> Result<LoadedConfiguration, EnvironmentError> {
+        let snapshot = environment.snapshot()?;
+        Ok(LoadedConfiguration::from_environment(snapshot))
     }
 }
 
 /// Raw configuration loaded from one configuration source.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct LoadedConfiguration {
     source: ConfigurationSource,
     values: BTreeMap<String, String>,
+}
+
+impl fmt::Debug for LoadedConfiguration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LoadedConfiguration")
+            .field("source", &self.source)
+            .field("value_count", &self.values.len())
+            .finish()
+    }
 }
 
 impl LoadedConfiguration {
@@ -81,6 +94,22 @@ impl LoadedConfiguration {
             .map(|(key, value)| (key.as_str(), value.as_str()))
     }
 
+    /// Constructs raw configuration from explicitly supplied values.
+    pub fn from_values<I, K, V>(values: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        Self {
+            source: ConfigurationSource::Programmatic,
+            values: values
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into()))
+                .collect(),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn from_test_values<I, K, V>(values: I) -> Self
     where
@@ -102,6 +131,7 @@ impl LoadedConfiguration {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ConfigurationSource {
     Environment,
+    Programmatic,
     #[cfg(test)]
     Test,
 }
@@ -120,7 +150,9 @@ mod tests {
         let loader = ConfigurationLoader::new();
         let environment = Environment::new();
 
-        let loaded = loader.load_environment(&environment);
+        let loaded = loader
+            .load_environment(&environment)
+            .expect("environment loading should succeed");
 
         assert_eq!(loaded.source(), ConfigurationSource::Environment);
     }
@@ -130,7 +162,9 @@ mod tests {
         let loader = ConfigurationLoader::new();
         let environment = Environment::new();
 
-        let loaded = loader.load_environment(&environment);
+        let loaded = loader
+            .load_environment(&environment)
+            .expect("environment loading should succeed");
         let entries: Vec<_> = loaded.iter().collect();
 
         assert_eq!(loaded.len(), entries.len());
@@ -151,13 +185,36 @@ mod tests {
         let loader = ConfigurationLoader::new();
         let environment = Environment::new();
 
-        let loaded = loader.load_environment(&environment);
+        let loaded = loader
+            .load_environment(&environment)
+            .expect("environment loading should succeed");
 
         let key = if cfg!(windows) { "PATH" } else { "HOME" };
 
         if let Some(value) = loaded.get(key) {
             assert!(!value.contains('\0'));
         }
+    }
+
+    #[test]
+    fn programmatic_values_preserve_source_and_data() {
+        let loaded = LoadedConfiguration::from_values([("PORT", "8080"), ("HOST", "localhost")]);
+
+        assert_eq!(loaded.source(), ConfigurationSource::Programmatic);
+        assert_eq!(loaded.get("PORT"), Some("8080"));
+        assert_eq!(loaded.get("HOST"), Some("localhost"));
+        assert_eq!(loaded.len(), 2);
+    }
+
+    #[test]
+    fn loaded_configuration_debug_does_not_render_values() {
+        let loaded = LoadedConfiguration::from_values([("SECRET", "super-secret-value")]);
+
+        let rendered = format!("{loaded:?}");
+        assert!(rendered.contains("LoadedConfiguration"));
+        assert!(rendered.contains("Programmatic"));
+        assert!(rendered.contains("value_count"));
+        assert!(!rendered.contains("super-secret-value"));
     }
 
     #[test]
@@ -174,7 +231,9 @@ mod tests {
         let loader = ConfigurationLoader::new();
         let environment = Environment::new();
 
-        let loaded = loader.load_environment(&environment);
+        let loaded = loader
+            .load_environment(&environment)
+            .expect("environment loading should succeed");
 
         let missing_key = format!("NIZAAM_LOADER_TEST_MISSING_{}", std::process::id());
 

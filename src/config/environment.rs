@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::env;
+use std::ffi::OsString;
+use std::fmt;
 
 const MAX_ENVIRONMENT_KEY_LENGTH: usize = 256;
 
@@ -22,7 +24,9 @@ impl Environment {
     pub fn get(&self, key: &str) -> Result<Option<String>, EnvironmentError> {
         validate_key(key)?;
 
-        Ok(env::var_os(key).map(|value| value.to_string_lossy().into_owned()))
+        env::var_os(key)
+            .map(|value| decode_os_string(value, key))
+            .transpose()
     }
 
     /// Returns the raw environment value for a required key.
@@ -30,7 +34,7 @@ impl Environment {
         validate_key(key)?;
 
         match env::var_os(key) {
-            Some(value) => Ok(value.to_string_lossy().into_owned()),
+            Some(value) => decode_os_string(value, key),
             None => Err(EnvironmentError::MissingKey {
                 key: key.to_owned(),
             }),
@@ -45,30 +49,32 @@ impl Environment {
 
     /// Captures the current process environment into a deterministic,
     /// read-only source snapshot.
-    #[must_use]
-    pub fn snapshot(&self) -> EnvironmentSnapshot {
+    pub fn snapshot(&self) -> Result<EnvironmentSnapshot, EnvironmentError> {
         EnvironmentSnapshot::from_process()
     }
 }
 
 /// A deterministic, read-only snapshot of environment values.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct EnvironmentSnapshot {
     values: BTreeMap<String, String>,
 }
 
 impl EnvironmentSnapshot {
-    fn from_process() -> Self {
-        Self {
-            values: env::vars_os()
-                .map(|(key, value)| {
-                    (
-                        key.to_string_lossy().into_owned(),
-                        value.to_string_lossy().into_owned(),
-                    )
-                })
-                .collect(),
+    fn from_process() -> Result<Self, EnvironmentError> {
+        let mut values = BTreeMap::new();
+
+        for (raw_key, raw_value) in env::vars_os() {
+            let key = raw_key
+                .into_string()
+                .map_err(|_| EnvironmentError::InvalidEncoding {
+                    key: "<non-unicode-environment-key>".to_owned(),
+                })?;
+            let value = decode_os_string(raw_value, &key)?;
+            values.insert(key, value);
         }
+
+        Ok(Self { values })
     }
 
     /// Returns a value from the snapshot.
@@ -108,15 +114,21 @@ impl EnvironmentSnapshot {
 pub enum EnvironmentError {
     InvalidKey,
     KeyTooLong { max: usize },
+    InvalidEncoding { key: String },
     MissingKey { key: String },
 }
 
 impl std::fmt::Display for EnvironmentError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidKey => write!(f, "environment key must not be empty"),
+            Self::InvalidKey => {
+                write!(f, "environment key must not be empty or contain '=' or NUL")
+            }
             Self::KeyTooLong { max } => {
                 write!(f, "environment key exceeds maximum length of {max}")
+            }
+            Self::InvalidEncoding { key } => {
+                write!(f, "environment value for key {key} is not valid Unicode")
             }
             Self::MissingKey { key } => {
                 write!(f, "required environment key is missing: {key}")
@@ -128,7 +140,7 @@ impl std::fmt::Display for EnvironmentError {
 impl std::error::Error for EnvironmentError {}
 
 fn validate_key(key: &str) -> Result<(), EnvironmentError> {
-    if key.is_empty() {
+    if key.is_empty() || key.contains('=') || key.contains('\0') {
         return Err(EnvironmentError::InvalidKey);
     }
 
@@ -139,6 +151,22 @@ fn validate_key(key: &str) -> Result<(), EnvironmentError> {
     }
 
     Ok(())
+}
+
+fn decode_os_string(value: OsString, key: &str) -> Result<String, EnvironmentError> {
+    value
+        .into_string()
+        .map_err(|_| EnvironmentError::InvalidEncoding {
+            key: key.to_owned(),
+        })
+}
+
+impl fmt::Debug for EnvironmentSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EnvironmentSnapshot")
+            .field("value_count", &self.values.len())
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -233,7 +261,9 @@ mod tests {
     #[test]
     fn snapshot_is_deterministically_ordered_and_read_only() {
         let environment = Environment::new();
-        let snapshot = environment.snapshot();
+        let snapshot = environment
+            .snapshot()
+            .expect("environment snapshot should decode successfully");
         let entries: Vec<_> = snapshot.iter().collect();
 
         assert_eq!(snapshot.len(), entries.len());
@@ -247,5 +277,54 @@ mod tests {
             assert!(snapshot.contains(key));
             assert_eq!(snapshot.get(key), Some(*value));
         }
+    }
+    #[test]
+    fn keys_containing_equals_or_nul_are_rejected_consistently() {
+        let environment = Environment::new();
+
+        for key in ["BAD=KEY", "BAD\0KEY"] {
+            assert_eq!(
+                environment.get(key).expect_err("invalid key must fail"),
+                EnvironmentError::InvalidKey
+            );
+            assert_eq!(
+                environment.require(key).expect_err("invalid key must fail"),
+                EnvironmentError::InvalidKey
+            );
+            assert_eq!(
+                environment
+                    .contains(key)
+                    .expect_err("invalid key must fail"),
+                EnvironmentError::InvalidKey
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_os_values_are_rejected() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let invalid = OsString::from_vec(vec![0xff]);
+        let error = decode_os_string(invalid, "SECRET").expect_err("invalid UTF-8 must fail");
+
+        assert_eq!(
+            error,
+            EnvironmentError::InvalidEncoding {
+                key: "SECRET".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn environment_snapshot_debug_does_not_render_values() {
+        let mut values = BTreeMap::new();
+        values.insert("SECRET".to_owned(), "super-secret-value".to_owned());
+        let snapshot = EnvironmentSnapshot { values };
+
+        let rendered = format!("{snapshot:?}");
+        assert!(rendered.contains("EnvironmentSnapshot"));
+        assert!(rendered.contains("value_count"));
+        assert!(!rendered.contains("super-secret-value"));
     }
 }

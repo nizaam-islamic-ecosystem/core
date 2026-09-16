@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nizaam_core::config::environment::Environment;
-use nizaam_core::config::loader::{ConfigurationLoader, LoadedConfiguration};
+use nizaam_core::config::loader::{ConfigurationLoader, ConfigurationSource, LoadedConfiguration};
 use nizaam_core::config::parser::{ConfigurationParser, ConfigurationType};
 use nizaam_core::config::resolution::ConfigurationResolver;
 use nizaam_core::config::snapshot::{ConfigurationSnapshot, ConfigurationSnapshotId};
@@ -55,8 +55,12 @@ fn resolved_snapshot(id: u64, values: &[(&str, ConfigurationValue)]) -> Arc<Conf
     ))
 }
 
-fn environment_loaded() -> LoadedConfiguration {
-    ConfigurationLoader::new().load_environment(&Environment::new())
+fn loaded(values: &[(&str, &str)]) -> LoadedConfiguration {
+    LoadedConfiguration::from_values(
+        values
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
+    )
 }
 
 fn initial_updater(snapshot: Arc<ConfigurationSnapshot>) -> ConfigurationUpdater {
@@ -65,6 +69,15 @@ fn initial_updater(snapshot: Arc<ConfigurationSnapshot>) -> ConfigurationUpdater
     let resolver = ConfigurationResolver::new();
 
     ConfigurationUpdater::new(parser, validator, resolver, (*snapshot).clone())
+}
+
+#[test]
+fn configuration_loader_can_read_the_process_environment() {
+    let loaded = ConfigurationLoader::new()
+        .load_environment(&Environment::new())
+        .expect("process environment should be loadable");
+
+    assert_eq!(loaded.source(), ConfigurationSource::Environment);
 }
 
 #[test]
@@ -170,10 +183,10 @@ fn existing_engine_context_keeps_original_configuration_after_an_update() {
     .with_configuration(Arc::clone(&original));
 
     let mut updater = initial_updater(Arc::clone(&original));
-    let loaded = environment_loaded();
+    let loaded = loaded(&[(CONFIG_KEY, "updated")]);
     let result = updater
         .update(&loaded)
-        .expect("an environment-backed update should succeed without validation requirements");
+        .expect("the programmatic configuration update should succeed");
 
     assert_eq!(result.previous(), ConfigurationSnapshotId::new(20));
     assert_eq!(result.current(), ConfigurationSnapshotId::new(21));
@@ -195,10 +208,10 @@ fn new_engine_context_can_receive_the_newly_activated_configuration_snapshot() {
     );
 
     let mut updater = initial_updater(Arc::clone(&original));
-    let loaded = environment_loaded();
+    let loaded = loaded(&[(CONFIG_KEY, "updated")]);
     updater
         .update(&loaded)
-        .expect("environment-backed update should succeed");
+        .expect("programmatic configuration update should succeed");
 
     let active = Arc::new(updater.current().clone());
     let new_context = EngineContext::new(operation_context(
@@ -234,7 +247,7 @@ fn failed_configuration_update_does_not_replace_the_snapshot_used_by_runtime() {
     let mut updater = ConfigurationUpdater::new(parser, validator, resolver, (*original).clone());
 
     let error = updater
-        .update(&environment_loaded())
+        .update(&loaded(&[(CONFIG_KEY, "updated")]))
         .expect_err("missing required configuration must reject the update");
 
     assert!(matches!(error, ConfigurationUpdateError::Validation(_)));

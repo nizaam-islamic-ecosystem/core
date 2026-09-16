@@ -432,7 +432,9 @@ mod tests {
         let address_key = unique_key("ADDRESS");
         unsafe { std::env::set_var(&host_key, "localhost") };
         unsafe { std::env::set_var(&address_key, format!("${{{host_key}}}")) };
-        let configuration = ConfigurationLoader::new().load_environment(&Environment::new());
+        let configuration = ConfigurationLoader::new()
+            .load_environment(&Environment::new())
+            .expect("environment loading should succeed");
         unsafe { std::env::remove_var(&host_key) };
         unsafe { std::env::remove_var(&address_key) };
 
@@ -483,7 +485,9 @@ mod tests {
         unsafe { std::env::set_var(&first_key, "bad") };
         unsafe { std::env::set_var(&second_key, "also-bad") };
 
-        let configuration = ConfigurationLoader::new().load_environment(&Environment::new());
+        let configuration = ConfigurationLoader::new()
+            .load_environment(&Environment::new())
+            .expect("environment loading should succeed");
 
         unsafe { std::env::remove_var(&first_key) };
         unsafe { std::env::remove_var(&second_key) };
@@ -519,7 +523,9 @@ mod tests {
         unsafe { std::env::set_var(&valid_key, "value") };
         unsafe { std::env::set_var(&invalid_key, "not-an-integer") };
 
-        let configuration = ConfigurationLoader::new().load_environment(&Environment::new());
+        let configuration = ConfigurationLoader::new()
+            .load_environment(&Environment::new())
+            .expect("environment loading should succeed");
 
         unsafe { std::env::remove_var(&valid_key) };
         unsafe { std::env::remove_var(&invalid_key) };
@@ -539,7 +545,9 @@ mod tests {
         unsafe { std::env::set_var(&port_key, "8080") };
         unsafe { std::env::set_var(&host_key, "localhost") };
 
-        let configuration = ConfigurationLoader::new().load_environment(&Environment::new());
+        let configuration = ConfigurationLoader::new()
+            .load_environment(&Environment::new())
+            .expect("environment loading should succeed");
 
         unsafe { std::env::remove_var(&port_key) };
         unsafe { std::env::remove_var(&host_key) };

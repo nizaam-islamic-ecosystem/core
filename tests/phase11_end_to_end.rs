@@ -7,6 +7,7 @@
 //! capability dispatch, logging, security, and provenance.
 
 use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 
 use nizaam_core::capability::{
     CapabilityDefinition, CapabilityInvocation, CapabilityOutcome, CapabilityRegistry, arc_handler,
@@ -21,7 +22,6 @@ use nizaam_core::contracts::{
     ContractDescriptor, ContractMetadata, EncodedPayload, Interaction, MessageEnvelope,
     Participants, PayloadDescriptor, UniversalRequest, UniversalResponse, Version,
 };
-use nizaam_core::error::{ErrorClass, ErrorCode, ErrorDefinition, ErrorOwner, Severity};
 use nizaam_core::health::{
     CapabilityHealthReport, DependencyId, DependencyReport, DependencyRequirement, HealthReport,
     HealthStatus, LivenessReport, ReadinessReport,
@@ -435,7 +435,9 @@ fn request_emits_trace_metrics_diagnostics_and_existing_logging_for_one_operatio
         .emit(global_log_event(operation.clone()))
         .expect("existing logging system should accept the event");
 
-    let log_event = receiver.recv().unwrap();
+    let log_event = receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("logging event should be delivered within five seconds");
 
     assert_eq!(
         correlation.operation_id().unwrap().as_str(),
@@ -589,34 +591,5 @@ fn phase11_subsystems_extend_existing_core_boundaries_without_replacing_them() {
     assert_eq!(
         correlation.correlation_id(),
         &operation.operation.correlation_id
-    );
-}
-
-#[test]
-fn error_reference_and_diagnostic_cross_core_boundary() {
-    let definition = ErrorDefinition::new(
-        ErrorCode::new("CORE.PHASE11.001").unwrap(),
-        ErrorOwner::new("CORE").unwrap(),
-        Version::new(1, 0, 0),
-        ErrorClass::Execution,
-        Severity::Error,
-        "phase 11 downstream execution failed",
-        nizaam_core::status::Retryability::NonRetryable,
-    )
-    .unwrap();
-
-    let reference = nizaam_core::error::ErrorReference::new(definition.code.as_str()).unwrap();
-
-    let diagnostic = Diagnostic::new(
-        DiagnosticKind::Runtime,
-        DiagnosticCondition::Failed,
-        "runtime failure observed",
-    )
-    .unwrap()
-    .with_error_reference(reference);
-
-    assert_eq!(
-        diagnostic.error_reference().unwrap().as_str(),
-        definition.code.as_str()
     );
 }

@@ -52,7 +52,7 @@ pub enum DiagnosticCondition {
 }
 
 /// The entity or subsystem to which a diagnostic applies.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub enum DiagnosticSubject {
     Component(String),
     Engine(EngineId),
@@ -86,9 +86,57 @@ impl DiagnosticSubject {
     }
 }
 
+#[derive(serde::Deserialize)]
+enum DiagnosticSubjectWire {
+    Component(String),
+    Engine(EngineId),
+    Capability(CapabilityId),
+    Dependency(String),
+    Runtime,
+    Configuration,
+}
+
+impl<'de> serde::Deserialize<'de> for DiagnosticSubject {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match DiagnosticSubjectWire::deserialize(deserializer)? {
+            DiagnosticSubjectWire::Component(value) => {
+                DiagnosticSubject::component(value).map_err(serde::de::Error::custom)
+            }
+            DiagnosticSubjectWire::Engine(value) => Ok(Self::Engine(value)),
+            DiagnosticSubjectWire::Capability(value) => Ok(Self::Capability(value)),
+            DiagnosticSubjectWire::Dependency(value) => {
+                DiagnosticSubject::dependency(value).map_err(serde::de::Error::custom)
+            }
+            DiagnosticSubjectWire::Runtime => Ok(Self::Runtime),
+            DiagnosticSubjectWire::Configuration => Ok(Self::Configuration),
+        }
+    }
+}
+
 /// Structured, bounded diagnostic details.
-#[derive(Clone, Debug, Eq, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Default, serde::Serialize)]
 pub struct DiagnosticDetails(BTreeMap<String, String>);
+
+impl<'de> serde::Deserialize<'de> for DiagnosticDetails {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let values = BTreeMap::<String, String>::deserialize(deserializer)?;
+        let mut details = Self::new();
+
+        for (key, value) in values {
+            details
+                .insert(key, value)
+                .map_err(serde::de::Error::custom)?;
+        }
+
+        Ok(details)
+    }
+}
 
 impl DiagnosticDetails {
     pub fn new() -> Self {
@@ -417,6 +465,33 @@ mod tests {
         assert!(matches!(capability, DiagnosticSubject::Capability(_)));
         assert!(matches!(component, DiagnosticSubject::Component(_)));
         assert!(matches!(dependency, DiagnosticSubject::Dependency(_)));
+    }
+
+    #[test]
+    fn diagnostic_subject_deserialization_preserves_bounds() {
+        let component =
+            serde_json::from_str::<DiagnosticSubject>(r#"{"Component":"core-runtime"}"#)
+                .expect("valid component subject should deserialize");
+        assert_eq!(
+            component,
+            DiagnosticSubject::component("core-runtime").unwrap()
+        );
+
+        assert!(serde_json::from_str::<DiagnosticSubject>(r#"{"Component":""}"#).is_err());
+        assert!(serde_json::from_str::<DiagnosticSubject>(r#"{"Dependency":"   "}"#).is_err());
+    }
+
+    #[test]
+    fn diagnostic_details_deserialization_preserves_bounds() {
+        let details = serde_json::from_str::<DiagnosticDetails>(r#"{"state":"active"}"#)
+            .expect("valid details should deserialize");
+        assert_eq!(details.get("state"), Some("active"));
+
+        let oversized = format!(
+            r#"{{"state":"{}"}}"#,
+            "x".repeat(MAX_DIAGNOSTIC_DETAIL_VALUE_LENGTH + 1)
+        );
+        assert!(serde_json::from_str::<DiagnosticDetails>(&oversized).is_err());
     }
 
     #[test]

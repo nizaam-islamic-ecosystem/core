@@ -221,7 +221,7 @@ fn aggregate_health(
     }
 
     let mut has_unknown = false;
-    let mut has_degraded = false;
+    let mut has_degraded = liveness_status.is_degraded();
 
     for dependency in dependencies {
         match dependency.status() {

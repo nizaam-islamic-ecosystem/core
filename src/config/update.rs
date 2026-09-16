@@ -1,10 +1,40 @@
 use std::fmt;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use super::loader::LoadedConfiguration;
 use super::parser::{ConfigurationParser, ParseErrors};
 use super::resolution::{ConfigurationResolver, ResolutionErrors};
 use super::snapshot::{ConfigurationSnapshot, ConfigurationSnapshotId};
-use super::validation::{ConfigurationValidator, ValidationErrors};
+use super::validation::{
+    ConfigurationValidator, SemanticValidator, ValidatedConfiguration, ValidationErrors,
+};
+
+trait ErasedSemanticValidator: fmt::Debug + Send + Sync {
+    fn validate(&self, configuration: &ValidatedConfiguration) -> Result<(), String>;
+}
+
+impl<V> ErasedSemanticValidator for V
+where
+    V: SemanticValidator + fmt::Debug + Send + Sync + 'static,
+    V::Error: fmt::Display,
+{
+    fn validate(&self, configuration: &ValidatedConfiguration) -> Result<(), String> {
+        SemanticValidator::validate(self, configuration).map_err(|error| error.to_string())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ConfigurationUpdaterId(u64);
+
+impl ConfigurationUpdaterId {
+    fn new() -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
 
 /// Orchestrates configuration proposals through parsing, validation,
 /// resolution, snapshot creation, and atomic activation.
@@ -17,7 +47,9 @@ pub struct ConfigurationUpdater {
     parser: ConfigurationParser,
     validator: ConfigurationValidator,
     resolver: ConfigurationResolver,
+    semantic_validator: Option<Arc<dyn ErasedSemanticValidator>>,
     current: ConfigurationSnapshot,
+    lineage: ConfigurationUpdaterId,
 }
 
 impl ConfigurationUpdater {
@@ -33,8 +65,20 @@ impl ConfigurationUpdater {
             parser,
             validator,
             resolver,
+            semantic_validator: None,
             current: initial_snapshot,
+            lineage: ConfigurationUpdaterId::new(),
         }
+    }
+
+    /// Attaches an engine-specific semantic validation boundary to updates.
+    pub fn with_semantic_validator<V>(mut self, validator: V) -> Self
+    where
+        V: SemanticValidator + fmt::Debug + Send + Sync + 'static,
+        V::Error: fmt::Display,
+    {
+        self.semantic_validator = Some(Arc::new(validator));
+        self
     }
 
     /// Returns the currently active immutable configuration snapshot.
@@ -45,9 +89,10 @@ impl ConfigurationUpdater {
 
     /// Prepares a complete configuration proposal without activating it.
     ///
-    /// Parsing, validation, and resolution happen before any active state is
-    /// changed. A successful preparation produces the next snapshot
-    /// generation and can later be activated atomically.
+    /// Parsing, structural validation, semantic validation when configured, and
+    /// resolution happen before any active state is changed. A successful
+    /// preparation produces the next snapshot generation and can later be
+    /// activated atomically.
     pub fn prepare(
         &self,
         proposal: &LoadedConfiguration,
@@ -62,6 +107,12 @@ impl ConfigurationUpdater {
             .validate(parsed)
             .map_err(ConfigurationUpdateError::Validation)?;
 
+        if let Some(validator) = &self.semantic_validator {
+            validator
+                .validate(&validated)
+                .map_err(|message| ConfigurationUpdateError::SemanticValidation { message })?;
+        }
+
         let resolved = self
             .resolver
             .resolve(&validated)
@@ -75,11 +126,12 @@ impl ConfigurationUpdater {
         Ok(PreparedConfigurationUpdate {
             expected_current: self.current.id(),
             snapshot,
+            lineage: self.lineage,
         })
     }
 
-    /// Activates a previously prepared update only if the expected current
-    /// snapshot is still active.
+    /// Activates a previously prepared update only if it belongs to this updater
+    /// and its expected current snapshot is still active.
     ///
     /// This provides optimistic conflict detection: a prepared proposal cannot
     /// overwrite a configuration snapshot that became active after it was
@@ -89,6 +141,10 @@ impl ConfigurationUpdater {
         prepared: PreparedConfigurationUpdate,
     ) -> Result<ConfigurationUpdateResult, ConfigurationUpdateError> {
         let actual = self.current.id();
+
+        if self.lineage != prepared.lineage {
+            return Err(ConfigurationUpdateError::LineageMismatch);
+        }
 
         if actual != prepared.expected_current {
             return Err(ConfigurationUpdateError::Conflict {
@@ -110,8 +166,9 @@ impl ConfigurationUpdater {
 
     /// Prepares and activates a complete configuration proposal.
     ///
-    /// The active snapshot is changed only after parsing, validation,
-    /// resolution, and snapshot construction have all succeeded.
+    /// The active snapshot is changed only after parsing, structural validation,
+    /// configured semantic validation, resolution, and snapshot construction
+    /// have all succeeded.
     pub fn update(
         &mut self,
         proposal: &LoadedConfiguration,
@@ -127,6 +184,7 @@ impl ConfigurationUpdater {
 pub struct PreparedConfigurationUpdate {
     expected_current: ConfigurationSnapshotId,
     snapshot: ConfigurationSnapshot,
+    lineage: ConfigurationUpdaterId,
 }
 
 impl PreparedConfigurationUpdate {
@@ -168,6 +226,10 @@ pub enum ConfigurationUpdateError {
     Parse(ParseErrors),
     Validation(ValidationErrors),
     Resolution(ResolutionErrors),
+    SemanticValidation {
+        message: String,
+    },
+    LineageMismatch,
     Conflict {
         expected: ConfigurationSnapshotId,
         actual: ConfigurationSnapshotId,
@@ -184,6 +246,15 @@ impl fmt::Display for ConfigurationUpdateError {
             }
             Self::Resolution(errors) => {
                 write!(f, "configuration update resolution failed: {errors}")
+            }
+            Self::SemanticValidation { message } => {
+                write!(
+                    f,
+                    "configuration update semantic validation failed: {message}"
+                )
+            }
+            Self::LineageMismatch => {
+                f.write_str("configuration update prepared by a different updater")
             }
             Self::Conflict { expected, actual } => write!(
                 f,
@@ -460,6 +531,64 @@ mod tests {
 
             assert_eq!(result.current().value(), expected);
         }
+    }
+
+    #[derive(Debug)]
+    struct PortRangeValidator;
+
+    #[derive(Debug)]
+    struct PortRangeError;
+
+    impl fmt::Display for PortRangeError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("PORT must be between 1 and 65535")
+        }
+    }
+
+    impl SemanticValidator for PortRangeValidator {
+        type Error = PortRangeError;
+
+        fn validate(&self, configuration: &ValidatedConfiguration) -> Result<(), Self::Error> {
+            match configuration.get("PORT") {
+                Some(ConfigurationValue::Integer(port)) if (1..=65_535).contains(port) => Ok(()),
+                _ => Err(PortRangeError),
+            }
+        }
+    }
+
+    #[test]
+    fn semantic_validation_runs_before_candidate_activation() {
+        let mut updater = updater(&[]).with_semantic_validator(PortRangeValidator);
+
+        let error = updater
+            .update(&loaded(&[("PORT", "70000")]))
+            .expect_err("semantic validation must reject an invalid port");
+
+        assert_eq!(
+            error,
+            ConfigurationUpdateError::SemanticValidation {
+                message: "PORT must be between 1 and 65535".to_owned(),
+            }
+        );
+        assert_eq!(updater.current().id().value(), 0);
+    }
+
+    #[test]
+    fn prepared_update_cannot_be_activated_by_another_updater() {
+        let first = updater(&[]);
+        let mut second = updater(&[]);
+
+        let prepared = first
+            .prepare(&loaded(&[("PORT", "9090")]))
+            .expect("preparation should succeed");
+
+        assert_eq!(
+            second
+                .activate(prepared)
+                .expect_err("cross-updater activation must fail"),
+            ConfigurationUpdateError::LineageMismatch
+        );
+        assert_eq!(second.current().id().value(), 0);
     }
 
     #[test]

@@ -46,7 +46,9 @@ fn configuration_api_usage_anchor() {
     let _ = environment.get("PATH");
     let _ = environment.require("PATH");
     let _ = environment.contains("PATH");
-    let environment_snapshot = environment.snapshot();
+    let environment_snapshot = environment
+        .snapshot()
+        .expect("anchor environment snapshot should decode");
 
     let _ = environment_snapshot.get("PATH");
     let _ = environment_snapshot.contains("PATH");
@@ -57,6 +59,9 @@ fn configuration_api_usage_anchor() {
     for error in [
         EnvironmentError::InvalidKey,
         EnvironmentError::KeyTooLong { max: 256 },
+        EnvironmentError::InvalidEncoding {
+            key: "KEY".to_owned(),
+        },
         EnvironmentError::MissingKey {
             key: "MISSING".to_owned(),
         },
@@ -66,7 +71,9 @@ fn configuration_api_usage_anchor() {
 
     // Loader API.
     let loader = ConfigurationLoader::new();
-    let loaded = loader.load_environment(&environment);
+    let loaded = loader
+        .load_environment(&environment)
+        .expect("anchor environment loading should succeed");
 
     let _ = loaded.source();
     let _ = matches!(loaded.source(), ConfigurationSource::Environment);
@@ -311,6 +318,10 @@ fn configuration_api_usage_anchor() {
         ConfigurationUpdateError::Parse(update_parse_errors),
         ConfigurationUpdateError::Validation(update_validation_errors),
         ConfigurationUpdateError::Resolution(update_resolution_errors),
+        ConfigurationUpdateError::SemanticValidation {
+            message: "semantic validation failed".to_owned(),
+        },
+        ConfigurationUpdateError::LineageMismatch,
         ConfigurationUpdateError::Conflict {
             expected: ConfigurationSnapshotId::new(1),
             actual: ConfigurationSnapshotId::new(2),
@@ -385,8 +396,9 @@ mod integration_tests {
             ("ENABLED", "true"),
         ]);
 
-        let environment_loaded =
-            ConfigurationLoader::new().load_environment(&super::environment::Environment::new());
+        let environment_loaded = ConfigurationLoader::new()
+            .load_environment(&super::environment::Environment::new())
+            .expect("environment loading should succeed");
         let _ = environment_loaded.source();
 
         let parser = ConfigurationParser::new()

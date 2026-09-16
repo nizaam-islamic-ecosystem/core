@@ -272,22 +272,27 @@ impl MetricRecorder {
         dimensions: MetricDimensions,
         amount: u64,
     ) -> Result<(), MetricError> {
-        self.with_series(descriptor, dimensions, |series| match series {
-            Some(RecordedMetric::Counter(current)) => {
-                let value = current
-                    .checked_add(amount)
-                    .ok_or(MetricError::CounterOverflow)?;
-                Ok(RecordedMetric::Counter(value))
-            }
-            Some(existing) => Err(MetricError::KindMismatch {
-                expected: MetricKind::Counter,
-                actual: existing.kind(),
-            }),
-            None => {
-                let value = amount;
-                Ok(RecordedMetric::Counter(value))
-            }
-        })
+        self.with_series(
+            descriptor,
+            dimensions,
+            MetricKind::Counter,
+            |series| match series {
+                Some(RecordedMetric::Counter(current)) => {
+                    let value = current
+                        .checked_add(amount)
+                        .ok_or(MetricError::CounterOverflow)?;
+                    Ok(RecordedMetric::Counter(value))
+                }
+                Some(existing) => Err(MetricError::KindMismatch {
+                    expected: MetricKind::Counter,
+                    actual: existing.kind(),
+                }),
+                None => {
+                    let value = amount;
+                    Ok(RecordedMetric::Counter(value))
+                }
+            },
+        )
     }
 
     /// Sets the current gauge value for the supplied metric series.
@@ -301,14 +306,19 @@ impl MetricRecorder {
             return Err(MetricError::NonFiniteValue);
         }
 
-        self.with_series(descriptor, dimensions, |series| match series {
-            Some(RecordedMetric::Gauge(_)) => Ok(RecordedMetric::Gauge(value)),
-            Some(existing) => Err(MetricError::KindMismatch {
-                expected: MetricKind::Gauge,
-                actual: existing.kind(),
-            }),
-            None => Ok(RecordedMetric::Gauge(value)),
-        })
+        self.with_series(
+            descriptor,
+            dimensions,
+            MetricKind::Gauge,
+            |series| match series {
+                Some(RecordedMetric::Gauge(_)) => Ok(RecordedMetric::Gauge(value)),
+                Some(existing) => Err(MetricError::KindMismatch {
+                    expected: MetricKind::Gauge,
+                    actual: existing.kind(),
+                }),
+                None => Ok(RecordedMetric::Gauge(value)),
+            },
+        )
     }
 
     /// Adds one observation to the supplied histogram series.
@@ -322,24 +332,29 @@ impl MetricRecorder {
             return Err(MetricError::NonFiniteValue);
         }
 
-        self.with_series(descriptor, dimensions, |series| match series {
-            Some(RecordedMetric::Histogram { count, sum }) => {
-                let count = count.checked_add(1).ok_or(MetricError::CounterOverflow)?;
-                let sum = *sum + value;
-                if !sum.is_finite() {
-                    return Err(MetricError::NonFiniteValue);
+        self.with_series(
+            descriptor,
+            dimensions,
+            MetricKind::Histogram,
+            |series| match series {
+                Some(RecordedMetric::Histogram { count, sum }) => {
+                    let count = count.checked_add(1).ok_or(MetricError::CounterOverflow)?;
+                    let sum = *sum + value;
+                    if !sum.is_finite() {
+                        return Err(MetricError::NonFiniteValue);
+                    }
+                    Ok(RecordedMetric::Histogram { count, sum })
                 }
-                Ok(RecordedMetric::Histogram { count, sum })
-            }
-            Some(existing) => Err(MetricError::KindMismatch {
-                expected: MetricKind::Histogram,
-                actual: existing.kind(),
-            }),
-            None => Ok(RecordedMetric::Histogram {
-                count: 1,
-                sum: value,
-            }),
-        })
+                Some(existing) => Err(MetricError::KindMismatch {
+                    expected: MetricKind::Histogram,
+                    actual: existing.kind(),
+                }),
+                None => Ok(RecordedMetric::Histogram {
+                    count: 1,
+                    sum: value,
+                }),
+            },
+        )
     }
 
     /// Returns an immutable snapshot of every currently recorded metric series.
@@ -368,6 +383,7 @@ impl MetricRecorder {
         &self,
         descriptor: &MetricDescriptor,
         dimensions: MetricDimensions,
+        expected_kind: MetricKind,
         update: F,
     ) -> Result<(), MetricError>
     where
@@ -379,35 +395,39 @@ impl MetricRecorder {
         };
         let mut series = self.series.lock().map_err(|_| MetricError::LockPoisoned)?;
 
+        if descriptor.kind != expected_kind {
+            return Err(MetricError::KindMismatch {
+                expected: expected_kind,
+                actual: descriptor.kind,
+            });
+        }
+
         if let Some(existing) = series.get_mut(&key) {
             let kind = existing.kind();
-            if kind != descriptor.kind {
+            if kind != expected_kind {
                 return Err(MetricError::KindMismatch {
-                    expected: descriptor.kind,
+                    expected: expected_kind,
                     actual: kind,
                 });
             }
             let replacement = update(Some(existing))?;
+            if replacement.kind() != expected_kind {
+                return Err(MetricError::KindMismatch {
+                    expected: expected_kind,
+                    actual: replacement.kind(),
+                });
+            }
             *existing = replacement;
             return Ok(());
         }
 
-        let replacement = match descriptor.kind {
-            MetricKind::Counter => match update(None)? {
-                RecordedMetric::Counter(value) => RecordedMetric::Counter(value),
-                _ => unreachable!("counter updater must produce a counter"),
-            },
-            MetricKind::Gauge => match update(None)? {
-                RecordedMetric::Gauge(value) => RecordedMetric::Gauge(value),
-                _ => unreachable!("gauge updater must produce a gauge"),
-            },
-            MetricKind::Histogram => match update(None)? {
-                RecordedMetric::Histogram { count, sum } => {
-                    RecordedMetric::Histogram { count, sum }
-                }
-                _ => unreachable!("histogram updater must produce a histogram"),
-            },
-        };
+        let replacement = update(None)?;
+        if replacement.kind() != expected_kind {
+            return Err(MetricError::KindMismatch {
+                expected: expected_kind,
+                actual: replacement.kind(),
+            });
+        }
 
         series.insert(key, replacement);
         Ok(())
@@ -517,6 +537,36 @@ mod tests {
                 actual: MetricKind::Counter,
             })
         );
+    }
+
+    #[test]
+    fn counter_rejects_gauge_descriptor_before_creating_a_new_series() {
+        let recorder = MetricRecorder::new();
+        let descriptor = make_descriptor("requests.total", MetricKind::Gauge);
+
+        assert_eq!(
+            recorder.increment_counter(&descriptor, MetricDimensions::new(), 1),
+            Err(MetricError::KindMismatch {
+                expected: MetricKind::Counter,
+                actual: MetricKind::Gauge,
+            })
+        );
+        assert!(recorder.snapshot().unwrap().is_empty());
+    }
+
+    #[test]
+    fn gauge_rejects_counter_descriptor_before_creating_a_new_series() {
+        let recorder = MetricRecorder::new();
+        let descriptor = make_descriptor("active.requests", MetricKind::Counter);
+
+        assert_eq!(
+            recorder.set_gauge(&descriptor, MetricDimensions::new(), 1.0),
+            Err(MetricError::KindMismatch {
+                expected: MetricKind::Gauge,
+                actual: MetricKind::Counter,
+            })
+        );
+        assert!(recorder.snapshot().unwrap().is_empty());
     }
 
     #[test]

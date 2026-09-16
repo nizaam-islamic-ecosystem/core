@@ -18,6 +18,7 @@ pub const MAX_DEPENDENCY_ID_LENGTH: usize = 128;
 /// whether the dependency is a database, service, cache, queue, or another
 /// engine-specific resource.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct DependencyId(String);
 
 impl DependencyId {
@@ -45,6 +46,14 @@ impl DependencyId {
     #[must_use]
     pub fn into_inner(self) -> String {
         self.0
+    }
+}
+
+impl TryFrom<String> for DependencyId {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value).ok_or("dependency identifier is empty or exceeds the maximum length")
     }
 }
 
@@ -179,6 +188,17 @@ mod tests {
         let value = "a".repeat(MAX_DEPENDENCY_ID_LENGTH + 1);
 
         assert!(DependencyId::new(value).is_none());
+    }
+
+    #[test]
+    fn dependency_id_deserialization_preserves_constructor_validation() {
+        let valid = serde_json::from_str::<DependencyId>("\"database\"")
+            .expect("valid dependency id should deserialize");
+        assert_eq!(valid.as_str(), "database");
+
+        assert!(serde_json::from_str::<DependencyId>("\"\"").is_err());
+        let oversized = format!("\"{}\"", "x".repeat(MAX_DEPENDENCY_ID_LENGTH + 1));
+        assert!(serde_json::from_str::<DependencyId>(&oversized).is_err());
     }
 
     #[test]

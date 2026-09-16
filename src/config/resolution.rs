@@ -216,6 +216,7 @@ fn validate_key(key: &str) -> Result<(), ResolutionError> {
 
 const REFERENCE_PREFIX: &str = "${";
 const REFERENCE_SUFFIX: char = '}';
+const REDACTED_REFERENCE: &str = "[REDACTED]";
 
 fn parse_reference(value: &str) -> Result<Option<&str>, ParseReferenceError> {
     if !value.starts_with(REFERENCE_PREFIX) {
@@ -358,7 +359,7 @@ impl<'a> ReferenceResolution<'a> {
             Ok(None) => Ok(ConfigurationValue::String(raw)),
             Err(ParseReferenceError::Malformed) => Err(ResolutionError::UnsupportedReference {
                 key: key.to_owned(),
-                reference: raw,
+                reference: REDACTED_REFERENCE.to_owned(),
             }),
         }
     }
@@ -528,6 +529,21 @@ mod tests {
                 .and_then(ConfigurationValue::as_string),
             Some("localhost")
         );
+    }
+
+    #[test]
+    fn malformed_reference_error_does_not_expose_raw_value() {
+        let raw = "${unterminated-sensitive-value";
+        let configuration = configuration(&[("HOST", ConfigurationValue::String(raw.to_owned()))]);
+
+        let error = ConfigurationResolver::new()
+            .resolve(&configuration)
+            .expect_err("malformed reference should fail");
+
+        assert_eq!(error.len(), 1);
+        let rendered = error.to_string();
+        assert!(!rendered.contains(raw));
+        assert!(rendered.contains("[REDACTED]"));
     }
 
     #[test]

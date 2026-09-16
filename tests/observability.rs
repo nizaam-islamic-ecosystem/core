@@ -9,6 +9,7 @@
 //! within the observability module. This file verifies cross-module behavior.
 
 use std::sync::{Arc, mpsc};
+use std::time::Duration;
 
 use nizaam_core::error::{ErrorClass, ErrorCode, ErrorDefinition, ErrorOwner, Severity};
 use nizaam_core::identity::{CorrelationId, OperationId};
@@ -127,7 +128,9 @@ fn observability_logger_publishes_through_the_existing_logging_system() {
         nizaam_core::logging::DispatchOutcome::Queued
     );
 
-    let event = receiver.recv().unwrap();
+    let event = receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("logging event should be delivered within five seconds");
     assert_eq!(event.event_id.as_str(), "observability-event");
     assert_eq!(event.event_type, LogEventType::Diagnostic);
 

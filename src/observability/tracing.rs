@@ -35,8 +35,18 @@ impl fmt::Display for TraceError {
 
 impl std::error::Error for TraceError {}
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, PartialOrd, Ord)]
 pub struct TraceId(String);
+
+impl<'de> Deserialize<'de> for TraceId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        TraceId::new(value).map_err(serde::de::Error::custom)
+    }
+}
 
 impl TraceId {
     pub fn new(value: impl Into<String>) -> Result<Self, TraceError> {
@@ -58,8 +68,18 @@ impl fmt::Display for TraceId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, PartialOrd, Ord)]
 pub struct SpanId(String);
+
+impl<'de> Deserialize<'de> for SpanId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        SpanId::new(value).map_err(serde::de::Error::custom)
+    }
+}
 
 impl SpanId {
     pub fn new(value: impl Into<String>) -> Result<Self, TraceError> {
@@ -101,8 +121,26 @@ impl TraceContext {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 pub struct SpanAttributes(BTreeMap<String, String>);
+
+impl<'de> Deserialize<'de> for SpanAttributes {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let values = BTreeMap::<String, String>::deserialize(deserializer)?;
+        let mut attributes = Self::new();
+
+        for (key, value) in values {
+            attributes
+                .insert(key, value)
+                .map_err(serde::de::Error::custom)?;
+        }
+
+        Ok(attributes)
+    }
+}
 
 impl SpanAttributes {
     pub fn new() -> Self {
@@ -148,11 +186,37 @@ impl SpanAttributes {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SpanEvent {
     name: String,
     timestamp: SystemTime,
     attributes: SpanAttributes,
+}
+
+#[derive(Deserialize)]
+struct SpanEventWire {
+    name: String,
+    timestamp: SystemTime,
+    attributes: SpanAttributes,
+}
+
+impl<'de> Deserialize<'de> for SpanEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = SpanEventWire::deserialize(deserializer)?;
+        let mut event =
+            SpanEvent::new(wire.name, wire.timestamp).map_err(serde::de::Error::custom)?;
+
+        for (key, value) in wire.attributes.iter() {
+            event
+                .set_attribute(key, value)
+                .map_err(serde::de::Error::custom)?;
+        }
+
+        Ok(event)
+    }
 }
 
 impl SpanEvent {
@@ -317,7 +381,7 @@ impl Span {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CompletedSpan {
     trace_id: TraceId,
     span_id: SpanId,
@@ -328,6 +392,48 @@ pub struct CompletedSpan {
     duration: Duration,
     attributes: SpanAttributes,
     events: Vec<SpanEvent>,
+}
+
+#[derive(Deserialize)]
+struct CompletedSpanWire {
+    trace_id: TraceId,
+    span_id: SpanId,
+    parent_span_id: Option<SpanId>,
+    name: String,
+    started_at: SystemTime,
+    ended_at: SystemTime,
+    duration: Duration,
+    attributes: SpanAttributes,
+    events: Vec<SpanEvent>,
+}
+
+impl<'de> Deserialize<'de> for CompletedSpan {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = CompletedSpanWire::deserialize(deserializer)?;
+
+        if !validate_identifier(&wire.name, MAX_SPAN_NAME_LENGTH) {
+            return Err(serde::de::Error::custom(TraceError::InvalidSpanName));
+        }
+
+        if wire.events.len() > MAX_SPAN_EVENTS {
+            return Err(serde::de::Error::custom(TraceError::EventLimitExceeded));
+        }
+
+        Ok(Self {
+            trace_id: wire.trace_id,
+            span_id: wire.span_id,
+            parent_span_id: wire.parent_span_id,
+            name: wire.name,
+            started_at: wire.started_at,
+            ended_at: wire.ended_at,
+            duration: wire.duration,
+            attributes: wire.attributes,
+            events: wire.events,
+        })
+    }
 }
 
 impl CompletedSpan {
@@ -533,6 +639,53 @@ mod tests {
         assert!(completed.duration() >= Duration::ZERO);
         assert_eq!(completed.name(), "request");
         assert!(completed.parent_span_id().is_none());
+    }
+
+    #[test]
+    fn deserialization_rejects_invalid_trace_and_span_ids() {
+        assert!(serde_json::from_str::<TraceId>(r#"""#).is_err());
+        assert!(serde_json::from_str::<SpanId>(r#"""#).is_err());
+
+        let oversized = format!(r#""{}""#, "x".repeat(MAX_TRACE_ID_LENGTH + 1));
+        assert!(serde_json::from_str::<TraceId>(&oversized).is_err());
+    }
+
+    #[test]
+    fn deserialization_rejects_oversized_span_attributes() {
+        let mut object = String::from("{");
+        for index in 0..=MAX_SPAN_ATTRIBUTES {
+            if index > 0 {
+                object.push(',');
+            }
+            object.push_str(&format!(r#""key-{index}":"value""#));
+        }
+        object.push('}');
+
+        assert!(serde_json::from_str::<SpanAttributes>(&object).is_err());
+    }
+
+    #[test]
+    fn deserialization_rejects_invalid_span_event_name() {
+        let value = r#"{"name":"","timestamp":"2026-01-01T00:00:00Z","attributes":{}}"#;
+        assert!(serde_json::from_str::<SpanEvent>(value).is_err());
+    }
+
+    #[test]
+    fn completed_span_deserialization_rejects_invalid_name_and_event_count() {
+        let span = Span::root(trace_id(), span_id("root"), "request").unwrap();
+        let mut value = serde_json::to_value(span.finish()).unwrap();
+
+        value["name"] = serde_json::Value::String(String::new());
+        assert!(serde_json::from_value::<CompletedSpan>(value.clone()).is_err());
+
+        let event =
+            serde_json::to_value(SpanEvent::new("event", SystemTime::UNIX_EPOCH).unwrap()).unwrap();
+        let events = vec![event; MAX_SPAN_EVENTS + 1];
+
+        value["name"] = serde_json::Value::String("request".to_owned());
+        value["events"] = serde_json::Value::Array(events);
+
+        assert!(serde_json::from_value::<CompletedSpan>(value).is_err());
     }
 
     #[test]

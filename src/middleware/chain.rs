@@ -872,6 +872,29 @@ mod tests {
     }
 
     #[test]
+    fn downstream_receives_the_same_engine_context() {
+        let chain = MiddlewareChain::new();
+
+        let mut request = request();
+        let mut context = context();
+
+        let result = chain.execute(
+            &mut context,
+            &mut request,
+            |downstream_context, _request| {
+                assert_eq!(
+                    downstream_context.operation().operation.id.as_str(),
+                    "middleware-chain-operation"
+                );
+
+                Ok::<_, &'static str>(response())
+            },
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn chain_can_be_shared_immutably() {
         fn assert_sync<T: Sync>() {}
 

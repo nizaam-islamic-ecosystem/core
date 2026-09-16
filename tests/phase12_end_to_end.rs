@@ -419,7 +419,7 @@ fn consumer_disappearance_cancels_an_open_stream_and_notifies_producer_scope() {
 
     let consumer = stream.consumer().unwrap();
 
-    let producer_scope = TaskScope::new(context.cancellation());
+    let producer_scope = TaskScope::new(stream.context().cancellation());
     let producer_task = Task::new(
         TaskOwner::stream(stream.id()),
         producer_scope,
@@ -445,12 +445,6 @@ fn consumer_disappearance_cancels_an_open_stream_and_notifies_producer_scope() {
         handle.join().unwrap(),
         Err(nizaam_core::streaming::StreamError::Cancelled)
     );
-    let cancellation_deadline = std::time::Instant::now() + Duration::from_secs(1);
-    while !producer_task.scope().is_cancelled() && std::time::Instant::now() < cancellation_deadline
-    {
-        thread::yield_now();
-    }
-
     assert!(
         producer_task.scope().is_cancelled(),
         "consumer disappearance must cancel the producer task scope"

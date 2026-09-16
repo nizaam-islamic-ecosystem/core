@@ -78,6 +78,7 @@ impl ConfigurationUpdater {
         V::Error: fmt::Display,
     {
         self.semantic_validator = Some(Arc::new(validator));
+        self.lineage = ConfigurationUpdaterId::new();
         self
     }
 
@@ -571,6 +572,24 @@ mod tests {
             }
         );
         assert_eq!(updater.current().id().value(), 0);
+    }
+
+    #[test]
+    fn changing_semantic_validation_rejects_previous_prepared_update() {
+        let original = updater(&[]);
+        let prepared = original
+            .prepare(&loaded(&[("PORT", "9090")]))
+            .expect("preparation should succeed");
+
+        let mut changed = original.with_semantic_validator(PortRangeValidator);
+
+        assert_eq!(
+            changed
+                .activate(prepared)
+                .expect_err("changing the semantic policy must reject the old candidate"),
+            ConfigurationUpdateError::LineageMismatch
+        );
+        assert_eq!(changed.current().id().value(), 0);
     }
 
     #[test]

@@ -4,9 +4,6 @@ use std::fmt;
 use super::loader::LoadedConfiguration;
 use super::validation::{ConfigurationValue, ParsedConfiguration};
 
-#[cfg(test)]
-use super::{environment::Environment, loader::ConfigurationLoader};
-
 /// Describes how a raw configuration value should be converted.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ConfigurationType {
@@ -430,13 +427,10 @@ mod tests {
     fn references_are_preserved_for_resolution() {
         let host_key = unique_key("HOST");
         let address_key = unique_key("ADDRESS");
-        unsafe { std::env::set_var(&host_key, "localhost") };
-        unsafe { std::env::set_var(&address_key, format!("${{{host_key}}}")) };
-        let configuration = ConfigurationLoader::new()
-            .load_environment(&Environment::new())
-            .expect("environment loading should succeed");
-        unsafe { std::env::remove_var(&host_key) };
-        unsafe { std::env::remove_var(&address_key) };
+        let configuration = LoadedConfiguration::from_test_values([
+            (host_key.clone(), "localhost".to_owned()),
+            (address_key.clone(), format!("${{{host_key}}}")),
+        ]);
 
         let parser = ConfigurationParser::new()
             .with_type(&host_key, ConfigurationType::String)
@@ -481,16 +475,10 @@ mod tests {
     fn multiple_parse_errors_are_deterministically_collected() {
         let first_key = unique_key("A");
         let second_key = unique_key("B");
-
-        unsafe { std::env::set_var(&first_key, "bad") };
-        unsafe { std::env::set_var(&second_key, "also-bad") };
-
-        let configuration = ConfigurationLoader::new()
-            .load_environment(&Environment::new())
-            .expect("environment loading should succeed");
-
-        unsafe { std::env::remove_var(&first_key) };
-        unsafe { std::env::remove_var(&second_key) };
+        let configuration = LoadedConfiguration::from_test_values([
+            (first_key.clone(), "bad".to_owned()),
+            (second_key.clone(), "also-bad".to_owned()),
+        ]);
 
         let parser = ConfigurationParser::new()
             .with_type(&first_key, ConfigurationType::Integer)
@@ -519,16 +507,10 @@ mod tests {
     fn invalid_configuration_does_not_produce_partial_result() {
         let valid_key = unique_key("VALID");
         let invalid_key = unique_key("INVALID");
-
-        unsafe { std::env::set_var(&valid_key, "value") };
-        unsafe { std::env::set_var(&invalid_key, "not-an-integer") };
-
-        let configuration = ConfigurationLoader::new()
-            .load_environment(&Environment::new())
-            .expect("environment loading should succeed");
-
-        unsafe { std::env::remove_var(&valid_key) };
-        unsafe { std::env::remove_var(&invalid_key) };
+        let configuration = LoadedConfiguration::from_test_values([
+            (valid_key.clone(), "value".to_owned()),
+            (invalid_key.clone(), "not-an-integer".to_owned()),
+        ]);
 
         let parser = ConfigurationParser::new()
             .with_type(&invalid_key, ConfigurationType::Integer)
@@ -541,16 +523,10 @@ mod tests {
     fn parser_does_not_mutate_loaded_configuration() {
         let port_key = unique_key("PORT");
         let host_key = unique_key("HOST");
-
-        unsafe { std::env::set_var(&port_key, "8080") };
-        unsafe { std::env::set_var(&host_key, "localhost") };
-
-        let configuration = ConfigurationLoader::new()
-            .load_environment(&Environment::new())
-            .expect("environment loading should succeed");
-
-        unsafe { std::env::remove_var(&port_key) };
-        unsafe { std::env::remove_var(&host_key) };
+        let configuration = LoadedConfiguration::from_test_values([
+            (port_key.clone(), "8080".to_owned()),
+            (host_key.clone(), "localhost".to_owned()),
+        ]);
 
         let before: Vec<_> = configuration.iter().collect();
 

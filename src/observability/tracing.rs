@@ -15,6 +15,7 @@ pub enum TraceError {
     InvalidTraceId,
     InvalidSpanId,
     InvalidSpanName,
+    SpanIdMatchesParent,
     InvalidAttribute,
     AttributeLimitExceeded,
     EventLimitExceeded,
@@ -26,6 +27,7 @@ impl fmt::Display for TraceError {
             Self::InvalidTraceId => write!(f, "invalid trace id"),
             Self::InvalidSpanId => write!(f, "invalid span id"),
             Self::InvalidSpanName => write!(f, "invalid span name"),
+            Self::SpanIdMatchesParent => write!(f, "span id matches parent span id"),
             Self::InvalidAttribute => write!(f, "invalid span attribute"),
             Self::AttributeLimitExceeded => write!(f, "span attribute limit exceeded"),
             Self::EventLimitExceeded => write!(f, "span event limit exceeded"),
@@ -299,6 +301,10 @@ impl Span {
             return Err(TraceError::InvalidSpanName);
         }
 
+        if parent_span_id.as_ref() == Some(&span_id) {
+            return Err(TraceError::SpanIdMatchesParent);
+        }
+
         Ok(Self {
             trace_id,
             span_id,
@@ -420,6 +426,10 @@ impl<'de> Deserialize<'de> for CompletedSpan {
 
         if wire.events.len() > MAX_SPAN_EVENTS {
             return Err(serde::de::Error::custom(TraceError::EventLimitExceeded));
+        }
+
+        if wire.parent_span_id.as_ref() == Some(&wire.span_id) {
+            return Err(serde::de::Error::custom(TraceError::SpanIdMatchesParent));
         }
 
         Ok(Self {
@@ -549,6 +559,16 @@ mod tests {
     }
 
     #[test]
+    fn child_span_rejects_self_parent() {
+        let parent = Span::root(trace_id(), span_id("root"), "request").unwrap();
+
+        assert_eq!(
+            Span::child(&parent, span_id("root"), "database").unwrap_err(),
+            TraceError::SpanIdMatchesParent
+        );
+    }
+
+    #[test]
     fn sibling_spans_share_trace_and_parent() {
         let parent = Span::root(trace_id(), span_id("root"), "request").unwrap();
         let left = Span::child(&parent, span_id("left"), "left").unwrap();
@@ -668,6 +688,22 @@ mod tests {
     fn deserialization_rejects_invalid_span_event_name() {
         let value = r#"{"name":"","timestamp":"2026-01-01T00:00:00Z","attributes":{}}"#;
         assert!(serde_json::from_str::<SpanEvent>(value).is_err());
+    }
+
+    #[test]
+    fn completed_span_deserialization_rejects_self_parent() {
+        let span = Span::root(trace_id(), span_id("root"), "request").unwrap();
+        let completed = span.finish();
+        let span_id = completed.span_id().to_string();
+        let mut value = serde_json::to_value(completed).unwrap();
+
+        value["parent_span_id"] = serde_json::Value::String(span_id);
+
+        let error = serde_json::from_value::<CompletedSpan>(value).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            TraceError::SpanIdMatchesParent.to_string()
+        );
     }
 
     #[test]

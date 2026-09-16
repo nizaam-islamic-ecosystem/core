@@ -108,6 +108,7 @@ impl TaskLifecycleState {
                 | (Self::Cancelled, Self::Cancelled)
                 | (Self::Failed, Self::Failed)
                 | (Self::Created, Self::Running)
+                | (Self::Created, Self::Cancelled)
                 | (Self::Running, Self::Completed)
                 | (Self::Running, Self::Cancelled)
                 | (Self::Running, Self::Failed)
@@ -445,6 +446,45 @@ mod tests {
 
         assert_eq!(task.state(), TaskLifecycleState::Cancelled);
         assert!(task.scope().is_cancelled());
+    }
+
+    #[test]
+    fn task_can_be_cancelled_before_start() {
+        let task = Task::new(TaskOwner::engine(), scope(), TaskCriticality::Optional);
+
+        task.cancel().unwrap();
+
+        assert_eq!(task.state(), TaskLifecycleState::Cancelled);
+        assert!(task.scope().is_cancelled());
+        assert_eq!(
+            task.start(),
+            Err(TaskLifecycleError::new(
+                TaskLifecycleState::Cancelled,
+                TaskLifecycleState::Running,
+            ))
+        );
+    }
+
+    #[test]
+    fn parent_cancellation_before_start_cancels_task_state() {
+        let parent = CancellationToken::new();
+        let task = Task::new(
+            TaskOwner::engine(),
+            TaskScope::new(&parent),
+            TaskCriticality::Required,
+        );
+
+        parent.cancel();
+
+        assert_eq!(task.state(), TaskLifecycleState::Cancelled);
+        assert!(task.scope().is_cancelled());
+        assert_eq!(
+            task.start(),
+            Err(TaskLifecycleError::new(
+                TaskLifecycleState::Cancelled,
+                TaskLifecycleState::Running,
+            ))
+        );
     }
 
     #[test]

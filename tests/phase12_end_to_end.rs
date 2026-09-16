@@ -429,27 +429,33 @@ fn consumer_disappearance_cancels_an_open_stream_and_notifies_producer_scope() {
 
     let producer = stream.clone();
     let task = producer_task.clone();
+    let (published_tx, published_rx) = mpsc::channel();
     let handle = thread::spawn(move || {
         producer.publish(StreamItem::partial(0, 1)).unwrap();
+        published_tx.send(()).unwrap();
         producer.publish(StreamItem::partial(1, 2))
     });
 
-    assert_eq!(consumer.next_item().unwrap().unwrap().payload(), &1);
+    published_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("first stream item was not published");
     drop(consumer);
 
     assert_eq!(
         handle.join().unwrap(),
         Err(nizaam_core::streaming::StreamError::Cancelled)
     );
-    producer_task.cancel().ok();
+    let cancellation_deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while !producer_task.scope().is_cancelled() && std::time::Instant::now() < cancellation_deadline
+    {
+        thread::yield_now();
+    }
 
     assert!(
-        matches!(
-            producer_task.state(),
-            TaskLifecycleState::Cancelled | TaskLifecycleState::Running
-        ),
-        "producer task must remain a valid runtime task after consumer disappearance"
+        producer_task.scope().is_cancelled(),
+        "consumer disappearance must cancel the producer task scope"
     );
+    assert_eq!(producer_task.state(), TaskLifecycleState::Cancelled);
     drop(task);
 }
 

@@ -9,6 +9,7 @@
 //!
 //! ```text
 //! CREATED
+//!    ├── CANCELLED
 //!    ↓
 //!  OPEN
 //!    ├── COMPLETED
@@ -61,6 +62,7 @@ impl StreamLifecycleState {
                 | (Self::Cancelled, Self::Cancelled)
                 | (Self::Failed, Self::Failed)
                 | (Self::Created, Self::Open)
+                | (Self::Created, Self::Cancelled)
                 | (Self::Open, Self::Completed)
                 | (Self::Open, Self::Cancelled)
                 | (Self::Open, Self::Failed)
@@ -202,6 +204,13 @@ mod tests {
     fn valid_transitions_follow_stream_lifecycle() {
         assert!(can_transition(StreamLifecycleState::Created, StreamLifecycleState::Open).is_ok());
         assert!(
+            can_transition(
+                StreamLifecycleState::Created,
+                StreamLifecycleState::Cancelled
+            )
+            .is_ok()
+        );
+        assert!(
             can_transition(StreamLifecycleState::Open, StreamLifecycleState::Completed).is_ok()
         );
         assert!(
@@ -231,10 +240,6 @@ mod tests {
             (
                 StreamLifecycleState::Created,
                 StreamLifecycleState::Completed,
-            ),
-            (
-                StreamLifecycleState::Created,
-                StreamLifecycleState::Cancelled,
             ),
             (StreamLifecycleState::Created, StreamLifecycleState::Failed),
             (StreamLifecycleState::Open, StreamLifecycleState::Created),

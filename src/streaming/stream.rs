@@ -625,6 +625,25 @@ mod tests {
     }
 
     #[test]
+    fn pre_open_context_cancellation_reports_stream_cancellation() {
+        let engine = context();
+        let stream: Stream<u32> = Stream::new(
+            &engine,
+            BackpressureConfig::new(2, BackpressurePolicy::Reject).unwrap(),
+        )
+        .unwrap();
+
+        engine.cancellation().cancel();
+
+        assert_eq!(stream.open(), Err(StreamError::Cancelled));
+        assert_eq!(stream.state(), StreamLifecycleState::Cancelled);
+        assert_eq!(
+            stream.publish(StreamItem::partial(0, 10)),
+            Err(StreamError::Cancelled)
+        );
+    }
+
+    #[test]
     fn open_is_idempotent_while_already_open() {
         let stream = stream(2, BackpressurePolicy::Reject);
         stream.open().unwrap();

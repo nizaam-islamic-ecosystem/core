@@ -52,6 +52,8 @@ pub enum BoundedSpawnError {
     ActiveLimitReached,
     /// Bounded admission was not configured for this background-task owner.
     NotConfigured,
+    /// The operating system rejected creation of the worker thread.
+    ThreadCreation,
 }
 
 impl std::fmt::Display for BoundedSpawnError {
@@ -64,6 +66,7 @@ impl std::fmt::Display for BoundedSpawnError {
             Self::NotConfigured => {
                 formatter.write_str("bounded background admission is not configured")
             }
+            Self::ThreadCreation => formatter.write_str("background worker thread creation failed"),
         }
     }
 }
@@ -170,9 +173,9 @@ impl BackgroundTasks {
 
         let token = self.cancellation.child_token();
         let owner = Arc::clone(&self.owner);
-        let concurrency = Arc::clone(concurrency);
+        let worker_concurrency = Arc::clone(concurrency);
 
-        let handle = std::thread::spawn(move || {
+        let handle = match std::thread::Builder::new().spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let owner_id = Arc::as_ptr(&owner) as usize;
                 BACKGROUND_OWNER.with(|current| {
@@ -182,7 +185,7 @@ impl BackgroundTasks {
                 });
             }));
 
-            concurrency
+            worker_concurrency
                 .lock()
                 .expect("background concurrency lock poisoned")
                 .release_active()
@@ -191,9 +194,43 @@ impl BackgroundTasks {
             if let Err(payload) = result {
                 std::panic::resume_unwind(payload);
             }
-        });
+        }) {
+            Ok(handle) => handle,
+            Err(_) => {
+                concurrency
+                    .lock()
+                    .expect("background concurrency lock poisoned")
+                    .release_active()
+                    .expect("background concurrency active occupancy underflow");
+                return Err(BoundedSpawnError::ThreadCreation);
+            }
+        };
 
-        state.handles.push(handle);
+        let mut retained_handles = Vec::with_capacity(state.handles.len() + 1);
+        let mut completed_handles = Vec::new();
+
+        for existing in state.handles.drain(..) {
+            if existing.is_finished() {
+                completed_handles.push(existing);
+            } else {
+                retained_handles.push(existing);
+            }
+        }
+
+        let mut panic_payload = None;
+        for existing in completed_handles {
+            if let Err(payload) = existing.join() {
+                panic_payload.get_or_insert(payload);
+            }
+        }
+
+        retained_handles.push(handle);
+        state.handles = retained_handles;
+        drop(state);
+
+        if let Some(payload) = panic_payload {
+            std::panic::resume_unwind(payload);
+        }
 
         Ok(())
     }
@@ -510,6 +547,32 @@ mod tests {
         );
         tasks.shutdown();
         assert_eq!(tasks.active_count(), 0);
+    }
+
+    #[test]
+    fn bounded_spawn_reaps_completed_handles_before_admission() {
+        use std::sync::mpsc;
+
+        let tasks = BackgroundTasks::with_concurrency(
+            CancellationToken::new(),
+            super::ConcurrencyConfig::new(1, 1).unwrap(),
+        );
+        let (finished_tx, finished_rx) = mpsc::channel();
+
+        tasks
+            .spawn_bounded(move |_| {
+                finished_tx.send(()).unwrap();
+            })
+            .unwrap();
+
+        finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("bounded task did not finish");
+
+        tasks.spawn_bounded(|_| {}).unwrap();
+
+        assert_eq!(tasks.task_count(), 1);
+        tasks.shutdown();
     }
 
     #[test]

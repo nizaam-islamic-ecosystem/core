@@ -233,7 +233,7 @@ fn cloned_task_shares_lifecycle_state() {
 }
 
 #[test]
-fn independent_tasks_can_run_in_parallel_when_runtime_capacity_allows() {
+fn independent_tasks_can_run_in_parallel_using_local_counters() {
     let config = ConcurrencyConfig::new(2, 2).unwrap();
     let parent = CancellationToken::new();
     let barrier = Arc::new(Barrier::new(3));

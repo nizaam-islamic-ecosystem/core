@@ -5178,6 +5178,26 @@ aggregation, middleware/runtime observability integration, tracing/correlation
 propagation, metrics, diagnostics, observability failure isolation, and
 concurrent access.
 
+* [x] Implement generic observability integration boundaries.
+* [x] Implement metrics with bounded dimensions, descriptor validation, gauges, counters, histograms, snapshots, and concurrent recorder access.
+* [x] Implement tracing with validated `TraceId`/`SpanId`, span attributes/events, parent-child relationships, completed spans, serialization/deserialization validation, and self-parent rejection.
+* [x] Implement structured diagnostics with bounded subjects/details and validation-preserving deserialization.
+* [x] Implement correlation context integration without replacing existing logging context.
+* [x] Implement structured health status, liveness, readiness, dependency health, capability health, lifecycle visibility, and aggregate health reporting.
+* [x] Implement deterministic health component normalization and aggregation.
+* [x] Implement configuration loading from the process environment with owned values and source identity.
+* [x] Implement source-neutral configuration fixtures for deterministic tests.
+* [x] Implement typed configuration parsing for string, boolean, integer, and float values.
+* [x] Implement structural validation, required-key validation, deterministic error collection, and semantic-validation extension points.
+* [x] Implement deterministic reference resolution and defaults.
+* [x] Implement immutable resolved configuration snapshots with monotonically increasing snapshot identifiers.
+* [x] Implement controlled runtime configuration preparation and atomic activation.
+* [x] Implement configuration conflict detection and updater lineage protection.
+* [x] Implement semantic-validator lineage invalidation so previously prepared updates cannot bypass a changed validation policy.
+* [x] Preserve sensitive-value redaction across configuration and observability boundaries.
+* [x] Add Phase 11 unit and cross-module integration coverage.
+* [x] Preserve previously verified Phase 0–10 behavior.
+
 ---
 
 ## Phase 12: Streaming, Concurrency, and Background Tasks
@@ -17488,6 +17508,16 @@ architecture.
 * Artifact identity and content remain independent from individual Phase 7 transport frames. Large artifacts may span multiple bounded transport frames without becoming multiple artifact versions.
 * Physical deduplication and content-addressable storage are optional provider concerns. Equal content digests do not make logical artifact versions identical.
 * Artifact failure conditions remain semantically distinct, including not found, invalid reference, integrity failure, validation failure, resolution failure, publication failure, retrieval failure, access denial, and revoked artifact conditions.
+* Phase 11 keeps **Configuration, Health, and Observability as independent Core systems**; none becomes a hidden lifecycle controller, domain-logic system, or correctness dependency.
+* **Configuration is immutable by default** for an active runtime instance. Runtime mutation is supported only through explicitly controlled updates.
+* Runtime configuration changes use the pipeline **Proposed Update → Parse → Validate → Resolve → Apply Atomically**. Failed updates leave the last valid configuration active and cannot partially modify runtime state.
+* **Configuration snapshots are the runtime configuration boundary**; a new valid update produces a new snapshot rather than rebuilding configuration per request. Already-running operations do not silently switch configuration semantics.
+* Core provides generic configuration mechanisms while **engines own domain-specific configuration semantics and semantic validation**.
+* Secret handling remains a **reference/resolution boundary**, not a Core secret-management platform; sensitive values must not be emitted through logs, metrics, traces, diagnostics, or errors.
+* Health reports operational condition but **does not own lifecycle**. Readiness remains aligned with the Phase 8 serving boundary, while lifecycle remains runtime-owned.
+* Health aggregation preserves distinct **Healthy, Degraded, Unhealthy, and Unknown** conditions and evaluates component health deterministically. Required dependency failure takes precedence over unknown observations.
+* Observability remains composed of **logging, metrics, tracing, diagnostics, correlation, and telemetry**, without replacing the existing Logging or Error systems.
+* Provider-specific telemetry, monitoring backends, secret providers, deployment systems, self-healing, and dynamic configuration control-plane behavior remain outside Phase 11.
 
 ## Corrections / Changes
 
@@ -17506,16 +17536,12 @@ None currently. Concrete trait signatures, provider choices, serialization, asyn
 
 ## Current State
 
-Phase 10, Artifact and Provenance, is now implemented, reviewed, verified, and merged. The verified Core foundation therefore extends through Phase 10.
+Phase 11, **Observability, Health, and Configuration**, is implemented and merged. The Core foundation now extends through Phase 11, providing generic observability mechanisms, operational health reporting, and a controlled configuration pipeline while preserving the previously established Runtime, Security, Artifact, Provenance, Error, Logging, and Context boundaries.
 
-The completed Phase 10 implementation provides the shared artifact and provenance mechanisms for artifact identity, immutable versioning, lightweight exact/alias references, provider-neutral content references, integrity verification, lifecycle management, validated publication, storage, resolution, retrieval boundaries, and historical provenance relationships. Published artifact versions require verified integrity evidence, lifecycle publication remains atomic, exact versions remain canonical for execution and provenance, and provenance remains independent of later artifact lifecycle changes.
+The implementation includes configuration loading/parsing/validation/resolution, immutable snapshots and atomic updates; health liveness/readiness/dependency/capability aggregation; and structured metrics, tracing, diagnostics, and correlation integration. These systems remain independent rather than being merged into lifecycle, security, logging, or domain behavior.
 
-Phase 10 was reviewed against automated CodeRabbit and Greptile findings. Genuine correctness and test-quality findings were fixed, including publication lifecycle error handling, provenance lifecycle test ordering, and published-content integrity verification. The `scope.md` pipefail verification issue was already corrected separately and was intentionally not changed as part of the Phase 10 code fixes. The repository was then fully verified with the required workspace formatting, Clippy, build, check, test, all-targets, and documentation checks before merge.
-
-The Phase 10 implementation preserves all previously verified Phase 0–9 contracts and boundaries. No hypothetical edge-case hardening was added without a concrete correctness requirement or demonstrated issue.
+The latest full library test run contains **800 tests**, with the reported failure resolved by correcting stopped-lifecycle health aggregation; the earlier run showed 799 passing and one failing specifically because `Stopped` was incorrectly aggregated as `Healthy`.
 
 ## Next Step
 
-Phase 10 is complete and remains merged as the shared artifact and provenance foundation.
-
-Proceed to **Phase 11: Observability, Health, and Configuration**, while preserving the verified Phase 0–10 architecture, contracts, and boundaries. Phase 11 should build on the existing Error, Logging, Context, Runtime, Security, Artifact, and Provenance mechanisms without replacing or duplicating them.
+Proceed to **Phase 12: Streaming, Concurrency, and Background Tasks**, building on the Phase 11 health and configuration foundations while preserving the existing separation between transport fragmentation and application-level streaming. Phase 12 owns logical streaming, stream lifecycle, ordering, buffering, backpressure, stream cancellation, resource behavior, bounded concurrency, and advanced background-task scheduling; it must not replace the mechanisms already established in Phases 5, 8, 9, 10, or 11.  

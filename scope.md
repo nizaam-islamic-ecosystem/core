@@ -5080,7 +5080,7 @@ Provider-specific integrations remain implementation or later-platform concerns.
 * `tests/observability.rs`
 * `tests/health.rs`
 * `tests/configuration.rs`
-* `tests/integration.rs`
+* `tests/phase11_end_to_end.rs`
 
 Exact filenames may be adjusted if the repository already provides equivalent
 modules, but the architectural boundaries defined in this phase must remain.

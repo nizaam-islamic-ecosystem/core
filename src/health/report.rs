@@ -38,6 +38,7 @@ impl HealthReport {
     ) -> Result<Self, HealthReportError> {
         let dependencies = normalize_dependencies(dependencies)?;
         let capabilities = normalize_capabilities(capabilities)?;
+        let readiness = normalize_readiness(lifecycle, readiness);
 
         let overall = aggregate_health(
             lifecycle,
@@ -71,6 +72,7 @@ impl HealthReport {
     ) -> Result<Self, HealthReportError> {
         let dependencies = normalize_dependencies(dependencies)?;
         let capabilities = normalize_capabilities(capabilities)?;
+        let readiness = normalize_readiness(lifecycle, readiness);
 
         let overall = aggregate_health(
             lifecycle,
@@ -203,6 +205,14 @@ fn normalize_capabilities(
     Ok(normalized.into_values().collect())
 }
 
+fn normalize_readiness(lifecycle: LifecycleState, readiness: ReadinessReport) -> ReadinessReport {
+    if lifecycle != LifecycleState::Serving && readiness.state() == ReadinessState::Ready {
+        ReadinessReport::from_lifecycle(lifecycle)
+    } else {
+        readiness
+    }
+}
+
 fn aggregate_health(
     lifecycle: LifecycleState,
     liveness: &LivenessReport,
@@ -212,15 +222,11 @@ fn aggregate_health(
 ) -> HealthStatus {
     let liveness_status = liveness.status();
 
-    if liveness_status.is_unknown() {
-        return HealthStatus::Unknown;
-    }
-
     if liveness_status.is_unhealthy() {
         return HealthStatus::Unhealthy;
     }
 
-    let mut has_unknown = false;
+    let mut has_unknown = liveness_status.is_unknown();
     let mut has_degraded = liveness_status.is_degraded();
 
     for dependency in dependencies {
@@ -271,7 +277,11 @@ fn aggregate_health(
                 HealthStatus::Degraded
             }
         }
-        ReadinessState::NotReady if lifecycle == LifecycleState::Serving => HealthStatus::Degraded,
+        ReadinessState::NotReady
+            if matches!(lifecycle, LifecycleState::Serving | LifecycleState::Stopped) =>
+        {
+            HealthStatus::Degraded
+        }
         ReadinessState::Ready | ReadinessState::NotReady => HealthStatus::Healthy,
     }
 }
@@ -488,6 +498,25 @@ mod tests {
     }
 
     #[test]
+    fn required_dependency_failure_takes_precedence_over_unknown_liveness() {
+        let report = HealthReport::new(
+            engine_id(),
+            LifecycleState::Serving,
+            LivenessReport::unknown(),
+            serving_readiness(),
+            vec![dependency(
+                "database",
+                DependencyRequirement::Required,
+                HealthStatus::Unhealthy,
+            )],
+            Vec::new(),
+        )
+        .expect("valid report");
+
+        assert_eq!(report.overall(), HealthStatus::Unhealthy);
+    }
+
+    #[test]
     fn unknown_for_required_dependency_with_unknown_status() {
         let report = HealthReport::new(
             engine_id(),
@@ -534,6 +563,22 @@ mod tests {
         .expect("valid report");
 
         assert_eq!(report.overall(), HealthStatus::Unhealthy);
+    }
+
+    #[test]
+    fn stopped_lifecycle_cannot_remain_ready_or_healthy() {
+        let report = HealthReport::new(
+            engine_id(),
+            LifecycleState::Stopped,
+            serving_liveness(),
+            ReadinessReport::from_lifecycle(LifecycleState::Serving),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("valid report");
+
+        assert!(!report.readiness().is_ready());
+        assert_ne!(report.overall(), HealthStatus::Healthy);
     }
 
     #[test]

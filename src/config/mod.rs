@@ -371,7 +371,7 @@ static CONFIGURATION_API_USAGE_ANCHOR: fn() = configuration_api_usage_anchor;
 
 #[cfg(test)]
 mod integration_tests {
-    use super::loader::{ConfigurationLoader, LoadedConfiguration};
+    use super::loader::LoadedConfiguration;
     use super::parser::{ConfigurationParser, ConfigurationType, ParseError, ParseErrors};
     use super::resolution::ConfigurationResolver;
     use super::secrets::{SecretReference, SecretResolver, SecretValue};
@@ -395,11 +395,6 @@ mod integration_tests {
             ("PORT", "8080"),
             ("ENABLED", "true"),
         ]);
-
-        let environment_loaded = ConfigurationLoader::new()
-            .load_environment(&super::environment::Environment::new())
-            .expect("environment loading should succeed");
-        let _ = environment_loaded.source();
 
         let parser = ConfigurationParser::new()
             .with_type("HOST", ConfigurationType::String)

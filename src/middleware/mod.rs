@@ -193,6 +193,29 @@ mod tests {
     }
 
     #[test]
+    fn middleware_uses_the_existing_engine_context() {
+        let middleware = RecordingMiddleware {
+            name: "context",
+            events: Arc::new(Mutex::new(Vec::new())),
+        };
+
+        let mut request = request();
+        let mut context = context();
+
+        assert_eq!(
+            context.operation().operation.id.as_str(),
+            "middleware-module-operation"
+        );
+
+        assert_eq!(
+            middleware.on_request(&mut context, &mut request),
+            MiddlewareResult::Continue
+        );
+
+        assert_eq!(*middleware.events.lock().unwrap(), vec!["context"]);
+    }
+
+    #[test]
     fn middleware_chain_and_stage_work_together() {
         let events = Arc::new(Mutex::new(Vec::new()));
 

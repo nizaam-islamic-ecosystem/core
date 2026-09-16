@@ -552,6 +552,35 @@ mod tests {
     }
 
     #[test]
+    fn middleware_can_read_existing_engine_context() {
+        struct ContextReadingMiddleware;
+
+        impl Middleware for ContextReadingMiddleware {
+            fn on_request(
+                &self,
+                context: &mut EngineContext,
+                _request: &mut UniversalRequest,
+            ) -> MiddlewareResult {
+                assert_eq!(
+                    context.operation().operation.id.as_str(),
+                    "middleware-operation"
+                );
+
+                MiddlewareResult::Continue
+            }
+        }
+
+        let middleware = ContextReadingMiddleware;
+        let mut request = request();
+        let mut context = context();
+
+        assert_eq!(
+            middleware.on_request(&mut context, &mut request),
+            MiddlewareResult::Continue
+        );
+    }
+
+    #[test]
     fn middleware_can_be_used_as_trait_object() {
         let middleware: Box<dyn Middleware> = Box::new(RequestOnlyMiddleware);
 

@@ -6,7 +6,10 @@ pub mod engine;
 pub mod lifecycle;
 pub mod pipeline;
 
+use std::sync::Arc;
+
 use crate::{
+    config::snapshot::ConfigurationSnapshot,
     error::{ErrorContext, ErrorDefinition, GlobalError},
     operation::OperationContext,
     provenance::ProvenanceContext,
@@ -32,6 +35,7 @@ pub struct EngineContext {
     deadline: Option<Deadline>,
     security: Option<SecurityContext>,
     provenance: ProvenanceContext,
+    configuration: Option<Arc<ConfigurationSnapshot>>,
 }
 
 pub(crate) fn check_context(context: &EngineContext) -> Result<(), pipeline::PipelineError> {
@@ -58,6 +62,7 @@ impl EngineContext {
             deadline: None,
             security: None,
             provenance: ProvenanceContext::new(),
+            configuration: None,
         }
     }
 
@@ -80,6 +85,17 @@ impl EngineContext {
 
     pub fn provenance(&self) -> &ProvenanceContext {
         &self.provenance
+    }
+
+    /// Returns the immutable configuration snapshot attached to this context.
+    pub fn configuration(&self) -> Option<&ConfigurationSnapshot> {
+        self.configuration.as_deref()
+    }
+
+    /// Attaches a shared immutable configuration snapshot to this context.
+    pub fn with_configuration(mut self, configuration: Arc<ConfigurationSnapshot>) -> Self {
+        self.configuration = Some(configuration);
+        self
     }
 
     pub fn with_deadline(mut self, deadline: Deadline) -> Self {
@@ -108,6 +124,7 @@ impl EngineContext {
             deadline: self.deadline,
             security: self.security.clone(),
             provenance: self.provenance.clone(),
+            configuration: self.configuration.clone(),
         }
     }
 
@@ -142,6 +159,11 @@ impl EngineContext {
 mod tests {
     use super::*;
     use crate::{
+        config::{
+            resolution::ConfigurationResolver,
+            snapshot::{ConfigurationSnapshot, ConfigurationSnapshotId},
+            validation::{ConfigurationValidator, ConfigurationValue, ParsedConfiguration},
+        },
         contracts::Version,
         error::{ErrorClass, ErrorCode, ErrorOwner, Severity},
         identity::{CorrelationId, OperationId},
@@ -156,6 +178,23 @@ mod tests {
             OperationId::new("op-1").unwrap(),
             CorrelationId::new("corr-1").unwrap(),
         )
+    }
+
+    fn sample_configuration_snapshot() -> Arc<ConfigurationSnapshot> {
+        let mut parsed = ParsedConfiguration::empty();
+        parsed.insert("runtime.test", ConfigurationValue::Boolean(true));
+
+        let validated = ConfigurationValidator::new()
+            .validate(parsed)
+            .expect("test configuration should be valid");
+        let resolved = ConfigurationResolver::new()
+            .resolve(&validated)
+            .expect("test configuration should resolve");
+
+        Arc::new(ConfigurationSnapshot::new(
+            ConfigurationSnapshotId::new(1),
+            resolved,
+        ))
     }
 
     fn sample_context() -> EngineContext {
@@ -177,6 +216,7 @@ mod tests {
         assert!(!context.cancellation().is_cancelled());
         assert!(!context.is_expired());
         assert!(context.security().is_none());
+        assert!(context.configuration().is_none());
     }
 
     #[test]
@@ -225,6 +265,19 @@ mod tests {
     }
 
     #[test]
+    fn with_configuration_attaches_immutable_snapshot() {
+        let configuration = sample_configuration_snapshot();
+        let context = sample_context().with_configuration(configuration.clone());
+
+        assert_eq!(context.configuration(), Some(configuration.as_ref()));
+        assert_eq!(context.configuration().unwrap().id().value(), 1);
+        assert_eq!(
+            context.configuration().unwrap().get("runtime.test"),
+            Some(&ConfigurationValue::Boolean(true))
+        );
+    }
+
+    #[test]
     fn child_context_preserves_trusted_context_and_parent_cancellation() {
         let operation = Operation::new(
             OperationId::new("operation-1").unwrap(),
@@ -232,11 +285,13 @@ mod tests {
         );
 
         let security = sample_security_context();
+        let configuration = sample_configuration_snapshot();
 
         let parent = EngineContext::new(OperationContext::new(operation))
             .with_deadline(Deadline::from_now(Duration::from_secs(1)).unwrap())
             .with_security(security.clone())
-            .with_provenance(ProvenanceContext::new());
+            .with_provenance(ProvenanceContext::new())
+            .with_configuration(configuration);
 
         let child = parent.child();
 
@@ -247,6 +302,7 @@ mod tests {
         assert_eq!(child.security(), Some(&security));
         assert_eq!(child.provenance(), parent.provenance());
         assert_eq!(child.deadline(), parent.deadline());
+        assert_eq!(child.configuration(), parent.configuration());
 
         parent.cancellation().cancel();
 
@@ -328,15 +384,18 @@ mod tests {
     fn engine_context_supports_clone() {
         let security = sample_security_context();
 
+        let configuration = sample_configuration_snapshot();
         let context = sample_context()
             .with_deadline(Deadline::from_now(Duration::from_secs(60)).unwrap())
             .with_security(security.clone())
-            .with_provenance(ProvenanceContext::new().with_attribute("k", "v"));
+            .with_provenance(ProvenanceContext::new().with_attribute("k", "v"))
+            .with_configuration(configuration);
 
         let clone = context.clone();
 
         assert_eq!(context.deadline(), clone.deadline());
         assert_eq!(context.security(), clone.security());
         assert_eq!(context.provenance(), clone.provenance());
+        assert_eq!(context.configuration(), clone.configuration());
     }
 }

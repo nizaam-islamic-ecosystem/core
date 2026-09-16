@@ -5,6 +5,7 @@ pub mod concurrency;
 pub mod engine;
 pub mod lifecycle;
 pub mod pipeline;
+pub mod task;
 
 use std::sync::Arc;
 
@@ -18,11 +19,14 @@ use crate::{
 
 pub use crate::operation::{CancellationToken, Deadline};
 
-pub use background::BackgroundTasks;
-pub use concurrency::TaskScope;
+pub use background::{BackgroundTasks, BoundedSpawnError, SpawnError};
+pub use concurrency::{ConcurrencyConfig, ConcurrencyError, ConcurrencyState, TaskScope};
 pub use engine::EngineRuntime;
 pub use lifecycle::{Lifecycle, LifecycleState};
 pub use pipeline::{ExecutionPipeline, PipelineError, PipelineStage};
+pub use task::{
+    Task, TaskCriticality, TaskId, TaskLifecycle, TaskLifecycleError, TaskLifecycleState, TaskOwner,
+};
 
 /// Shared context passed to capability and downstream execution.
 ///
@@ -378,6 +382,28 @@ mod tests {
 
         assert_eq!(error.code.as_str(), "CORE.EXECUTION.001");
         assert_eq!(error.context.operation.operation.id.as_str(), "operation-2");
+    }
+
+    #[test]
+    fn phase12_runtime_exports_are_available() {
+        let config = ConcurrencyConfig::new(2, 4).unwrap();
+        let mut concurrency = ConcurrencyState::new();
+        concurrency.try_acquire_active(&config).unwrap();
+        assert_eq!(concurrency.active(), 1);
+
+        let scope = TaskScope::new(&CancellationToken::new());
+        let task = Task::new(TaskOwner::engine(), scope, TaskCriticality::Required);
+
+        assert_eq!(task.state(), TaskLifecycleState::Created);
+        assert_eq!(task.criticality(), TaskCriticality::Required);
+        assert_eq!(task.owner(), &TaskOwner::engine());
+
+        let runtime = EngineRuntime::with_concurrency(config);
+        assert_eq!(runtime.state(), LifecycleState::Created);
+
+        let _ = TaskLifecycle::new();
+        let _ = SpawnError;
+        let _ = BoundedSpawnError::NotConfigured;
     }
 
     #[test]

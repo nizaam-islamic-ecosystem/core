@@ -6499,7 +6499,7 @@ task lifecycle, ownership, cancellation, and shutdown integration.
 * `tests/streaming.rs`
 * `tests/concurrency.rs`
 * `tests/tasks.rs`
-* `tests/integration.rs`
+* `tests/phase12_end_to_end`
 
 Exact filenames may be adjusted if the repository already provides equivalent
 modules. The architectural boundaries defined in this phase must remain.

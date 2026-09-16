@@ -7,7 +7,10 @@ thread_local! {
     static BACKGROUND_OWNER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
-use super::CancellationToken;
+use super::{
+    CancellationToken,
+    concurrency::{ConcurrencyConfig, ConcurrencyError, ConcurrencyState},
+};
 
 /// Owns runtime background workers and stops them through one shared
 /// cancellation scope.
@@ -17,6 +20,8 @@ pub struct BackgroundTasks {
     state: Mutex<BackgroundState>,
     completion: Condvar,
     owner: Arc<()>,
+    concurrency: Option<Arc<Mutex<ConcurrencyState>>>,
+    concurrency_config: Option<ConcurrencyConfig>,
 }
 
 #[derive(Debug, Default)]
@@ -30,6 +35,41 @@ struct BackgroundState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SpawnError;
 
+impl std::fmt::Display for SpawnError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("background task spawning is unavailable")
+    }
+}
+
+impl std::error::Error for SpawnError {}
+
+/// Errors produced by bounded background-task admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BoundedSpawnError {
+    /// Shutdown has started and new tasks cannot be admitted.
+    Closed,
+    /// The configured active-task limit has been reached.
+    ActiveLimitReached,
+    /// Bounded admission was not configured for this background-task owner.
+    NotConfigured,
+}
+
+impl std::fmt::Display for BoundedSpawnError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Closed => formatter.write_str("background task spawning is closed"),
+            Self::ActiveLimitReached => {
+                formatter.write_str("background task active-work limit is full")
+            }
+            Self::NotConfigured => {
+                formatter.write_str("bounded background admission is not configured")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BoundedSpawnError {}
+
 impl BackgroundTasks {
     pub fn new(cancellation: CancellationToken) -> Self {
         Self {
@@ -37,6 +77,23 @@ impl BackgroundTasks {
             state: Mutex::new(BackgroundState::default()),
             completion: Condvar::new(),
             owner: Arc::new(()),
+            concurrency: None,
+            concurrency_config: None,
+        }
+    }
+
+    /// Creates a background-task owner with a bounded active-task limit.
+    ///
+    /// The existing [`Self::new`] constructor remains unchanged for callers
+    /// that do not need active-task admission.
+    pub fn with_concurrency(cancellation: CancellationToken, config: ConcurrencyConfig) -> Self {
+        Self {
+            cancellation,
+            state: Mutex::new(BackgroundState::default()),
+            completion: Condvar::new(),
+            owner: Arc::new(()),
+            concurrency: Some(Arc::new(Mutex::new(ConcurrencyState::new()))),
+            concurrency_config: Some(config),
         }
     }
 
@@ -69,6 +126,71 @@ impl BackgroundTasks {
                 task(token);
                 current.set(previous);
             });
+        });
+
+        state.handles.push(handle);
+
+        Ok(())
+    }
+
+    /// Spawns one background task under the configured active-task limit.
+    ///
+    /// This is an additive Phase 12 API. The existing [`Self::spawn`] method
+    /// remains unchanged and keeps its historical behavior.
+    pub fn spawn_bounded<F>(&self, task: F) -> Result<(), BoundedSpawnError>
+    where
+        F: FnOnce(CancellationToken) + Send + 'static,
+    {
+        let concurrency = self
+            .concurrency
+            .as_ref()
+            .ok_or(BoundedSpawnError::NotConfigured)?;
+        let config = self
+            .concurrency_config
+            .as_ref()
+            .ok_or(BoundedSpawnError::NotConfigured)?;
+
+        let mut state = self.state.lock().expect("background task lock poisoned");
+
+        if state.closed {
+            return Err(BoundedSpawnError::Closed);
+        }
+
+        {
+            let mut occupancy = concurrency
+                .lock()
+                .expect("background concurrency lock poisoned");
+            occupancy
+                .try_acquire_active(config)
+                .map_err(|error| match error {
+                    ConcurrencyError::ActiveLimitReached => BoundedSpawnError::ActiveLimitReached,
+                    _ => BoundedSpawnError::ActiveLimitReached,
+                })?;
+        }
+
+        let token = self.cancellation.child_token();
+        let owner = Arc::clone(&self.owner);
+        let concurrency = Arc::clone(concurrency);
+
+        let handle = std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let owner_id = Arc::as_ptr(&owner) as usize;
+                BACKGROUND_OWNER.with(|current| {
+                    let previous = current.replace(Some(owner_id));
+                    task(token);
+                    current.set(previous);
+                });
+            }));
+
+            concurrency
+                .lock()
+                .expect("background concurrency lock poisoned")
+                .release_active()
+                .expect("background concurrency active occupancy underflow");
+
+            if let Err(payload) = result {
+                std::panic::resume_unwind(payload);
+            }
         });
 
         state.handles.push(handle);
@@ -166,6 +288,19 @@ impl BackgroundTasks {
             .expect("background task lock poisoned")
             .handles
             .len()
+    }
+
+    #[cfg(test)]
+    fn active_count(&self) -> usize {
+        self.concurrency
+            .as_ref()
+            .map(|concurrency| {
+                concurrency
+                    .lock()
+                    .expect("background concurrency lock poisoned")
+                    .active()
+            })
+            .unwrap_or(0)
     }
 }
 
@@ -333,6 +468,73 @@ mod tests {
 
         assert_eq!(tasks.task_count(), 0);
         assert!(tasks.is_closed());
+    }
+
+    #[test]
+    fn bounded_spawn_enforces_active_limit() {
+        use std::sync::mpsc;
+
+        let tasks = BackgroundTasks::with_concurrency(
+            CancellationToken::new(),
+            super::ConcurrencyConfig::new(1, 1).unwrap(),
+        );
+
+        let (release_tx, release_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let started = Arc::new(Mutex::new(false));
+        let started_by_task = Arc::clone(&started);
+
+        tasks
+            .spawn_bounded(move |cancellation| {
+                *started_by_task.lock().unwrap() = true;
+                release_rx.recv().unwrap();
+                finished_tx.send(!cancellation.is_cancelled()).unwrap();
+            })
+            .unwrap();
+
+        while !*started.lock().unwrap() {
+            thread::yield_now();
+        }
+
+        assert_eq!(tasks.active_count(), 1);
+        assert_eq!(
+            tasks.spawn_bounded(|_| {}),
+            Err(super::BoundedSpawnError::ActiveLimitReached)
+        );
+
+        release_tx.send(()).unwrap();
+        assert!(
+            finished_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("bounded task did not finish")
+        );
+        tasks.shutdown();
+        assert_eq!(tasks.active_count(), 0);
+    }
+
+    #[test]
+    fn bounded_spawn_rejects_when_closed() {
+        let tasks = BackgroundTasks::with_concurrency(
+            CancellationToken::new(),
+            super::ConcurrencyConfig::new(1, 1).unwrap(),
+        );
+
+        tasks.shutdown();
+
+        assert_eq!(
+            tasks.spawn_bounded(|_| {}),
+            Err(super::BoundedSpawnError::Closed)
+        );
+    }
+
+    #[test]
+    fn bounded_spawn_requires_configuration() {
+        let tasks = BackgroundTasks::new(CancellationToken::new());
+
+        assert_eq!(
+            tasks.spawn_bounded(|_| {}),
+            Err(super::BoundedSpawnError::NotConfigured)
+        );
     }
 
     #[test]

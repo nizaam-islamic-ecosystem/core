@@ -354,14 +354,16 @@ impl IdempotencyStateStore {
                     return Err(IdempotencyStateError::InvalidTerminalMetadata(next_state));
                 };
 
-                let expected_status = match next_state {
-                    IdempotencyState::Succeeded => Status::Success,
-                    IdempotencyState::Failed => Status::Failure,
-                    IdempotencyState::Cancelled => Status::Cancelled,
+                let status_matches = match next_state {
+                    IdempotencyState::Succeeded => outcome.status() == Status::Success,
+                    IdempotencyState::Failed => {
+                        matches!(outcome.status(), Status::Failure | Status::TimedOut)
+                    }
+                    IdempotencyState::Cancelled => outcome.status() == Status::Cancelled,
                     IdempotencyState::InFlight | IdempotencyState::Unknown => unreachable!(),
                 };
 
-                if outcome.status() != expected_status {
+                if !status_matches {
                     return Err(IdempotencyStateError::InvalidTerminalMetadata(next_state));
                 }
             }

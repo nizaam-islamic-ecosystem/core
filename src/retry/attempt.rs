@@ -158,9 +158,21 @@ pub const fn can_transition(
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct AttemptState {
     lifecycle: AttemptLifecycle,
+    successor_attempt_id: Option<AttemptId>,
+}
+
+/// Error returned when a failed attempt cannot reserve a retry successor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum AttemptSuccessorReservationError<E> {
+    /// The requested successor reuses the current attempt identity.
+    SameAttemptId,
+    /// This failed attempt already has an admitted successor.
+    SuccessorAlreadyReserved,
+    /// The caller's retry-budget reservation failed.
+    ReservationFailed(E),
 }
 
 /// Represents one concrete execution attempt belonging to a logical operation.
@@ -207,6 +219,7 @@ impl Attempt {
             attempt_number,
             state: Arc::new(Mutex::new(AttemptState {
                 lifecycle: AttemptLifecycle::new(),
+                successor_attempt_id: None,
             })),
         })
     }
@@ -259,6 +272,37 @@ impl Attempt {
     pub fn cancel(&self) -> Result<(), AttemptLifecycleError> {
         let mut state = self.state.lock().expect("attempt state lock poisoned");
         state.lifecycle.transition(AttemptLifecycleState::Cancelled)
+    }
+
+    /// Atomically reserves the single successor that may be admitted from this
+    /// failed attempt.
+    ///
+    /// The retry-budget reservation is performed while the same attempt-state
+    /// mutex is held. The successor claim is committed only when the budget
+    /// reservation succeeds, so a failed budget reservation leaves the attempt
+    /// available for a later retry admission.
+    pub(crate) fn try_reserve_successor<E, F>(
+        &self,
+        successor_id: &AttemptId,
+        reserve_budget: F,
+    ) -> Result<(), AttemptSuccessorReservationError<E>>
+    where
+        F: FnOnce() -> Result<(), E>,
+    {
+        let mut state = self.state.lock().expect("attempt state lock poisoned");
+
+        if self.attempt_id == *successor_id {
+            return Err(AttemptSuccessorReservationError::SameAttemptId);
+        }
+
+        if state.successor_attempt_id.is_some() {
+            return Err(AttemptSuccessorReservationError::SuccessorAlreadyReserved);
+        }
+
+        reserve_budget().map_err(AttemptSuccessorReservationError::ReservationFailed)?;
+
+        state.successor_attempt_id = Some(successor_id.clone());
+        Ok(())
     }
 }
 

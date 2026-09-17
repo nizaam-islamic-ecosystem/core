@@ -29,8 +29,8 @@ Implementation began with an existing Cargo library skeleton at the repository r
 | 10 | Artifact and Provenance                      | 10    | verified    |
 | 11 | Observability, Health, Configuration         | 11    | verified    |
 | 12 | Streaming, Concurrency, Background Tasks     | 12    | verified    |
-| 13 | Retry and Idempotency                        | 13    | not started |
-| 14 | Internal Events                              | 14    | not started |
+| 13 | Retry and Idempotency                        | 13    | verified    |
+| 14 | Internal Events                              | 14    | in progress |
 | 15 | Control Plane                                | 15    | not started |
 | 16 | Engine SDK                                   | 16    | not started |
 | 17 | Testing and Conformance hardening            | 17    | not started |
@@ -8387,6 +8387,112 @@ backoff + jitter
     ↓
 new attempt
 ```
+
+### What got built
+
+Phase 13 is implemented and verified.
+
+The Core now provides:
+
+* explicit attempt identity and attempt numbering under a stable `OperationId`;
+* a non-reopenable attempt lifecycle:
+  `CREATED → RUNNING → SUCCEEDED | FAILED | CANCELLED`;
+* retryability classification and evaluation;
+* effective retry-policy enforcement across applicable operation, plan-node,
+  and capability constraints;
+* bounded retry attempts and retry budgets;
+* backoff and jitter support;
+* retry safety evaluation before admitting another attempt;
+* separation of retryability, idempotency, and retry safety;
+* idempotency key identity and deterministic scoping;
+* idempotency state tracking;
+* in-flight duplicate detection and protection against competing
+  side-effecting execution;
+* completed-duplicate handling without blindly repeating an established
+  side effect;
+* distinction between known success, known failure, and unknown outcome;
+* protection against blind retry after an unknown side effect;
+* cancellation and operation-deadline enforcement across retry attempts;
+* preservation of security and configuration context across attempts;
+* retry lineage integration with observability and provenance;
+* artifact-aware retry safety;
+* protection against unsafe replay of externally observable stream output;
+* integration with Phase 12 concurrency and resource controls; and
+* protection against concurrent speculative attempts by default.
+
+Phase 13 extends the existing Core mechanisms rather than replacing them.
+Retries create new attempts under the same logical operation and do not create
+new `OperationId` values.
+
+### Verification
+
+Phase 13 was verified through the complete Core repository verification
+pipeline.
+
+Verification covers:
+
+* [x] operation and attempt relationships;
+* [x] stable `OperationId` across retries;
+* [x] distinct attempt identity and numbering;
+* [x] attempt lifecycle transitions and terminal-state protection;
+* [x] failure classification;
+* [x] retryability evaluation;
+* [x] retry-policy precedence;
+* [x] maximum retries and maximum attempts;
+* [x] sequential retry admission;
+* [x] bounded backoff;
+* [x] jitter;
+* [x] retry budgets;
+* [x] cancellation propagation;
+* [x] operation deadline enforcement;
+* [x] security-context preservation;
+* [x] configuration-snapshot preservation;
+* [x] idempotency key validation and scoping;
+* [x] idempotency conflicts;
+* [x] in-flight duplicate handling;
+* [x] completed duplicate handling;
+* [x] known success and known failure outcomes;
+* [x] unknown-outcome protection;
+* [x] side-effect safety;
+* [x] artifact interaction;
+* [x] provenance lineage;
+* [x] stream retry protection;
+* [x] partial-output retry protection;
+* [x] resource-limit enforcement;
+* [x] retry-storm protection;
+* [x] observability lineage; and
+* [x] regression coverage for previously verified Core phases.
+
+The complete repository verification suite passes, including formatting,
+Clippy, compilation, unit tests, integration tests, and documentation tests.
+
+### Checklist
+
+* [x] Implement attempt tracking and attempt lifecycle
+* [x] Preserve stable `OperationId` across retries
+* [x] Implement distinct attempt identity and numbering
+* [x] Implement retryability classification and evaluation
+* [x] Implement retry-policy enforcement
+* [x] Implement bounded backoff and jitter
+* [x] Implement retry limits and retry budgets
+* [x] Implement retry safety evaluation
+* [x] Implement idempotency keys and scoped identity
+* [x] Implement idempotency state and records
+* [x] Implement duplicate detection
+* [x] Implement in-flight duplicate handling
+* [x] Implement completed duplicate handling
+* [x] Implement idempotency conflict detection
+* [x] Distinguish known success, known failure, and unknown outcome
+* [x] Prevent unsafe blind retry after unknown outcomes
+* [x] Preserve cancellation and operation deadlines across attempts
+* [x] Preserve security and configuration context across attempts
+* [x] Integrate retry lineage with provenance and observability
+* [x] Integrate retry safety with artifacts and streaming
+* [x] Integrate retry admission with concurrency and resource controls
+* [x] Prevent speculative concurrent attempts by default
+* [x] Add unit and integration coverage
+* [x] Preserve previously verified Core behavior
+* [x] Run complete repository verification
 
 ---
 
@@ -17543,6 +17649,36 @@ architecture.
 * Health aggregation preserves distinct **Healthy, Degraded, Unhealthy, and Unknown** conditions and evaluates component health deterministically. Required dependency failure takes precedence over unknown observations.
 * Observability remains composed of **logging, metrics, tracing, diagnostics, correlation, and telemetry**, without replacing the existing Logging or Error systems.
 * Provider-specific telemetry, monitoring backends, secret providers, deployment systems, self-healing, and dynamic configuration control-plane behavior remain outside Phase 11.
+* Retry creates a new `Attempt` under the existing `OperationId`; retry does not
+  create a new logical operation.
+* `AttemptId` identifies a concrete execution while `AttemptNumber` identifies
+  its ordinal position within the logical operation.
+* Attempt lifecycle is non-reopenable:
+  `CREATED → RUNNING → SUCCEEDED | FAILED | CANCELLED`.
+* Retryability, idempotency, and retry safety are distinct concepts and must not
+  be collapsed into one mechanism.
+* Retry requests do not automatically imply retry permission. Applicable policy,
+  cancellation, deadlines, budgets, resource limits, and retry-safety constraints
+  must be enforced before another attempt is admitted.
+* Retry policy remains owned by the operation, plan node, capability, or
+  applicable engine-owned contract. Core provides the shared enforcement
+  mechanism.
+* `OperationId` and `IdempotencyKey` are distinct identities.
+* Idempotency identity is scoped and does not require ecosystem-wide global key
+  uniqueness.
+* Idempotency must protect against duplicate side effects rather than requiring
+  byte-for-byte identical repeated responses.
+* Unknown outcomes must not result in blind automatic replay of potentially
+  side-effecting operations.
+* Completed idempotent duplicates must not blindly execute the same side effect
+  again.
+* Retry attempts preserve the applicable operation context, security/delegation
+  context, configuration snapshot, provenance lineage, and observability lineage.
+* Retry must integrate with existing concurrency and resource controls rather
+  than bypassing them.
+* Concurrent speculative retry attempts are not permitted by default.
+* Phase 13 does not replace Runtime, Streaming, Artifact/Provenance, Security,
+  Configuration, Observability, or Concurrency mechanisms.
 
 ## Corrections / Changes
 
@@ -17589,44 +17725,65 @@ None currently. Concrete trait signatures, provider choices, serialization, asyn
 
 ### Current State
 
-Phase 12 is implemented and verified.
+Phase 13 is implemented, merged, and verified.
 
-The Core now provides:
+Phases 0 through 13 are now verified.
 
-* application-level ordered streams;
-* stream lifecycle, ownership, cancellation, deadlines, and backpressure;
-* bounded concurrency state and configuration;
-* runtime-managed task lifecycle, ownership, cancellation, and failure tracking;
-* bounded background-task admission and execution;
-* background-task shutdown and cleanup integration; and
-* integration of streams and tasks with the existing Core runtime and context
-  mechanisms.
+The Core currently provides:
 
-Phase 12 remains within its defined architectural boundary and does not replace
-transport framing, retry/idempotency, events, Control Plane routing, or other
-later-phase mechanisms.
+* foundational identity, operation, and status primitives;
+* universal contracts and payload boundaries;
+* the shared Error System;
+* structured Logging;
+* execution Context and lifecycle infrastructure;
+* Capability registration and dispatch;
+* Transport and universal client/server mechanisms;
+* Engine Runtime;
+* Middleware and Security;
+* Artifact and Provenance systems;
+* Configuration, Health, and Observability;
+* Streaming, Concurrency, and Background Tasks; and
+* Retry and Idempotency mechanisms.
+
+Phase 13 preserves the established Core architecture:
+
+```text
+Operation
+    │
+    ├── Attempt 1
+    │      ↓
+    │    FAILED
+    │      ↓
+    ├── Attempt 2
+    │      ↓
+    │    ...
+    │
+    └── same OperationId
+
+```
 
 ### Next Step
 
-Proceed to Phase 13: Retry and Idempotency.
+Proceed to Phase 14: Internal Events.
 
-Phase 13 will build on the completed operation, error, runtime, streaming,
-artifact, security, configuration, and observability foundations to add:
+Phase 14 will introduce the shared internal event mechanism for Core and engine
+runtime communication, including:
 
-* attempt tracking and attempt lifecycle;
-* retryability evaluation and retry policy enforcement;
-* bounded backoff and jitter;
-* retry limits and retry/resource budgets;
-* idempotency keys and idempotency state;
-* duplicate detection and completed-duplicate handling;
-* unknown-outcome handling;
-* retry safety evaluation for side-effecting operations;
-* preservation of operation identity across attempts;
-* cancellation and deadline propagation across retries;
-* safe integration with streaming and artifact outputs; and
-* retry/runtime resource-control integration.
+* event identity;
+* event type;
+* event scope;
+* event payload;
+* event publication;
+* event subscription;
+* delivery semantics;
+* cancellation;
+* ownership;
+* ordering; and
+* lifecycle support.
 
-Retry must create a new attempt under the same logical operation and must not
-bypass the resource, cancellation, security, configuration, streaming, or
-artifact
-boundaries already established by earlier phases.
+Phase 14 must remain an optional internal infrastructure mechanism and must not
+turn Nizaam into an event-driven architecture by default.
+
+It must also remain separate from the Control Plane. Internal Events provide
+internal/local notification, while the Phase 15 Control Plane provides formal
+communication and routing.

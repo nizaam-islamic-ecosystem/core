@@ -171,32 +171,45 @@ impl std::error::Error for RetryAdmissionError {}
 /// Ordered retry-admission coordinator.
 ///
 /// The coordinator reads cancellation and deadline state authoritatively at
-/// admission time and receives the remaining domain-owned gate results through
-/// [`RetrySafetyGates`]. In return, callers get one API that cannot consume the
+/// admission time and receives a fresh set of domain-owned gate results for each
+/// admission request. In return, callers get one API that cannot consume the
 /// retry budget or create the next attempt until every required safety boundary
 /// has passed.
+/// Inputs required for one retry-admission request.
+///
+/// The request groups the retry budget, current attempt, failure classification,
+/// retryability, successor identity, jitter source, and domain-owned safety
+/// results into one explicit admission request.
+pub struct RetryAdmissionRequest<'a> {
+    pub budget: &'a mut RetryBudget,
+    pub current_attempt: &'a Attempt,
+    pub category: FailureCategory,
+    pub retryability: Retryability,
+    pub next_attempt_id: AttemptId,
+    pub jitter_source: Option<&'a mut dyn JitterSource>,
+    pub safety_gates: RetrySafetyGates,
+}
+
 pub struct RetryAdmission<'a> {
     policy: &'a RetryPolicy,
     backoff: &'a BackoffPolicy,
-    safety_gates: RetrySafetyGates,
     cancellation: CancellationToken,
     deadline: Option<Deadline>,
 }
 
 impl<'a> RetryAdmission<'a> {
     /// Creates an admission coordinator from the applicable policy, backoff,
-    /// domain-owned safety-gate results, and live operation execution state.
+    /// and live operation execution state. Domain-owned safety gates are supplied
+    /// separately to each admission request.
     pub fn new(
         policy: &'a RetryPolicy,
         backoff: &'a BackoffPolicy,
-        safety_gates: RetrySafetyGates,
         cancellation: &CancellationToken,
         deadline: Option<Deadline>,
     ) -> Self {
         Self {
             policy,
             backoff,
-            safety_gates,
             cancellation: cancellation.clone(),
             deadline,
         }
@@ -210,13 +223,17 @@ impl<'a> RetryAdmission<'a> {
     /// attempt. Actual waiting/scheduling remains the caller's responsibility.
     pub fn admit_next(
         &self,
-        budget: &mut RetryBudget,
-        current_attempt: &Attempt,
-        category: FailureCategory,
-        retryability: Retryability,
-        next_attempt_id: AttemptId,
-        jitter_source: Option<&mut dyn JitterSource>,
+        request: RetryAdmissionRequest<'_>,
     ) -> Result<(Attempt, std::time::Duration), RetryAdmissionError> {
+        let RetryAdmissionRequest {
+            budget,
+            current_attempt,
+            category,
+            retryability,
+            next_attempt_id,
+            jitter_source,
+            safety_gates,
+        } = request;
         match self
             .policy
             .evaluate(category, retryability, current_attempt.attempt_number())
@@ -225,10 +242,7 @@ impl<'a> RetryAdmission<'a> {
             RetryDecision::Denied(reason) => return Err(RetryAdmissionError::Policy(reason)),
         }
 
-        if let Some(gate) = self
-            .safety_gates
-            .first_denied(&self.cancellation, self.deadline)
-        {
+        if let Some(gate) = safety_gates.first_denied(&self.cancellation, self.deadline) {
             return Err(RetryAdmissionError::SafetyGate(gate));
         }
 
@@ -261,9 +275,7 @@ impl<'a> RetryAdmission<'a> {
         // mutex, immediately before budget reservation and successor-claim commit.
         current_attempt
             .try_reserve_successor(&next_attempt_id, || {
-                if let Some(gate) = self
-                    .safety_gates
-                    .first_denied(&self.cancellation, self.deadline)
+                if let Some(gate) = safety_gates.first_denied(&self.cancellation, self.deadline)
                 {
                     return Err(RetryAdmissionError::SafetyGate(gate));
                 }
@@ -647,17 +659,17 @@ mod tests {
         let cancellation = CancellationToken::new();
 
         for (index, (expected_gate, safety_gates)) in cases.iter().enumerate() {
-            let admission =
-                RetryAdmission::new(&policy, &backoff, *safety_gates, &cancellation, None);
+            let admission = RetryAdmission::new(&policy, &backoff, &cancellation, None);
             let mut budget = RetryBudget::new(1);
-            let result = admission.admit_next(
-                &mut budget,
-                &current,
-                FailureCategory::Transient,
-                Retryability::Retryable,
-                attempt_id(&format!("attempt-{}", index + 2)),
-                None,
-            );
+            let result = admission.admit_next(RetryAdmissionRequest {
+                budget: &mut budget,
+                current_attempt: &current,
+                category: FailureCategory::Transient,
+                retryability: Retryability::Retryable,
+                next_attempt_id: attempt_id(&format!("attempt-{}", index + 2)),
+                jitter_source: None,
+                safety_gates: *safety_gates,
+            });
 
             assert!(matches!(
                 result,
@@ -671,21 +683,21 @@ mod tests {
     fn retry_admission_checks_live_cancellation_state_at_admission_time() {
         let policy = retryable_policy(2, 3);
         let backoff = BackoffPolicy::no_backoff();
-        let gates = all_safety_gates_clear();
         let cancellation = CancellationToken::new();
-        let admission = RetryAdmission::new(&policy, &backoff, gates, &cancellation, None);
+        let admission = RetryAdmission::new(&policy, &backoff, &cancellation, None);
         let current = failed_attempt("admission-live-cancellation", "attempt-1");
         cancellation.cancel();
         let mut budget = RetryBudget::new(1);
 
-        let result = admission.admit_next(
-            &mut budget,
-            &current,
-            FailureCategory::Transient,
-            Retryability::Retryable,
-            attempt_id("attempt-2"),
-            None,
-        );
+        let result = admission.admit_next(RetryAdmissionRequest {
+            budget: &mut budget,
+            current_attempt: &current,
+            category: FailureCategory::Transient,
+            retryability: Retryability::Retryable,
+            next_attempt_id: attempt_id("attempt-2"),
+            jitter_source: None,
+            safety_gates: all_safety_gates_clear(),
+        });
 
         assert!(matches!(
             result,
@@ -700,28 +712,72 @@ mod tests {
     fn retry_admission_checks_live_deadline_at_admission_time() {
         let policy = retryable_policy(2, 3);
         let backoff = BackoffPolicy::no_backoff();
-        let gates = all_safety_gates_clear();
         let cancellation = CancellationToken::new();
         let deadline = Deadline::at(Instant::now());
-        let admission =
-            RetryAdmission::new(&policy, &backoff, gates, &cancellation, Some(deadline));
+        let admission = RetryAdmission::new(&policy, &backoff, &cancellation, Some(deadline));
         let current = failed_attempt("admission-live-deadline", "attempt-1");
         let mut budget = RetryBudget::new(1);
 
-        let result = admission.admit_next(
-            &mut budget,
-            &current,
-            FailureCategory::Transient,
-            Retryability::Retryable,
-            attempt_id("attempt-2"),
-            None,
-        );
+        let result = admission.admit_next(RetryAdmissionRequest {
+            budget: &mut budget,
+            current_attempt: &current,
+            category: FailureCategory::Transient,
+            retryability: Retryability::Retryable,
+            next_attempt_id: attempt_id("attempt-2"),
+            jitter_source: None,
+            safety_gates: all_safety_gates_clear(),
+        });
 
         assert!(matches!(
             result,
             Err(RetryAdmissionError::SafetyGate(RetrySafetyGate::Deadline))
         ));
         assert_eq!(budget.consumed(), 0);
+    }
+
+    #[test]
+    fn retry_admission_rechecks_domain_gate_results_for_each_admission() {
+        let policy = retryable_policy(2, 3);
+        let backoff = BackoffPolicy::no_backoff();
+        let cancellation = CancellationToken::new();
+        let admission = RetryAdmission::new(&policy, &backoff, &cancellation, None);
+        let current = failed_attempt("admission-fresh-gates", "attempt-1");
+
+        let mut first_budget = RetryBudget::new(1);
+        let (first, _) = admission
+            .admit_next(RetryAdmissionRequest {
+                budget: &mut first_budget,
+                current_attempt: &current,
+                category: FailureCategory::Transient,
+                retryability: Retryability::Retryable,
+                next_attempt_id: attempt_id("attempt-2"),
+                jitter_source: None,
+                safety_gates: all_safety_gates_clear(),
+            })
+            .unwrap();
+
+        assert_eq!(first_budget.consumed(), 1);
+        assert_eq!(first.attempt_number(), 2);
+
+        let mut second_budget = RetryBudget::new(1);
+        let changed_gates = RetrySafetyGates::new(false, true, true, true);
+        let result = admission.admit_next(RetryAdmissionRequest {
+            budget: &mut second_budget,
+            current_attempt: &current,
+            category: FailureCategory::Transient,
+            retryability: Retryability::Retryable,
+            next_attempt_id: attempt_id("attempt-3"),
+            jitter_source: None,
+            safety_gates: changed_gates,
+        });
+
+        assert!(matches!(
+            result,
+            Err(RetryAdmissionError::SafetyGate(
+                RetrySafetyGate::ResourceAdmission
+            ))
+        ));
+        assert_eq!(second_budget.consumed(), 0);
     }
 
     #[test]
@@ -734,25 +790,20 @@ mod tests {
         )
         .unwrap();
         let cancellation = CancellationToken::new();
-        let admission = RetryAdmission::new(
-            &policy,
-            &backoff,
-            all_safety_gates_clear(),
-            &cancellation,
-            None,
-        );
+        let admission = RetryAdmission::new(&policy, &backoff, &cancellation, None);
         let current = failed_attempt("admission-success", "attempt-1");
         let mut budget = RetryBudget::new(1);
 
         let (next, delay) = admission
-            .admit_next(
-                &mut budget,
-                &current,
-                FailureCategory::Transient,
-                Retryability::Retryable,
-                attempt_id("attempt-2"),
-                None,
-            )
+            .admit_next(RetryAdmissionRequest {
+                budget: &mut budget,
+                current_attempt: &current,
+                category: FailureCategory::Transient,
+                retryability: Retryability::Retryable,
+                next_attempt_id: attempt_id("attempt-2"),
+                jitter_source: None,
+                safety_gates: all_safety_gates_clear(),
+            })
             .unwrap();
 
         assert_eq!(delay, Duration::from_millis(100));
@@ -773,24 +824,19 @@ mod tests {
         )
         .unwrap();
         let cancellation = CancellationToken::new();
-        let admission = RetryAdmission::new(
-            &policy,
-            &backoff,
-            all_safety_gates_clear(),
-            &cancellation,
-            None,
-        );
+        let admission = RetryAdmission::new(&policy, &backoff, &cancellation, None);
         let current = failed_attempt("admission-backoff-error", "attempt-1");
         let mut budget = RetryBudget::new(1);
 
-        let result = admission.admit_next(
-            &mut budget,
-            &current,
-            FailureCategory::Transient,
-            Retryability::Retryable,
-            attempt_id("attempt-2"),
-            None,
-        );
+        let result = admission.admit_next(RetryAdmissionRequest {
+            budget: &mut budget,
+            current_attempt: &current,
+            category: FailureCategory::Transient,
+            retryability: Retryability::Retryable,
+            next_attempt_id: attempt_id("attempt-2"),
+            jitter_source: None,
+            safety_gates: all_safety_gates_clear(),
+        });
 
         assert!(matches!(
             result,
@@ -806,25 +852,20 @@ mod tests {
         let policy = retryable_policy(2, 3);
         let backoff = BackoffPolicy::no_backoff();
         let cancellation = CancellationToken::new();
-        let admission = RetryAdmission::new(
-            &policy,
-            &backoff,
-            all_safety_gates_clear(),
-            &cancellation,
-            None,
-        );
+        let admission = RetryAdmission::new(&policy, &backoff, &cancellation, None);
         let current =
             Attempt::new(operation_id("admission-state"), attempt_id("attempt-1"), 1).unwrap();
         let mut budget = RetryBudget::new(1);
 
-        let result = admission.admit_next(
-            &mut budget,
-            &current,
-            FailureCategory::Transient,
-            Retryability::Retryable,
-            attempt_id("attempt-2"),
-            None,
-        );
+        let result = admission.admit_next(RetryAdmissionRequest {
+            budget: &mut budget,
+            current_attempt: &current,
+            category: FailureCategory::Transient,
+            retryability: Retryability::Retryable,
+            next_attempt_id: attempt_id("attempt-2"),
+            jitter_source: None,
+            safety_gates: all_safety_gates_clear(),
+        });
 
         assert!(matches!(
             result,
@@ -840,24 +881,19 @@ mod tests {
         let policy = retryable_policy(2, 3);
         let backoff = BackoffPolicy::no_backoff();
         let cancellation = CancellationToken::new();
-        let admission = RetryAdmission::new(
-            &policy,
-            &backoff,
-            all_safety_gates_clear(),
-            &cancellation,
-            None,
-        );
+        let admission = RetryAdmission::new(&policy, &backoff, &cancellation, None);
         let current = failed_attempt("admission-reused-id", "attempt-1");
         let mut budget = RetryBudget::new(1);
 
-        let result = admission.admit_next(
-            &mut budget,
-            &current,
-            FailureCategory::Transient,
-            Retryability::Retryable,
-            current.attempt_id().clone(),
-            None,
-        );
+        let result = admission.admit_next(RetryAdmissionRequest {
+            budget: &mut budget,
+            current_attempt: &current,
+            category: FailureCategory::Transient,
+            retryability: Retryability::Retryable,
+            next_attempt_id: current.attempt_id().clone(),
+            jitter_source: None,
+            safety_gates: all_safety_gates_clear(),
+        });
 
         assert!(matches!(
             result,
@@ -871,35 +907,31 @@ mod tests {
         let policy = retryable_policy(3, 4);
         let backoff = BackoffPolicy::no_backoff();
         let cancellation = CancellationToken::new();
-        let admission = RetryAdmission::new(
-            &policy,
-            &backoff,
-            all_safety_gates_clear(),
-            &cancellation,
-            None,
-        );
+        let admission = RetryAdmission::new(&policy, &backoff, &cancellation, None);
         let current = failed_attempt("admission-single-successor", "attempt-1");
         let mut budget = RetryBudget::new(2);
 
         let (first_successor, _) = admission
-            .admit_next(
-                &mut budget,
-                &current,
-                FailureCategory::Transient,
-                Retryability::Retryable,
-                attempt_id("attempt-2"),
-                None,
-            )
+            .admit_next(RetryAdmissionRequest {
+                budget: &mut budget,
+                current_attempt: &current,
+                category: FailureCategory::Transient,
+                retryability: Retryability::Retryable,
+                next_attempt_id: attempt_id("attempt-2"),
+                jitter_source: None,
+                safety_gates: all_safety_gates_clear(),
+            })
             .unwrap();
 
-        let second_result = admission.admit_next(
-            &mut budget,
-            &current,
-            FailureCategory::Transient,
-            Retryability::Retryable,
-            attempt_id("attempt-3"),
-            None,
-        );
+        let second_result = admission.admit_next(RetryAdmissionRequest {
+            budget: &mut budget,
+            current_attempt: &current,
+            category: FailureCategory::Transient,
+            retryability: Retryability::Retryable,
+            next_attempt_id: attempt_id("attempt-3"),
+            jitter_source: None,
+            safety_gates: all_safety_gates_clear(),
+        });
 
         assert!(matches!(
             second_result,
@@ -914,24 +946,19 @@ mod tests {
         let policy = retryable_policy(2, 3);
         let backoff = BackoffPolicy::no_backoff();
         let cancellation = CancellationToken::new();
-        let admission = RetryAdmission::new(
-            &policy,
-            &backoff,
-            all_safety_gates_clear(),
-            &cancellation,
-            None,
-        );
+        let admission = RetryAdmission::new(&policy, &backoff, &cancellation, None);
         let current = failed_attempt("admission-budget-rollback", "attempt-1");
         let mut exhausted_budget = RetryBudget::new(0);
 
-        let first_result = admission.admit_next(
-            &mut exhausted_budget,
-            &current,
-            FailureCategory::Transient,
-            Retryability::Retryable,
-            attempt_id("attempt-2"),
-            None,
-        );
+        let first_result = admission.admit_next(RetryAdmissionRequest {
+            budget: &mut exhausted_budget,
+            current_attempt: &current,
+            category: FailureCategory::Transient,
+            retryability: Retryability::Retryable,
+            next_attempt_id: attempt_id("attempt-2"),
+            jitter_source: None,
+            safety_gates: all_safety_gates_clear(),
+        });
 
         assert!(matches!(
             first_result,
@@ -941,14 +968,15 @@ mod tests {
 
         let mut available_budget = RetryBudget::new(1);
         let (next, _) = admission
-            .admit_next(
-                &mut available_budget,
-                &current,
-                FailureCategory::Transient,
-                Retryability::Retryable,
-                attempt_id("attempt-2"),
-                None,
-            )
+            .admit_next(RetryAdmissionRequest {
+                budget: &mut available_budget,
+                current_attempt: &current,
+                category: FailureCategory::Transient,
+                retryability: Retryability::Retryable,
+                next_attempt_id: attempt_id("attempt-2"),
+                jitter_source: None,
+                safety_gates: all_safety_gates_clear(),
+            })
             .unwrap();
 
         assert_eq!(available_budget.consumed(), 1);

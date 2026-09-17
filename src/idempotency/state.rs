@@ -385,6 +385,19 @@ impl IdempotencyStateStore {
             ));
         }
 
+        if current_state == IdempotencyState::Failed {
+            let same_outcome = existing.outcome() == outcome.as_ref();
+            let same_result_reference = existing.result_reference() == result_reference.as_deref();
+
+            if same_outcome && same_result_reference {
+                return Ok(existing);
+            }
+
+            return Err(IdempotencyStateError::InvalidTerminalMetadata(
+                IdempotencyState::Failed,
+            ));
+        }
+
         let updated = IdempotencyRecord::new(
             existing.identity().clone(),
             existing.operation_id().clone(),
@@ -692,6 +705,154 @@ mod tests {
         );
         assert_eq!(updated.result_reference(), Some("result://operation-1"));
         assert_eq!(updated.expires_at(), 500);
+    }
+
+    #[test]
+    fn failed_transition_accepts_an_identical_terminal_update_without_replacing_metadata() {
+        let store = IdempotencyStateStore::new();
+        let initial = record("service-a", "key-1", "operation-1", None, 500);
+        let error = crate::status::ErrorReference::new("error-1").unwrap();
+        let outcome = RecordedOutcome::new(Status::Failure, Some(error));
+
+        store.reserve(initial.clone(), 100).unwrap();
+        let failed = store
+            .transition(
+                initial.identity(),
+                IdempotencyState::Failed,
+                Some(outcome.clone()),
+                Some("result://operation-1".to_owned()),
+            )
+            .unwrap();
+
+        let repeated = store
+            .transition(
+                initial.identity(),
+                IdempotencyState::Failed,
+                Some(outcome),
+                Some("result://operation-1".to_owned()),
+            )
+            .unwrap();
+
+        assert_eq!(repeated, failed);
+        assert_eq!(store.get(initial.identity()).unwrap(), Some(failed));
+    }
+
+    #[test]
+    fn failed_transition_rejects_changed_terminal_outcome_metadata() {
+        let store = IdempotencyStateStore::new();
+        let initial = record("service-a", "key-1", "operation-1", None, 500);
+        let first_error = crate::status::ErrorReference::new("error-1").unwrap();
+        let second_error = crate::status::ErrorReference::new("error-2").unwrap();
+
+        store.reserve(initial.clone(), 100).unwrap();
+        let failed = store
+            .transition(
+                initial.identity(),
+                IdempotencyState::Failed,
+                Some(RecordedOutcome::new(Status::Failure, Some(first_error))),
+                Some("result://operation-1".to_owned()),
+            )
+            .unwrap();
+
+        let result = store.transition(
+            initial.identity(),
+            IdempotencyState::Failed,
+            Some(RecordedOutcome::new(Status::Failure, Some(second_error))),
+            Some("result://operation-1".to_owned()),
+        );
+
+        assert_eq!(
+            result,
+            Err(IdempotencyStateError::InvalidTerminalMetadata(
+                IdempotencyState::Failed
+            ))
+        );
+        assert_eq!(store.get(initial.identity()).unwrap(), Some(failed));
+    }
+
+    #[test]
+    fn failed_transition_rejects_changed_result_reference() {
+        let store = IdempotencyStateStore::new();
+        let initial = record("service-a", "key-1", "operation-1", None, 500);
+        let outcome = RecordedOutcome::new(Status::TimedOut, None);
+
+        store.reserve(initial.clone(), 100).unwrap();
+        let failed = store
+            .transition(
+                initial.identity(),
+                IdempotencyState::Failed,
+                Some(outcome.clone()),
+                Some("result://operation-1".to_owned()),
+            )
+            .unwrap();
+
+        let result = store.transition(
+            initial.identity(),
+            IdempotencyState::Failed,
+            Some(outcome),
+            Some("result://operation-2".to_owned()),
+        );
+
+        assert_eq!(
+            result,
+            Err(IdempotencyStateError::InvalidTerminalMetadata(
+                IdempotencyState::Failed
+            ))
+        );
+        assert_eq!(store.get(initial.identity()).unwrap(), Some(failed));
+    }
+
+    #[test]
+    fn failed_transition_rejects_changing_failure_status() {
+        let store = IdempotencyStateStore::new();
+        let initial = record("service-a", "key-1", "operation-1", None, 500);
+
+        store.reserve(initial.clone(), 100).unwrap();
+        let failed = store
+            .transition(
+                initial.identity(),
+                IdempotencyState::Failed,
+                Some(RecordedOutcome::new(Status::Failure, None)),
+                None,
+            )
+            .unwrap();
+
+        let result = store.transition(
+            initial.identity(),
+            IdempotencyState::Failed,
+            Some(RecordedOutcome::new(Status::TimedOut, None)),
+            None,
+        );
+
+        assert_eq!(
+            result,
+            Err(IdempotencyStateError::InvalidTerminalMetadata(
+                IdempotencyState::Failed
+            ))
+        );
+        assert_eq!(store.get(initial.identity()).unwrap(), Some(failed));
+    }
+
+    #[test]
+    fn failed_state_allows_timed_out_outcome() {
+        let store = IdempotencyStateStore::new();
+        let initial = record("service-a", "key-1", "operation-1", None, 500);
+
+        store.reserve(initial.clone(), 100).unwrap();
+        let failed = store
+            .transition(
+                initial.identity(),
+                IdempotencyState::Failed,
+                Some(RecordedOutcome::new(Status::TimedOut, None)),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(*failed.state(), IdempotencyState::Failed);
+        assert_eq!(
+            failed.outcome().map(RecordedOutcome::status),
+            Some(Status::TimedOut)
+        );
     }
 
     #[test]

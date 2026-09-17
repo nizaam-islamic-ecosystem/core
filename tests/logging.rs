@@ -22,11 +22,11 @@ struct ReentrantSink {
 impl LogSink for ReentrantSink {
     fn publish(&self, event: &LogEvent) {
         self.sender.send(event.clone()).unwrap();
-        if !self.subscribed.swap(true, Ordering::SeqCst) {
-            if let Some(system) = self.system.upgrade() {
-                let (sender, _) = mpsc::channel();
-                system.subscribe(Arc::new(ChannelSink(sender)));
-            }
+        if !self.subscribed.swap(true, Ordering::SeqCst)
+            && let Some(system) = self.system.upgrade()
+        {
+            let (sender, _) = mpsc::channel();
+            system.subscribe(Arc::new(ChannelSink(sender)));
         }
     }
 }

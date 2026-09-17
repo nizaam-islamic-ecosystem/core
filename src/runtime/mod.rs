@@ -12,6 +12,7 @@ use std::sync::Arc;
 use crate::{
     config::snapshot::ConfigurationSnapshot,
     error::{ErrorContext, ErrorDefinition, GlobalError},
+    identity::{AttemptId, NodeId},
     operation::OperationContext,
     provenance::ProvenanceContext,
     security::SecurityContext,
@@ -67,6 +68,33 @@ impl EngineContext {
             security: None,
             provenance: ProvenanceContext::new(),
             configuration: None,
+        }
+    }
+
+    /// Creates an execution context for a concrete retry attempt of the same
+    /// logical operation.
+    ///
+    /// The operation context receives the supplied node and attempt identity,
+    /// while the operation-level execution context remains unchanged:
+    ///
+    /// - the same logical `OperationId` is preserved;
+    /// - the same cancellation authority is preserved;
+    /// - the same operation deadline is preserved;
+    /// - the same authenticated security context is preserved;
+    /// - the same provenance context is preserved;
+    /// - the same immutable configuration snapshot is preserved.
+    ///
+    /// A retry is therefore represented as a new attempt of the existing
+    /// operation rather than as a new logical operation or an independently
+    /// cancellable child context.
+    pub fn for_attempt(&self, node_id: NodeId, attempt_id: AttemptId) -> Self {
+        Self {
+            operation: self.operation.clone().for_attempt(node_id, attempt_id),
+            cancellation: self.cancellation.clone(),
+            deadline: self.deadline,
+            security: self.security.clone(),
+            provenance: self.provenance.clone(),
+            configuration: self.configuration.clone(),
         }
     }
 
@@ -170,7 +198,7 @@ mod tests {
         },
         contracts::Version,
         error::{ErrorClass, ErrorCode, ErrorOwner, Severity},
-        identity::{CorrelationId, OperationId},
+        identity::{AttemptId, CorrelationId, NodeId, OperationId},
         operation::{Operation, OperationContext},
         security::{PrincipalId, PrincipalIdentity, PrincipalType},
         status::Retryability,
@@ -382,6 +410,128 @@ mod tests {
 
         assert_eq!(error.code.as_str(), "CORE.EXECUTION.001");
         assert_eq!(error.context.operation.operation.id.as_str(), "operation-2");
+    }
+
+    #[test]
+    fn for_attempt_preserves_operation_identity_and_attaches_attempt_identity() {
+        let parent = sample_context();
+        let node_id = NodeId::new("node-1").unwrap();
+        let attempt_id = AttemptId::new("attempt-1").unwrap();
+
+        let attempt = parent.for_attempt(node_id.clone(), attempt_id.clone());
+
+        assert_eq!(
+            attempt.operation().operation.id,
+            parent.operation().operation.id
+        );
+        assert_eq!(attempt.operation().node_id, Some(node_id));
+        assert_eq!(attempt.operation().attempt_id, Some(attempt_id));
+    }
+
+    #[test]
+    fn multiple_attempt_contexts_share_the_same_operation_identity() {
+        let parent = sample_context();
+
+        let attempt_one = parent.for_attempt(
+            NodeId::new("node-1").unwrap(),
+            AttemptId::new("attempt-1").unwrap(),
+        );
+        let attempt_two = parent.for_attempt(
+            NodeId::new("node-1").unwrap(),
+            AttemptId::new("attempt-2").unwrap(),
+        );
+
+        assert_eq!(
+            attempt_one.operation().operation.id,
+            attempt_two.operation().operation.id
+        );
+        assert_ne!(
+            attempt_one.operation().attempt_id,
+            attempt_two.operation().attempt_id
+        );
+    }
+
+    #[test]
+    fn for_attempt_preserves_execution_context() {
+        let security = sample_security_context();
+        let configuration = sample_configuration_snapshot();
+        let provenance = ProvenanceContext::new().with_attribute("k", "v");
+        let deadline = Deadline::from_now(Duration::from_secs(60)).unwrap();
+
+        let parent = sample_context()
+            .with_deadline(deadline)
+            .with_security(security.clone())
+            .with_provenance(provenance.clone())
+            .with_configuration(configuration.clone());
+
+        let attempt = parent.for_attempt(
+            NodeId::new("node-1").unwrap(),
+            AttemptId::new("attempt-1").unwrap(),
+        );
+
+        assert_eq!(attempt.deadline(), parent.deadline());
+        assert_eq!(attempt.security(), Some(&security));
+        assert_eq!(attempt.provenance(), &provenance);
+        assert_eq!(attempt.configuration(), Some(configuration.as_ref()));
+    }
+
+    #[test]
+    fn for_attempt_preserves_the_same_cancellation_authority() {
+        let parent = sample_context();
+        let attempt = parent.for_attempt(
+            NodeId::new("node-1").unwrap(),
+            AttemptId::new("attempt-1").unwrap(),
+        );
+
+        assert!(!attempt.cancellation().is_cancelled());
+
+        parent.cancellation().cancel();
+
+        assert!(parent.cancellation().is_cancelled());
+        assert!(attempt.cancellation().is_cancelled());
+    }
+
+    #[test]
+    fn for_attempt_preserves_operation_deadline() {
+        let deadline = Deadline::from_now(Duration::from_secs(60)).unwrap();
+
+        let parent = sample_context().with_deadline(deadline);
+        let attempt = parent.for_attempt(
+            NodeId::new("node-1").unwrap(),
+            AttemptId::new("attempt-1").unwrap(),
+        );
+
+        assert_eq!(attempt.deadline(), Some(deadline));
+    }
+
+    #[test]
+    fn expired_attempt_context_preserves_attempt_lineage_in_expiration_error() {
+        let node_id = NodeId::new("node-expired").unwrap();
+        let attempt_id = AttemptId::new("attempt-expired").unwrap();
+
+        let parent = sample_context().with_deadline(Deadline::from_now(Duration::ZERO).unwrap());
+
+        let attempt = parent.for_attempt(node_id.clone(), attempt_id.clone());
+
+        let definition = ErrorDefinition::new(
+            ErrorCode::new("CORE.EXECUTION.001").unwrap(),
+            ErrorOwner::new("CORE").unwrap(),
+            Version::new(1, 0, 0),
+            ErrorClass::Execution,
+            Severity::Error,
+            "Execution deadline expired",
+            Retryability::NonRetryable,
+        )
+        .unwrap();
+
+        let error = attempt.expiration_error(&definition).unwrap();
+
+        assert_eq!(
+            error.context.operation.operation.id,
+            attempt.operation().operation.id
+        );
+        assert_eq!(error.context.operation.node_id, Some(node_id));
+        assert_eq!(error.context.operation.attempt_id, Some(attempt_id));
     }
 
     #[test]

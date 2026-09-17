@@ -23,6 +23,11 @@ use nizaam_core::capability::{
     CapabilityDefinition, CapabilityError, CapabilityInvocation, CapabilityOutcome,
     CapabilityRegistry, arc_handler, dispatch,
 };
+use nizaam_core::config::{
+    resolution::ConfigurationResolver,
+    snapshot::{ConfigurationSnapshot, ConfigurationSnapshotId},
+    validation::{ConfigurationValidator, ConfigurationValue, ParsedConfiguration},
+};
 use nizaam_core::contracts::{
     ContractDescriptor, ContractMetadata, EncodedPayload, Interaction, MessageEnvelope,
     Participants, PayloadDescriptor, UniversalRequest, UniversalResponse,
@@ -33,6 +38,7 @@ use nizaam_core::identity::{
 };
 use nizaam_core::operation::{Operation, OperationContext};
 use nizaam_core::prelude::{ProvenanceContext, Status, Version};
+use nizaam_core::retry::{Attempt, AttemptLifecycleState};
 use nizaam_core::runtime::pipeline::RequestPipelineError;
 use nizaam_core::runtime::{
     BackgroundTasks, Deadline, EngineContext, EngineRuntime, ExecutionPipeline, LifecycleState,
@@ -91,6 +97,22 @@ fn request(
     ))
 }
 
+fn configuration_snapshot() -> Arc<ConfigurationSnapshot> {
+    let mut parsed = ParsedConfiguration::empty();
+    parsed.insert(
+        "runtime.retry.mode",
+        ConfigurationValue::String("deterministic".to_owned()),
+    );
+
+    let validated = ConfigurationValidator::new().validate(parsed).unwrap();
+    let resolved = ConfigurationResolver::new().resolve(&validated).unwrap();
+
+    Arc::new(ConfigurationSnapshot::new(
+        ConfigurationSnapshotId::new(13),
+        resolved,
+    ))
+}
+
 fn serving_runtime() -> EngineRuntime {
     let runtime = EngineRuntime::new();
 
@@ -144,13 +166,16 @@ fn serving_runtime_can_execute_a_validated_universal_request() {
     let runtime = serving_runtime();
     assert_eq!(runtime.state(), LifecycleState::Serving);
 
-    let observed_operation = Arc::new(Mutex::new(None));
-    let observed_operation_by_handler = Arc::clone(&observed_operation);
+    let observed_context = Arc::new(Mutex::new(None));
+    let observed_context_by_handler = Arc::clone(&observed_context);
 
     let handler = arc_handler(
         move |context: &EngineContext, invocation: &CapabilityInvocation| {
-            *observed_operation_by_handler.lock().unwrap() =
-                Some(context.operation().operation.id.clone());
+            *observed_context_by_handler.lock().unwrap() = Some((
+                context.operation().operation.id.clone(),
+                context.operation().attempt_id.clone(),
+                context.operation().node_id.clone(),
+            ));
 
             Ok(CapabilityOutcome::new(invocation.payload_bytes().to_vec()))
         },
@@ -172,7 +197,19 @@ fn serving_runtime_can_execute_a_validated_universal_request() {
 
     // Runtime execution context is associated with the trusted operation
     // context carried by the universal request.
-    let context = EngineContext::new(request.envelope.operation_context.clone());
+    let base_context = EngineContext::new(request.envelope.operation_context.clone());
+
+    let attempt = Attempt::new(
+        operation.operation.id.clone(),
+        nizaam_core::identity::AttemptId::new("runtime-attempt-1").unwrap(),
+        1,
+    )
+    .unwrap();
+
+    let context = base_context.for_attempt(
+        nizaam_core::identity::NodeId::new("runtime-node-1").unwrap(),
+        attempt.attempt_id().clone(),
+    );
 
     let invocation = invocation_from_request(&request);
 
@@ -183,9 +220,14 @@ fn serving_runtime_can_execute_a_validated_universal_request() {
         result.into_outcome().unwrap().into_bytes(),
         b"runtime payload"
     );
+
     assert_eq!(
-        observed_operation.lock().unwrap().as_ref(),
-        Some(&operation.operation.id)
+        observed_context.lock().unwrap().as_ref(),
+        Some(&(
+            operation.operation.id.clone(),
+            Some(attempt.attempt_id().clone()),
+            Some(nizaam_core::identity::NodeId::new("runtime-node-1").unwrap()),
+        ))
     );
 
     runtime.shutdown().unwrap();
@@ -247,7 +289,12 @@ fn runtime_dispatch_uses_request_capability_for_handler_selection() {
         b"routing payload",
         operation_context("runtime-routing-op", "runtime-routing-corr"),
     );
-    let context = EngineContext::new(request.envelope.operation_context.clone());
+
+    let context = EngineContext::new(request.envelope.operation_context.clone()).for_attempt(
+        nizaam_core::identity::NodeId::new("runtime-routing-node").unwrap(),
+        nizaam_core::identity::AttemptId::new("runtime-routing-attempt").unwrap(),
+    );
+
     let invocation = invocation_from_request(&request);
 
     let result = dispatch(&registry, &context, &invocation);
@@ -279,9 +326,15 @@ fn runtime_context_preserves_operation_security_and_provenance_during_dispatch()
         None,
     ))
     .with_provenance(provenance.clone())
-    .with_deadline(Deadline::from_now(Duration::from_secs(5)).unwrap());
+    .with_deadline(Deadline::from_now(Duration::from_secs(5)).unwrap())
+    .with_configuration(configuration_snapshot());
 
-    let child = parent.child();
+    let attempt_id = nizaam_core::identity::AttemptId::new("runtime-context-attempt").unwrap();
+
+    let attempt_context = parent.for_attempt(
+        nizaam_core::identity::NodeId::new("runtime-context-node").unwrap(),
+        attempt_id.clone(),
+    );
 
     let observed = Arc::new(Mutex::new(None));
     let observed_by_handler = Arc::clone(&observed);
@@ -290,11 +343,16 @@ fn runtime_context_preserves_operation_security_and_provenance_during_dispatch()
         move |context: &EngineContext, _invocation: &CapabilityInvocation| {
             *observed_by_handler.lock().unwrap() = Some((
                 context.operation().operation.id.clone(),
+                context.operation().attempt_id.clone(),
+                context.operation().node_id.clone(),
                 context.provenance().attribute("source").map(str::to_owned),
                 context
                     .provenance()
                     .attribute("component")
                     .map(str::to_owned),
+                context.security().cloned(),
+                context.deadline(),
+                context.configuration().map(|snapshot| snapshot.id()),
             ));
 
             Ok(CapabilityOutcome::new(b"context-ok".to_vec()))
@@ -308,15 +366,20 @@ fn runtime_context_preserves_operation_security_and_provenance_during_dispatch()
         b"payload".to_vec(),
     );
 
-    let result = dispatch(&registry, &child, &invocation);
+    let result = dispatch(&registry, &attempt_context, &invocation);
 
     assert!(result.is_ok());
     assert_eq!(
         observed.lock().unwrap().as_ref(),
         Some(&(
             OperationId::new("runtime-context-op").unwrap(),
+            Some(attempt_id),
+            Some(nizaam_core::identity::NodeId::new("runtime-context-node").unwrap()),
             Some("runtime-integration".to_owned()),
             Some("test-engine".to_owned()),
+            Some(parent.security().unwrap().clone()),
+            parent.deadline(),
+            Some(ConfigurationSnapshotId::new(13)),
         ))
     );
 
@@ -337,10 +400,16 @@ fn runtime_dispatch_honors_cancellation_before_capability_resolution() {
 
     let (registry, capability_id) = registry_with_handler(handler);
 
-    let context = EngineContext::new(operation_context(
+    let base_context = EngineContext::new(operation_context(
         "runtime-cancel-op",
         "runtime-cancel-corr",
     ));
+
+    let context = base_context.for_attempt(
+        nizaam_core::identity::NodeId::new("runtime-cancel-node").unwrap(),
+        nizaam_core::identity::AttemptId::new("runtime-cancel-attempt").unwrap(),
+    );
+
     context.cancellation().cancel();
 
     let invocation = CapabilityInvocation::new(
@@ -377,11 +446,16 @@ fn runtime_dispatch_honors_deadline_before_capability_resolution() {
 
     let (registry, capability_id) = registry_with_handler(handler);
 
-    let context = EngineContext::new(operation_context(
+    let base_context = EngineContext::new(operation_context(
         "runtime-deadline-op",
         "runtime-deadline-corr",
     ))
     .with_deadline(Deadline::from_now(Duration::ZERO).unwrap());
+
+    let context = base_context.for_attempt(
+        nizaam_core::identity::NodeId::new("runtime-deadline-node").unwrap(),
+        nizaam_core::identity::AttemptId::new("runtime-deadline-attempt").unwrap(),
+    );
 
     let invocation = CapabilityInvocation::new(
         capability_id,
@@ -413,10 +487,11 @@ fn runtime_pipeline_runs_execution_stages_with_the_same_engine_context() {
 
     let pipeline = ExecutionPipeline::new()
         .with_stage(Box::new(move |context: &EngineContext| {
-            first_observed
-                .lock()
-                .unwrap()
-                .push(context.operation().operation.id.to_string());
+            first_observed.lock().unwrap().push(format!(
+                "{}:{}",
+                context.operation().operation.id,
+                context.operation().attempt_id.as_ref().unwrap()
+            ));
             Ok(())
         }))
         .with_stage(Box::new(move |context: &EngineContext| {
@@ -432,13 +507,20 @@ fn runtime_pipeline_runs_execution_stages_with_the_same_engine_context() {
         "runtime-pipeline-op",
         "runtime-pipeline-corr",
     ))
-    .with_provenance(ProvenanceContext::new().with_attribute("stage", "second"));
+    .with_provenance(ProvenanceContext::new().with_attribute("stage", "second"))
+    .for_attempt(
+        nizaam_core::identity::NodeId::new("runtime-pipeline-node").unwrap(),
+        nizaam_core::identity::AttemptId::new("runtime-pipeline-attempt").unwrap(),
+    );
 
     pipeline.run(&context).unwrap();
 
     assert_eq!(
         observed.lock().unwrap().as_slice(),
-        ["runtime-pipeline-op", "runtime-pipeline-op:second"]
+        [
+            "runtime-pipeline-op:runtime-pipeline-attempt",
+            "runtime-pipeline-op:second",
+        ]
     );
 
     runtime.shutdown().unwrap();
@@ -618,7 +700,11 @@ fn dispatched_capability_outcome_can_become_a_structurally_valid_universal_respo
 
     validate_request(&request).unwrap();
 
-    let context = EngineContext::new(request.envelope.operation_context.clone());
+    let context = EngineContext::new(request.envelope.operation_context.clone()).for_attempt(
+        nizaam_core::identity::NodeId::new("runtime-response-node").unwrap(),
+        nizaam_core::identity::AttemptId::new("runtime-response-attempt").unwrap(),
+    );
+
     let invocation = CapabilityInvocation::new(
         capability_id,
         request.envelope.metadata.descriptor.contract_id.clone(),
@@ -641,6 +727,341 @@ fn dispatched_capability_outcome_can_become_a_structurally_valid_universal_respo
     assert!(response.has_response_interaction());
     assert_eq!(response.status, Status::Success);
     assert_eq!(response.envelope.payload.bytes(), b"runtime response");
+
+    runtime.shutdown().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Phase 13: retry-aware runtime integration
+// ---------------------------------------------------------------------------
+
+#[test]
+fn runtime_dispatch_can_run_sequential_attempts_for_one_operation() {
+    let runtime = serving_runtime();
+
+    let invocation = CapabilityInvocation::new(
+        CapabilityId::new(CAPABILITY).unwrap(),
+        ContractId::new("runtime.lookup.contract").unwrap(),
+        b"retry payload".to_vec(),
+    );
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed_attempts = Arc::new(Mutex::new(Vec::new()));
+    let calls_by_handler = Arc::clone(&calls);
+    let attempts_by_handler = Arc::clone(&observed_attempts);
+
+    let handler = arc_handler(move |context: &EngineContext, _: &CapabilityInvocation| {
+        let call = calls_by_handler.fetch_add(1, Ordering::SeqCst);
+
+        attempts_by_handler
+            .lock()
+            .unwrap()
+            .push(context.operation().attempt_id.clone());
+
+        if call == 0 {
+            Err(CapabilityError::HandlerFailed(
+                "transient failure".to_owned(),
+            ))
+        } else {
+            Ok(CapabilityOutcome::new(b"retry success".to_vec()))
+        }
+    });
+
+    let (registry, _) = registry_with_handler(handler);
+
+    let engine = EngineContext::new(operation_context("runtime-retry-op", "runtime-retry-corr"));
+
+    let first = Attempt::new(
+        OperationId::new("runtime-retry-op").unwrap(),
+        nizaam_core::identity::AttemptId::new("runtime-retry-attempt-1").unwrap(),
+        1,
+    )
+    .unwrap();
+
+    first.start().unwrap();
+
+    let first_context = engine.for_attempt(
+        nizaam_core::identity::NodeId::new("runtime-retry-node").unwrap(),
+        first.attempt_id().clone(),
+    );
+
+    let first_result = dispatch(&registry, &first_context, &invocation);
+
+    assert!(matches!(
+        first_result.as_error(),
+        Some(CapabilityError::HandlerFailed(_))
+    ));
+
+    first.fail().unwrap();
+
+    let second = Attempt::new(
+        OperationId::new("runtime-retry-op").unwrap(),
+        nizaam_core::identity::AttemptId::new("runtime-retry-attempt-2").unwrap(),
+        2,
+    )
+    .unwrap();
+
+    second.start().unwrap();
+
+    let second_context = engine.for_attempt(
+        nizaam_core::identity::NodeId::new("runtime-retry-node").unwrap(),
+        second.attempt_id().clone(),
+    );
+
+    let second_result = dispatch(&registry, &second_context, &invocation);
+
+    assert_eq!(
+        second_result.into_outcome().unwrap().into_bytes(),
+        b"retry success"
+    );
+
+    second.succeed().unwrap();
+
+    assert_eq!(first.state(), AttemptLifecycleState::Failed);
+    assert_eq!(second.state(), AttemptLifecycleState::Succeeded);
+    assert_eq!(first.operation_id(), second.operation_id());
+    assert_ne!(first.attempt_id(), second.attempt_id());
+    assert_eq!(first.attempt_number(), 1);
+    assert_eq!(second.attempt_number(), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    let observed = observed_attempts.lock().unwrap();
+
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[0].as_ref(), Some(first.attempt_id()));
+    assert_eq!(observed[1].as_ref(), Some(second.attempt_id()));
+
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn retry_attempt_context_preserves_runtime_security_provenance_deadline_and_configuration() {
+    let provenance = ProvenanceContext::new()
+        .with_attribute("source", "runtime-retry")
+        .with_attribute("component", "runtime-test");
+
+    let security = SecurityContext::new(
+        user_principal("runtime-retry-user"),
+        Some(service_principal("runtime-retry-service")),
+    );
+
+    let configuration = configuration_snapshot();
+
+    let parent = EngineContext::new(operation_context(
+        "runtime-retry-context-op",
+        "runtime-retry-context-corr",
+    ))
+    .with_security(security.clone())
+    .with_provenance(provenance.clone())
+    .with_deadline(Deadline::from_now(Duration::from_secs(5)).unwrap())
+    .with_configuration(Arc::clone(&configuration));
+
+    let first = parent.for_attempt(
+        nizaam_core::identity::NodeId::new("runtime-retry-node").unwrap(),
+        nizaam_core::identity::AttemptId::new("runtime-retry-context-attempt-1").unwrap(),
+    );
+
+    let second = parent.for_attempt(
+        nizaam_core::identity::NodeId::new("runtime-retry-node").unwrap(),
+        nizaam_core::identity::AttemptId::new("runtime-retry-context-attempt-2").unwrap(),
+    );
+
+    assert_eq!(
+        first.operation().operation.id,
+        second.operation().operation.id
+    );
+    assert_ne!(first.operation().attempt_id, second.operation().attempt_id);
+
+    assert_eq!(first.security(), Some(&security));
+    assert_eq!(second.security(), Some(&security));
+
+    assert_eq!(first.provenance(), &provenance);
+    assert_eq!(second.provenance(), &provenance);
+
+    assert_eq!(first.deadline(), parent.deadline());
+    assert_eq!(second.deadline(), parent.deadline());
+
+    assert_eq!(first.configuration(), Some(configuration.as_ref()));
+    assert_eq!(second.configuration(), Some(configuration.as_ref()));
+}
+
+#[test]
+fn retry_attempts_share_operation_cancellation_authority() {
+    let parent = EngineContext::new(operation_context(
+        "runtime-retry-cancel-op",
+        "runtime-retry-cancel-corr",
+    ));
+
+    let first = parent.for_attempt(
+        nizaam_core::identity::NodeId::new("runtime-retry-node").unwrap(),
+        nizaam_core::identity::AttemptId::new("runtime-retry-cancel-attempt-1").unwrap(),
+    );
+
+    let second = parent.for_attempt(
+        nizaam_core::identity::NodeId::new("runtime-retry-node").unwrap(),
+        nizaam_core::identity::AttemptId::new("runtime-retry-cancel-attempt-2").unwrap(),
+    );
+
+    assert!(!first.cancellation().is_cancelled());
+    assert!(!second.cancellation().is_cancelled());
+
+    parent.cancellation().cancel();
+
+    assert!(parent.cancellation().is_cancelled());
+    assert!(first.cancellation().is_cancelled());
+    assert!(second.cancellation().is_cancelled());
+}
+
+#[test]
+fn retry_attempts_preserve_authenticated_delegation_during_dispatch() {
+    let runtime = serving_runtime();
+
+    let principal = user_principal("runtime-delegated-user");
+    let calling_service = service_principal("runtime-delegated-service");
+
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let observed_by_handler = Arc::clone(&observed);
+
+    let handler = arc_handler(move |context: &EngineContext, _: &CapabilityInvocation| {
+        let security = context
+            .security()
+            .expect("security context must be present");
+
+        observed_by_handler.lock().unwrap().push((
+            context.operation().operation.id.clone(),
+            context.operation().attempt_id.clone(),
+            security.principal().clone(),
+            security.calling_service().cloned(),
+        ));
+
+        Ok(CapabilityOutcome::new(b"delegated".to_vec()))
+    });
+
+    let (registry, capability_id) = registry_with_handler(handler);
+
+    let invocation = CapabilityInvocation::new(
+        capability_id,
+        ContractId::new("runtime.lookup.contract").unwrap(),
+        b"delegated payload".to_vec(),
+    );
+
+    let parent = EngineContext::new(operation_context(
+        "runtime-delegated-op",
+        "runtime-delegated-corr",
+    ))
+    .with_security(SecurityContext::new(
+        principal.clone(),
+        Some(calling_service.clone()),
+    ));
+
+    for attempt_name in ["runtime-delegated-attempt-1", "runtime-delegated-attempt-2"] {
+        let context = parent.for_attempt(
+            nizaam_core::identity::NodeId::new("runtime-delegated-node").unwrap(),
+            nizaam_core::identity::AttemptId::new(attempt_name).unwrap(),
+        );
+
+        let result = dispatch(&registry, &context, &invocation);
+
+        assert_eq!(result.into_outcome().unwrap().into_bytes(), b"delegated");
+    }
+
+    let observed = observed.lock().unwrap();
+
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[0].0.as_str(), "runtime-delegated-op");
+    assert_eq!(observed[1].0.as_str(), "runtime-delegated-op");
+    assert_ne!(observed[0].1, observed[1].1);
+
+    assert_eq!(observed[0].2, principal);
+    assert_eq!(observed[1].2, user_principal("runtime-delegated-user"));
+
+    assert_eq!(observed[0].3, Some(calling_service.clone()));
+    assert_eq!(observed[1].3, Some(calling_service));
+
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn failed_runtime_attempt_can_be_followed_by_success_without_new_operation_identity() {
+    let runtime = serving_runtime();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_by_handler = Arc::clone(&calls);
+
+    let handler = arc_handler(move |_: &EngineContext, _: &CapabilityInvocation| {
+        if calls_by_handler.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err(CapabilityError::HandlerFailed(
+                "first attempt failed".to_owned(),
+            ))
+        } else {
+            Ok(CapabilityOutcome::new(b"second attempt succeeded".to_vec()))
+        }
+    });
+
+    let (registry, capability_id) = registry_with_handler(handler);
+
+    let invocation = CapabilityInvocation::new(
+        capability_id,
+        ContractId::new("runtime.lookup.contract").unwrap(),
+        b"lineage payload".to_vec(),
+    );
+
+    let parent = EngineContext::new(operation_context(
+        "runtime-lineage-op",
+        "runtime-lineage-corr",
+    ));
+
+    let first = Attempt::new(
+        OperationId::new("runtime-lineage-op").unwrap(),
+        nizaam_core::identity::AttemptId::new("runtime-lineage-attempt-1").unwrap(),
+        1,
+    )
+    .unwrap();
+
+    first.start().unwrap();
+
+    let first_context = parent.for_attempt(
+        nizaam_core::identity::NodeId::new("runtime-lineage-node").unwrap(),
+        first.attempt_id().clone(),
+    );
+
+    assert!(matches!(
+        dispatch(&registry, &first_context, &invocation).as_error(),
+        Some(CapabilityError::HandlerFailed(_))
+    ));
+
+    first.fail().unwrap();
+
+    let second = Attempt::new(
+        OperationId::new("runtime-lineage-op").unwrap(),
+        nizaam_core::identity::AttemptId::new("runtime-lineage-attempt-2").unwrap(),
+        2,
+    )
+    .unwrap();
+
+    second.start().unwrap();
+
+    let second_context = parent.for_attempt(
+        nizaam_core::identity::NodeId::new("runtime-lineage-node").unwrap(),
+        second.attempt_id().clone(),
+    );
+
+    assert_eq!(
+        dispatch(&registry, &second_context, &invocation)
+            .into_outcome()
+            .unwrap()
+            .into_bytes(),
+        b"second attempt succeeded"
+    );
+
+    second.succeed().unwrap();
+
+    assert_eq!(first.operation_id(), second.operation_id());
+    assert_eq!(first.attempt_number(), 1);
+    assert_eq!(second.attempt_number(), 2);
+    assert_eq!(first.state(), AttemptLifecycleState::Failed);
+    assert_eq!(second.state(), AttemptLifecycleState::Succeeded);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 
     runtime.shutdown().unwrap();
 }
@@ -707,13 +1128,16 @@ impl Authorizer for RecordingAuthorizer {
             request.calling_service(),
             self.expected_calling_service.as_ref(),
         );
+
         *self.observed.lock().unwrap() = true;
+
         Ok(self.result)
     }
 }
 
 fn response_for_request(request: &UniversalRequest, payload: &[u8]) -> UniversalResponse {
     let mut envelope = request.envelope.clone();
+
     envelope.metadata.descriptor.interaction = Interaction::Response;
     envelope.payload = EncodedPayload::new(
         envelope.metadata.descriptor.payload.clone(),
@@ -734,6 +1158,7 @@ fn service_principal(id: &str) -> PrincipalIdentity {
 #[test]
 fn runtime_request_pipeline_authenticates_authorizes_and_dispatches() {
     let runtime = serving_runtime();
+
     let request = request(
         "runtime-security-happy-msg",
         CAPABILITY,
@@ -745,6 +1170,7 @@ fn runtime_request_pipeline_authenticates_authorizes_and_dispatches() {
     let calling_service = service_principal("runtime-security-service");
 
     let authorization_observed = Arc::new(Mutex::new(false));
+
     let authorizer = RecordingAuthorizer {
         expected_capability: CapabilityId::new(CAPABILITY).unwrap(),
         expected_principal: principal.clone(),
@@ -767,7 +1193,11 @@ fn runtime_request_pipeline_authenticates_authorizes_and_dispatches() {
         .with_security(SecurityContext::new(
             service_principal("initial-caller-placeholder"),
             Some(calling_service.clone()),
-        ));
+        ))
+        .for_attempt(
+            nizaam_core::identity::NodeId::new("runtime-security-node").unwrap(),
+            nizaam_core::identity::AttemptId::new("runtime-security-attempt").unwrap(),
+        );
 
     let mut context = initial_context;
     let mut request = request;
@@ -790,9 +1220,25 @@ fn runtime_request_pipeline_authenticates_authorizes_and_dispatches() {
                 .expect("successful authentication must establish security context");
 
             assert_eq!(security.principal(), &principal_observed_by_downstream);
+
             assert_eq!(
                 security.calling_service(),
                 Some(&calling_service_observed_by_downstream),
+            );
+
+            assert_eq!(
+                context.operation().operation.id.as_str(),
+                "runtime-security-happy-op",
+            );
+
+            assert_eq!(
+                context.operation().attempt_id.as_ref().unwrap().as_str(),
+                "runtime-security-attempt",
+            );
+
+            assert_eq!(
+                context.operation().node_id.as_ref().unwrap().as_str(),
+                "runtime-security-node",
             );
 
             Ok(response_for_request(request, b"secure response"))
@@ -800,6 +1246,7 @@ fn runtime_request_pipeline_authenticates_authorizes_and_dispatches() {
     );
 
     let response = result.expect("authenticated and authorized request must dispatch");
+
     assert_eq!(response.status, Status::Success);
     assert_eq!(response.envelope.payload.bytes(), b"secure response");
     assert!(*authorization_observed.lock().unwrap());
@@ -811,6 +1258,7 @@ fn runtime_request_pipeline_authenticates_authorizes_and_dispatches() {
 #[test]
 fn runtime_request_pipeline_rejects_authentication_failure_before_dispatch() {
     let runtime = serving_runtime();
+
     let request = request(
         "runtime-security-auth-reject-msg",
         CAPABILITY,
@@ -833,8 +1281,13 @@ fn runtime_request_pipeline_rejects_authentication_failure_before_dispatch() {
         },
     );
 
-    let mut context = EngineContext::new(request.envelope.operation_context.clone());
+    let mut context = EngineContext::new(request.envelope.operation_context.clone()).for_attempt(
+        nizaam_core::identity::NodeId::new("runtime-security-node").unwrap(),
+        nizaam_core::identity::AttemptId::new("runtime-security-attempt").unwrap(),
+    );
+
     let mut request = request;
+
     let handler_called = Arc::new(AtomicBool::new(false));
     let handler_called_by_downstream = Arc::clone(&handler_called);
 
@@ -855,6 +1308,7 @@ fn runtime_request_pipeline_rejects_authentication_failure_before_dispatch() {
             nizaam_core::middleware::chain::MiddlewareChainError::Rejected(_)
         ))
     ));
+
     assert!(!handler_called.load(Ordering::SeqCst));
     assert!(context.security().is_none());
 
@@ -864,6 +1318,7 @@ fn runtime_request_pipeline_rejects_authentication_failure_before_dispatch() {
 #[test]
 fn runtime_request_pipeline_fails_on_authentication_subsystem_failure_before_dispatch() {
     let runtime = serving_runtime();
+
     let request = request(
         "runtime-security-auth-fail-msg",
         CAPABILITY,
@@ -886,8 +1341,13 @@ fn runtime_request_pipeline_fails_on_authentication_subsystem_failure_before_dis
         },
     );
 
-    let mut context = EngineContext::new(request.envelope.operation_context.clone());
+    let mut context = EngineContext::new(request.envelope.operation_context.clone()).for_attempt(
+        nizaam_core::identity::NodeId::new("runtime-security-node").unwrap(),
+        nizaam_core::identity::AttemptId::new("runtime-security-attempt").unwrap(),
+    );
+
     let mut request = request;
+
     let handler_called = Arc::new(AtomicBool::new(false));
     let handler_called_by_downstream = Arc::clone(&handler_called);
 
@@ -908,6 +1368,7 @@ fn runtime_request_pipeline_fails_on_authentication_subsystem_failure_before_dis
             nizaam_core::middleware::chain::MiddlewareChainError::Middleware(_)
         ))
     ));
+
     assert!(!handler_called.load(Ordering::SeqCst));
     assert!(context.security().is_none());
 
@@ -917,6 +1378,7 @@ fn runtime_request_pipeline_fails_on_authentication_subsystem_failure_before_dis
 #[test]
 fn runtime_request_pipeline_rejects_authorization_deny_before_dispatch() {
     let runtime = serving_runtime();
+
     let request = request(
         "runtime-security-authz-deny-msg",
         CAPABILITY,
@@ -941,8 +1403,13 @@ fn runtime_request_pipeline_rejects_authorization_deny_before_dispatch() {
         },
     );
 
-    let mut context = EngineContext::new(request.envelope.operation_context.clone());
+    let mut context = EngineContext::new(request.envelope.operation_context.clone()).for_attempt(
+        nizaam_core::identity::NodeId::new("runtime-security-node").unwrap(),
+        nizaam_core::identity::AttemptId::new("runtime-security-attempt").unwrap(),
+    );
+
     let mut request = request;
+
     let handler_called = Arc::new(AtomicBool::new(false));
     let handler_called_by_downstream = Arc::clone(&handler_called);
 
@@ -963,11 +1430,13 @@ fn runtime_request_pipeline_rejects_authorization_deny_before_dispatch() {
             nizaam_core::middleware::chain::MiddlewareChainError::Rejected(_)
         ))
     ));
+
     assert!(!handler_called.load(Ordering::SeqCst));
 
     let security = context
         .security()
         .expect("authentication succeeds before authorization denial");
+
     assert_eq!(
         security.principal(),
         &user_principal("runtime-security-denied-user"),
@@ -979,6 +1448,7 @@ fn runtime_request_pipeline_rejects_authorization_deny_before_dispatch() {
 #[test]
 fn runtime_request_pipeline_fails_on_authorization_subsystem_failure_before_dispatch() {
     let runtime = serving_runtime();
+
     let request = request(
         "runtime-security-authz-fail-msg",
         CAPABILITY,
@@ -1003,8 +1473,13 @@ fn runtime_request_pipeline_fails_on_authorization_subsystem_failure_before_disp
         },
     );
 
-    let mut context = EngineContext::new(request.envelope.operation_context.clone());
+    let mut context = EngineContext::new(request.envelope.operation_context.clone()).for_attempt(
+        nizaam_core::identity::NodeId::new("runtime-security-node").unwrap(),
+        nizaam_core::identity::AttemptId::new("runtime-security-attempt").unwrap(),
+    );
+
     let mut request = request;
+
     let handler_called = Arc::new(AtomicBool::new(false));
     let handler_called_by_downstream = Arc::clone(&handler_called);
 
@@ -1025,11 +1500,13 @@ fn runtime_request_pipeline_fails_on_authorization_subsystem_failure_before_disp
             nizaam_core::middleware::chain::MiddlewareChainError::Middleware(_)
         ))
     ));
+
     assert!(!handler_called.load(Ordering::SeqCst));
 
     let security = context
         .security()
         .expect("authentication succeeds before authorization failure");
+
     assert_eq!(security.principal(), &principal);
 
     runtime.shutdown().unwrap();

@@ -118,10 +118,10 @@ impl LogEvent {
         if self.scope == LogScope::Global && matches!(self.source, LogSource::Engine(_)) {
             return Err(LogValidationError::GlobalEventHasEngineSource);
         }
-        if let LogSource::Engine(source_engine_id) = &self.source {
-            if self.context.engine_id.as_ref() != Some(source_engine_id) {
-                return Err(LogValidationError::SourceContextMismatch);
-            }
+        if let LogSource::Engine(source_engine_id) = &self.source
+            && self.context.engine_id.as_ref() != Some(source_engine_id)
+        {
+            return Err(LogValidationError::SourceContextMismatch);
         }
         if self
             .metadata

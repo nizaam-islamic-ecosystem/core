@@ -2602,6 +2602,8 @@ middleware enforcement, authentication and authorization behavior, security
 context propagation, identity separation, rejection/failure handling,
 concurrent request isolation, and integration with the Phase 8 runtime.
 
+## Checklist
+
 * [x] Implement mandatory request middleware enforcement.
 * [x] Integrate mandatory middleware into the Engine Runtime request boundary.
 * [x] Preserve deterministic request/response middleware ordering.
@@ -3900,6 +3902,8 @@ reference resolution, immutability, publication, retrieval, integrity
 verification, lifecycle transitions, security enforcement, provenance
 relationships, historical provenance behavior, large-content access, and
 Phase 7 transport integration.
+
+## Checklist
 
 * [x] Implement artifact identity and stable `ArtifactId` handling
 * [x] Implement distinct `Artifact`, `ArtifactVersion`, and `ArtifactReference` concepts
@@ -6499,7 +6503,7 @@ task lifecycle, ownership, cancellation, and shutdown integration.
 * `tests/streaming.rs`
 * `tests/concurrency.rs`
 * `tests/tasks.rs`
-* `tests/phase12_end_to_end`
+* `tests/phase12_end_to_end.rs`
 
 Exact filenames may be adjusted if the repository already provides equivalent
 modules. The architectural boundaries defined in this phase must remain.
@@ -6685,6 +6689,27 @@ Transport connection ownership
 ```
 
 Phase 12 must preserve these distinctions throughout implementation.
+
+## Checklist
+
+* [x] Implement application-level ordered streams
+* [x] Implement explicit stream ownership and lifecycle
+* [x] Implement partial/final logical item semantics
+* [x] Implement bounded buffering and backpressure
+* [x] Implement stream cancellation and deadline propagation
+* [x] Implement consumer disappearance handling
+* [x] Preserve logical item ordering
+* [x] Preserve separation between streams and transport frames
+* [x] Implement bounded concurrency configuration and state
+* [x] Implement explicit task ownership and lifecycle
+* [x] Implement task cancellation and failure tracking
+* [x] Implement required/optional task criticality
+* [x] Implement bounded background-task admission
+* [x] Reap completed background-task handles safely
+* [x] Integrate background tasks with runtime shutdown
+* [x] Add unit and integration coverage
+* [x] Preserve previously verified Core behavior
+* [x] Verify the complete repository test suite
 
 ---
 
@@ -17529,19 +17554,79 @@ architecture.
 * Authentication credential material is redacted from `AuthenticationRequest` debug formatting.
 * `EngineServer` records `RequestPipelineError` through the existing Core Logging System before returning the failure response where the communication contract remains usable.
 * The server imports `MiddlewareChainError` from its actual defining module rather than relying on a private re-export.
+* Application-level streaming is distinct from Phase 7 transport fragmentation.
+  Stream items are logical application results; transport frames remain owned by
+  Phase 7.
+* Streams are operation-scoped by default and every active stream has an
+  explicit owner. Independent streams require an explicit ownership and
+  lifecycle contract.
+* Streams reuse the established Core operation context, cancellation, deadline,
+  security, provenance, and correlation mechanisms rather than introducing
+  competing context systems.
+* Streams use a non-reopenable lifecycle:
+  `CREATED → OPEN → COMPLETED | CANCELLED | FAILED`.
+* Logical stream items are ordered and support `PARTIAL` and `FINAL` semantics.
+  The default model uses one logical producer and one logical consumer.
+* Stream buffering is bounded. Backpressure must use an explicit outcome such as
+  waiting, rejection, failure, or cancellation; logical items must not be
+  silently dropped.
+* Consumer disappearance cancels the stream and propagates cancellation to the
+  producer. Cancellation prevents further publication after terminal
+  cancellation.
+* Runtime-managed tasks always have explicit ownership, lifecycle, cancellation,
+  and failure state. Required and optional task criticality remains explicit.
+* Background-task execution is bounded by resource/admission controls and is
+  integrated with runtime shutdown and cleanup.
+* Phase 12 does not introduce retry, idempotency, transport retransmission,
+  durable event infrastructure, a distributed scheduler, or a specific async
+  runtime/executor.
+* Streams and tasks integrate with the existing Phase 8–11 mechanisms without
+  replacing their responsibilities.
 
 ## Open Questions
 
 None currently. Concrete trait signatures, provider choices, serialization, async runtime, transport implementation, and eventual crate splitting are deliberately deferred by the plan rather than unresolved architecture. Phase 7's in-memory transport is a verification implementation of the abstract boundary and does not resolve or authorize a concrete production network transport, serialization provider, or async runtime.
 
-## Current State
+### Current State
 
-Phase 11, **Observability, Health, and Configuration**, is implemented and merged. The Core foundation now extends through Phase 11, providing generic observability mechanisms, operational health reporting, and a controlled configuration pipeline while preserving the previously established Runtime, Security, Artifact, Provenance, Error, Logging, and Context boundaries.
+Phase 12 is implemented and verified.
 
-The implementation includes configuration loading/parsing/validation/resolution, immutable snapshots and atomic updates; health liveness/readiness/dependency/capability aggregation; and structured metrics, tracing, diagnostics, and correlation integration. These systems remain independent rather than being merged into lifecycle, security, logging, or domain behavior.
+The Core now provides:
 
-The latest full library test run contains **800 tests**, with the reported failure resolved by correcting stopped-lifecycle health aggregation; the earlier run showed 799 passing and one failing specifically because `Stopped` was incorrectly aggregated as `Healthy`.
+* application-level ordered streams;
+* stream lifecycle, ownership, cancellation, deadlines, and backpressure;
+* bounded concurrency state and configuration;
+* runtime-managed task lifecycle, ownership, cancellation, and failure tracking;
+* bounded background-task admission and execution;
+* background-task shutdown and cleanup integration; and
+* integration of streams and tasks with the existing Core runtime and context
+  mechanisms.
 
-## Next Step
+Phase 12 remains within its defined architectural boundary and does not replace
+transport framing, retry/idempotency, events, Control Plane routing, or other
+later-phase mechanisms.
 
-Proceed to **Phase 12: Streaming, Concurrency, and Background Tasks**, building on the Phase 11 health and configuration foundations while preserving the existing separation between transport fragmentation and application-level streaming. Phase 12 owns logical streaming, stream lifecycle, ordering, buffering, backpressure, stream cancellation, resource behavior, bounded concurrency, and advanced background-task scheduling; it must not replace the mechanisms already established in Phases 5, 8, 9, 10, or 11.  
+### Next Step
+
+Proceed to Phase 13: Retry and Idempotency.
+
+Phase 13 will build on the completed operation, error, runtime, streaming,
+artifact, security, configuration, and observability foundations to add:
+
+* attempt tracking and attempt lifecycle;
+* retryability evaluation and retry policy enforcement;
+* bounded backoff and jitter;
+* retry limits and retry/resource budgets;
+* idempotency keys and idempotency state;
+* duplicate detection and completed-duplicate handling;
+* unknown-outcome handling;
+* retry safety evaluation for side-effecting operations;
+* preservation of operation identity across attempts;
+* cancellation and deadline propagation across retries;
+* safe integration with streaming and artifact outputs; and
+* retry/runtime resource-control integration.
+
+Retry must create a new attempt under the same logical operation and must not
+bypass the resource, cancellation, security, configuration, streaming, or
+artifact
+boundaries already established by earlier phases.

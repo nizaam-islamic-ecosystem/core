@@ -12,7 +12,10 @@
 //! Nothing here interprets engine payload meaning. Payloads are opaque bytes
 //! and are only ever compared for byte equality.
 
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{
+    Arc, Condvar, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use nizaam_core::client::UniversalClient;
 use nizaam_core::client::connection::{
@@ -27,6 +30,7 @@ use nizaam_core::identity::{
     NodeId, OperationId, PlanId,
 };
 use nizaam_core::operation::{Operation, OperationContext};
+use nizaam_core::retry::{FailureCategory, RetryDecision, RetryPolicy};
 use nizaam_core::runtime::{EngineContext, ExecutionPipeline};
 use nizaam_core::security::{
     AuthenticationError, AuthenticationRequest, Authenticator, AuthorizationDecision,
@@ -34,7 +38,7 @@ use nizaam_core::security::{
     PrincipalIdentity, PrincipalType, SecurityMiddleware,
 };
 use nizaam_core::server::{EngineServer, RequestHandler, ServerState, handle_request};
-use nizaam_core::status::Status;
+use nizaam_core::status::{Retryability, Status};
 use nizaam_core::transport::stream::{ByteSourceState, MAX_FRAME_LENGTH};
 use nizaam_core::transport::{
     BoxedFuture, ByteSink, ByteSource, Connection, ConnectionState, InMemoryTransport,
@@ -86,6 +90,42 @@ fn request_for(
         OperationId::new("op-1").unwrap(),
         CorrelationId::new("corr-1").unwrap(),
     ));
+
+    request_with(
+        message_id,
+        capability,
+        payload,
+        participants,
+        operation_context,
+    )
+}
+
+/// Identity fields shared by requests belonging to one execution attempt.
+#[derive(Clone, Copy)]
+struct AttemptRequestIdentity<'a> {
+    operation_id: &'a str,
+    correlation_id: &'a str,
+    node_id: &'a str,
+    attempt_id: &'a str,
+}
+
+/// Builds a universal request carrying an explicit node and execution attempt.
+fn request_for_attempt(
+    target: &EngineId,
+    message_id: &str,
+    capability: &str,
+    payload: &[u8],
+    identity: AttemptRequestIdentity<'_>,
+) -> UniversalRequest {
+    let participants = Participants::new(EngineId::new("caller-engine").unwrap(), target.clone());
+    let operation_context = OperationContext::new(Operation::new(
+        OperationId::new(identity.operation_id).unwrap(),
+        CorrelationId::new(identity.correlation_id).unwrap(),
+    ))
+    .for_attempt(
+        NodeId::new(identity.node_id).unwrap(),
+        AttemptId::new(identity.attempt_id).unwrap(),
+    );
 
     request_with(
         message_id,
@@ -477,14 +517,27 @@ fn client_request_reaches_engine_server_and_returns_universal_response() {
     expose(&transport, &engine, &server);
 
     let client = UniversalClient::new(transport);
-    let request = request_for(&engine, "msg-1", CAPABILITY, b"opaque request");
+    let request = request_for_attempt(
+        &engine,
+        "msg-1",
+        CAPABILITY,
+        b"opaque request",
+        AttemptRequestIdentity {
+            operation_id: "communication-op-1",
+            correlation_id: "communication-corr-1",
+            node_id: "communication-node-1",
+            attempt_id: "communication-attempt-1",
+        },
+    );
     assert!(request.has_request_interaction());
 
+    let expected_context = request.envelope.operation_context.clone();
     let response = call(&client, &engine, request);
 
     assert_eq!(response.status, Status::Success);
     assert_eq!(response.envelope.message_id.as_str(), "msg-1");
     assert_eq!(response.envelope.payload.bytes(), b"opaque request");
+    assert_eq!(response.envelope.operation_context, expected_context);
 }
 
 #[test]
@@ -680,7 +733,18 @@ fn large_logical_payload_round_trips_through_client_and_server() {
     let response = call(
         &client,
         &engine,
-        request_for(&engine, "msg-bulk", CAPABILITY, &payload),
+        request_for_attempt(
+            &engine,
+            "msg-bulk",
+            CAPABILITY,
+            &payload,
+            AttemptRequestIdentity {
+                operation_id: "communication-bulk-op",
+                correlation_id: "communication-bulk-corr",
+                node_id: "communication-bulk-node",
+                attempt_id: "communication-bulk-attempt",
+            },
+        ),
     );
 
     assert_eq!(response.status, Status::Success);
@@ -737,6 +801,15 @@ fn request_to_unregistered_engine_reports_a_retryable_disconnect() {
     assert_eq!(error, TransportError::Disconnected);
     assert!(error.is_retryable());
     assert_eq!(error.to_string(), "transport is not connected");
+
+    let policy = RetryPolicy::new(2, 3)
+        .unwrap()
+        .with_retryable_category(FailureCategory::Transport);
+
+    assert_eq!(
+        policy.evaluate(FailureCategory::Transport, Retryability::Retryable, 1,),
+        RetryDecision::Permitted
+    );
 }
 
 #[test]
@@ -1307,6 +1380,211 @@ fn fragmented_logical_message_travels_as_separate_transport_frames() {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 13: retry lineage across client/server transport
+// ---------------------------------------------------------------------------
+
+#[test]
+fn retry_attempts_survive_client_server_transport_round_trip() {
+    let transport = InMemoryTransport::new();
+    let engine = EngineId::new("retry-lineage-engine").unwrap();
+
+    let observed: Arc<Mutex<Vec<OperationContext>>> = Arc::new(Mutex::new(Vec::new()));
+    let observed_in_handler = Arc::clone(&observed);
+
+    let handler: RequestHandler = Arc::new(move |request: UniversalRequest| {
+        observed_in_handler
+            .lock()
+            .expect("observation lock")
+            .push(request.envelope.operation_context.clone());
+        response_for(request, Status::Success, b"ok".to_vec())
+    });
+
+    let server = serving_engine(&engine, CAPABILITY, handler);
+    expose(&transport, &engine, &server);
+
+    let client = UniversalClient::new(transport);
+
+    let first = request_for_attempt(
+        &engine,
+        "retry-message-1",
+        CAPABILITY,
+        b"retry payload",
+        AttemptRequestIdentity {
+            operation_id: "retry-transport-op",
+            correlation_id: "retry-transport-corr",
+            node_id: "retry-transport-node",
+            attempt_id: "retry-transport-attempt-1",
+        },
+    );
+    let second = request_for_attempt(
+        &engine,
+        "retry-message-2",
+        CAPABILITY,
+        b"retry payload",
+        AttemptRequestIdentity {
+            operation_id: "retry-transport-op",
+            correlation_id: "retry-transport-corr",
+            node_id: "retry-transport-node",
+            attempt_id: "retry-transport-attempt-2",
+        },
+    );
+
+    let expected_first = first.envelope.operation_context.clone();
+    let expected_second = second.envelope.operation_context.clone();
+
+    let first_response = call(&client, &engine, first);
+    let second_response = call(&client, &engine, second);
+
+    assert_eq!(first_response.status, Status::Success);
+    assert_eq!(second_response.status, Status::Success);
+
+    let observed = observed.lock().expect("observation lock");
+
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[0], expected_first);
+    assert_eq!(observed[1], expected_second);
+    assert_eq!(observed[0].operation.id, observed[1].operation.id);
+    assert_ne!(observed[0].attempt_id, observed[1].attempt_id);
+    assert_eq!(observed[0].node_id, observed[1].node_id);
+}
+
+#[test]
+fn retry_attempts_can_cross_transport_after_an_initial_failure() {
+    let transport = InMemoryTransport::new();
+    let engine = EngineId::new("retry-failure-engine").unwrap();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_in_handler = Arc::clone(&calls);
+
+    let handler: RequestHandler = Arc::new(move |request: UniversalRequest| {
+        let call_number = calls_in_handler.fetch_add(1, Ordering::SeqCst);
+
+        if call_number == 0 {
+            response_for(request, Status::Failure, b"first attempt failed".to_vec())
+        } else {
+            response_for(
+                request,
+                Status::Success,
+                b"second attempt succeeded".to_vec(),
+            )
+        }
+    });
+
+    let server = serving_engine(&engine, CAPABILITY, handler);
+    expose(&transport, &engine, &server);
+
+    let client = UniversalClient::new(transport);
+
+    let first = call(
+        &client,
+        &engine,
+        request_for_attempt(
+            &engine,
+            "retry-failure-message-1",
+            CAPABILITY,
+            b"retry payload",
+            AttemptRequestIdentity {
+                operation_id: "retry-failure-op",
+                correlation_id: "retry-failure-corr",
+                node_id: "retry-failure-node",
+                attempt_id: "retry-failure-attempt-1",
+            },
+        ),
+    );
+
+    assert_eq!(first.status, Status::Failure);
+    assert_eq!(first.envelope.payload.bytes(), b"first attempt failed");
+
+    let second = call(
+        &client,
+        &engine,
+        request_for_attempt(
+            &engine,
+            "retry-failure-message-2",
+            CAPABILITY,
+            b"retry payload",
+            AttemptRequestIdentity {
+                operation_id: "retry-failure-op",
+                correlation_id: "retry-failure-corr",
+                node_id: "retry-failure-node",
+                attempt_id: "retry-failure-attempt-2",
+            },
+        ),
+    );
+
+    assert_eq!(second.status, Status::Success);
+    assert_eq!(second.envelope.payload.bytes(), b"second attempt succeeded");
+    assert_eq!(
+        first.envelope.operation_context.operation.id,
+        second.envelope.operation_context.operation.id
+    );
+    assert_ne!(
+        first.envelope.operation_context.attempt_id,
+        second.envelope.operation_context.attempt_id
+    );
+    assert_ne!(first.envelope.message_id, second.envelope.message_id);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn retryable_disconnect_can_be_followed_by_a_new_attempt() {
+    let transport = InMemoryTransport::new();
+    let engine = EngineId::new("late-connected-engine").unwrap();
+    let client = UniversalClient::new(transport.clone());
+
+    let first_result = futures::executor::block_on(client.send(
+        &engine,
+        request_for_attempt(
+            &engine,
+            "late-message-1",
+            CAPABILITY,
+            b"retry after disconnect",
+            AttemptRequestIdentity {
+                operation_id: "late-retry-op",
+                correlation_id: "late-retry-corr",
+                node_id: "late-retry-node",
+                attempt_id: "late-retry-attempt-1",
+            },
+        ),
+    ));
+
+    let first_error = first_result.expect_err("the first attempt must fail to connect");
+    assert_eq!(first_error, TransportError::Disconnected);
+    assert!(first_error.is_retryable());
+
+    let server = serving_engine(&engine, CAPABILITY, echo_handler(Status::Success));
+    expose(&transport, &engine, &server);
+
+    let second = call(
+        &client,
+        &engine,
+        request_for_attempt(
+            &engine,
+            "late-message-2",
+            CAPABILITY,
+            b"retry after disconnect",
+            AttemptRequestIdentity {
+                operation_id: "late-retry-op",
+                correlation_id: "late-retry-corr",
+                node_id: "late-retry-node",
+                attempt_id: "late-retry-attempt-2",
+            },
+        ),
+    );
+
+    assert_eq!(second.status, Status::Success);
+    assert_eq!(second.envelope.payload.bytes(), b"retry after disconnect");
+    assert_eq!(
+        second.envelope.operation_context.operation.id.as_str(),
+        "late-retry-op"
+    );
+    assert_eq!(
+        second.envelope.operation_context.attempt_id,
+        Some(AttemptId::new("late-retry-attempt-2").unwrap())
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Client connection abstraction
 // ---------------------------------------------------------------------------
 
@@ -1356,6 +1634,77 @@ fn connection_factory_refuses_unregistered_engines() {
             panic!("connecting to an unregistered engine must fail");
         }
     }
+}
+
+#[test]
+fn client_connection_preserves_attempt_lineage_across_sequential_calls() {
+    let transport = InMemoryTransport::new();
+    let engine = EngineId::new("connection-retry-engine").unwrap();
+
+    let observed: Arc<Mutex<Vec<OperationContext>>> = Arc::new(Mutex::new(Vec::new()));
+    let observed_in_handler = Arc::clone(&observed);
+
+    let handler: RequestHandler = Arc::new(move |request: UniversalRequest| {
+        observed_in_handler
+            .lock()
+            .expect("observation lock")
+            .push(request.envelope.operation_context.clone());
+        response_for(request, Status::Success, b"connection-ok".to_vec())
+    });
+
+    let server = serving_engine(&engine, CAPABILITY, handler);
+    expose(&transport, &engine, &server);
+
+    let factory = InMemoryConnectionFactory {
+        transport: transport.clone(),
+    };
+
+    let connection = futures::executor::block_on(factory.connect(&engine))
+        .expect("connecting to a registered engine must succeed");
+
+    let first = request_for_attempt(
+        &engine,
+        "connection-retry-message-1",
+        CAPABILITY,
+        b"connection retry",
+        AttemptRequestIdentity {
+            operation_id: "connection-retry-op",
+            correlation_id: "connection-retry-corr",
+            node_id: "connection-retry-node",
+            attempt_id: "connection-retry-attempt-1",
+        },
+    );
+    let second = request_for_attempt(
+        &engine,
+        "connection-retry-message-2",
+        CAPABILITY,
+        b"connection retry",
+        AttemptRequestIdentity {
+            operation_id: "connection-retry-op",
+            correlation_id: "connection-retry-corr",
+            node_id: "connection-retry-node",
+            attempt_id: "connection-retry-attempt-2",
+        },
+    );
+
+    let first_context = first.envelope.operation_context.clone();
+    let second_context = second.envelope.operation_context.clone();
+
+    let first_response = futures::executor::block_on(connection.call(first))
+        .expect("the first connection call must succeed");
+    let second_response = futures::executor::block_on(connection.call(second))
+        .expect("the second connection call must succeed");
+
+    assert_eq!(first_response.status, Status::Success);
+    assert_eq!(second_response.status, Status::Success);
+
+    let observed = observed.lock().expect("observation lock");
+
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[0], first_context);
+    assert_eq!(observed[1], second_context);
+    assert_eq!(observed[0].operation.id, observed[1].operation.id);
+    assert_ne!(observed[0].attempt_id, observed[1].attempt_id);
 }
 
 #[test]

@@ -199,16 +199,16 @@ impl EngineRuntime {
             std::panic::resume_unwind(payload);
         }
 
-        if self.state() != LifecycleState::Stopped {
-            if let Err(error) = self.transition_lifecycle(LifecycleState::Stopped) {
-                let mut shutdown_state = self
-                    .shutdown_state
-                    .lock()
-                    .expect("shutdown state lock poisoned");
-                *shutdown_state = ShutdownState::NotStarted;
-                self.shutdown_complete.notify_all();
-                return Err(error);
-            }
+        if self.state() != LifecycleState::Stopped
+            && let Err(error) = self.transition_lifecycle(LifecycleState::Stopped)
+        {
+            let mut shutdown_state = self
+                .shutdown_state
+                .lock()
+                .expect("shutdown state lock poisoned");
+            *shutdown_state = ShutdownState::NotStarted;
+            self.shutdown_complete.notify_all();
+            return Err(error);
         }
 
         let mut shutdown_state = self

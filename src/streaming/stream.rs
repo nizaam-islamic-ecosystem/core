@@ -127,6 +127,7 @@ struct StreamState<T> {
     sequence_exhausted: bool,
     consumer_attached: bool,
     live_producers: usize,
+    externally_observable: bool,
 }
 
 struct StreamInner<T> {
@@ -160,6 +161,7 @@ impl<T> StreamInner<T> {
                 sequence_exhausted: false,
                 consumer_attached: false,
                 live_producers: 1,
+                externally_observable: false,
             }),
             changed: Condvar::new(),
         })
@@ -267,6 +269,19 @@ impl<T> Stream<T> {
     /// Returns this stream's execution context.
     pub fn context(&self) -> &StreamContext {
         &self.inner.context
+    }
+
+    /// Returns whether a stream item has been externally observed by the
+    /// logical consumer.
+    ///
+    /// Publication into the internal queue does not make an item externally
+    /// observable. The flag becomes `true` only when [`StreamConsumer::next_item`]
+    /// successfully returns an item to the consumer, and it remains `true`
+    /// thereafter. Retry safety may use this fact to distinguish a failed
+    /// attempt before observable output from one that already exposed output.
+    pub fn has_observable_output(&self) -> bool {
+        let state = self.inner.lock();
+        state.externally_observable
     }
 
     /// Returns the configured backpressure policy.
@@ -524,6 +539,7 @@ impl<T> StreamConsumer<T> {
         loop {
             if let Some(item) = state.queue.pop_front() {
                 state.backpressure.pop()?;
+                state.externally_observable = true;
                 self.inner.changed.notify_all();
                 return Ok(Some(item));
             }
@@ -759,6 +775,98 @@ mod tests {
     }
 
     #[test]
+    fn new_stream_has_no_observable_output() {
+        let stream = stream(2, BackpressurePolicy::Reject);
+
+        assert!(!stream.has_observable_output());
+    }
+
+    #[test]
+    fn publishing_without_consumption_is_not_externally_observable() {
+        let stream = stream(2, BackpressurePolicy::Reject);
+        stream.open().unwrap();
+
+        stream.publish(StreamItem::partial(0, 10)).unwrap();
+
+        assert!(!stream.has_observable_output());
+    }
+
+    #[test]
+    fn consuming_an_item_marks_stream_output_as_observable() {
+        let stream = stream(2, BackpressurePolicy::Reject);
+        stream.open().unwrap();
+        let consumer = stream.consumer().unwrap();
+
+        stream.publish(StreamItem::partial(0, 10)).unwrap();
+        assert!(!stream.has_observable_output());
+
+        assert_eq!(consumer.next_item().unwrap().unwrap().payload(), &10);
+        assert!(stream.has_observable_output());
+    }
+
+    #[test]
+    fn observable_output_survives_cancellation_of_buffered_item() {
+        let stream = stream(2, BackpressurePolicy::Reject);
+        stream.open().unwrap();
+        let consumer = stream.consumer().unwrap();
+
+        stream.publish(StreamItem::partial(0, 10)).unwrap();
+        stream.cancel().unwrap();
+
+        assert!(!stream.has_observable_output());
+        assert_eq!(consumer.next_item().unwrap().unwrap().payload(), &10);
+        assert!(stream.has_observable_output());
+    }
+
+    #[test]
+    fn observable_output_survives_failure_of_buffered_item() {
+        let stream = stream(2, BackpressurePolicy::Reject);
+        stream.open().unwrap();
+        let consumer = stream.consumer().unwrap();
+
+        stream.publish(StreamItem::partial(0, 10)).unwrap();
+        stream.fail().unwrap();
+
+        assert!(!stream.has_observable_output());
+        assert_eq!(consumer.next_item().unwrap().unwrap().payload(), &10);
+        assert!(stream.has_observable_output());
+    }
+
+    #[test]
+    fn observable_output_remains_true_after_multiple_items() {
+        let stream = stream(3, BackpressurePolicy::Reject);
+        stream.open().unwrap();
+        let consumer = stream.consumer().unwrap();
+
+        stream.publish(StreamItem::partial(0, 10)).unwrap();
+        stream.publish(StreamItem::partial(1, 20)).unwrap();
+        stream.publish(StreamItem::final_item(2, 30)).unwrap();
+
+        assert!(!stream.has_observable_output());
+
+        assert_eq!(consumer.next_item().unwrap().unwrap().payload(), &10);
+        assert!(stream.has_observable_output());
+
+        assert_eq!(consumer.next_item().unwrap().unwrap().payload(), &20);
+        assert!(stream.has_observable_output());
+
+        assert_eq!(consumer.next_item().unwrap().unwrap().payload(), &30);
+        assert!(stream.has_observable_output());
+    }
+
+    #[test]
+    fn empty_stream_completion_does_not_make_output_observable() {
+        let stream = stream(2, BackpressurePolicy::Reject);
+        stream.open().unwrap();
+        let consumer = stream.consumer().unwrap();
+
+        stream.complete().unwrap();
+
+        assert_eq!(consumer.next_item().unwrap(), None);
+        assert!(!stream.has_observable_output());
+    }
+
+    #[test]
     fn explicit_completion_supports_empty_streams() {
         let stream = stream(2, BackpressurePolicy::Reject);
         stream.open().unwrap();
@@ -782,6 +890,7 @@ mod tests {
                 actual: 1
             })
         );
+
         stream.publish(StreamItem::partial(0, 20)).unwrap();
 
         assert_eq!(consumer.next_item().unwrap().unwrap().payload(), &20);

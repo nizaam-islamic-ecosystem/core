@@ -27,8 +27,8 @@ Implementation began with an existing Cargo library skeleton at the repository r
 | 8  | Engine Runtime                               | 8     | verified    |
 | 9  | Middleware and Security                      | 9     | verified    |
 | 10 | Artifact and Provenance                      | 10    | verified    |
-| 11 | Observability, Health, Configuration         | 11    | in progress |
-| 12 | Streaming, Concurrency, Background Tasks     | 12    | not started |
+| 11 | Observability, Health, Configuration         | 11    | verified    |
+| 12 | Streaming, Concurrency, Background Tasks     | 12    | verified    |
 | 13 | Retry and Idempotency                        | 13    | not started |
 | 14 | Internal Events                              | 14    | not started |
 | 15 | Control Plane                                | 15    | not started |
@@ -6499,7 +6499,7 @@ task lifecycle, ownership, cancellation, and shutdown integration.
 * `tests/streaming.rs`
 * `tests/concurrency.rs`
 * `tests/tasks.rs`
-* `tests/integration.rs`
+* `tests/phase12_end_to_end`
 
 Exact filenames may be adjusted if the repository already provides equivalent
 modules. The architectural boundaries defined in this phase must remain.

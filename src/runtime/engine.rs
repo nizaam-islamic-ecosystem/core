@@ -3,6 +3,7 @@ use std::sync::{Condvar, Mutex};
 use super::{
     CancellationToken,
     background::BackgroundTasks,
+    concurrency::ConcurrencyConfig,
     lifecycle::{Lifecycle, LifecycleState},
 };
 use crate::error::InvalidTransition;
@@ -44,6 +45,22 @@ impl EngineRuntime {
         Self {
             lifecycle: Mutex::new(Lifecycle::new()),
             background: BackgroundTasks::new(shutdown.clone()),
+            shutdown,
+            shutdown_state: Mutex::new(ShutdownState::NotStarted),
+            shutdown_complete: Condvar::new(),
+        }
+    }
+
+    /// Creates a new runtime with bounded managed background-task admission.
+    ///
+    /// The existing [`Self::new`] constructor remains unchanged for callers
+    /// that do not need bounded runtime-task admission.
+    pub fn with_concurrency(config: ConcurrencyConfig) -> Self {
+        let shutdown = CancellationToken::new();
+
+        Self {
+            lifecycle: Mutex::new(Lifecycle::new()),
+            background: BackgroundTasks::with_concurrency(shutdown.clone(), config),
             shutdown,
             shutdown_state: Mutex::new(ShutdownState::NotStarted),
             shutdown_complete: Condvar::new(),
@@ -215,6 +232,7 @@ impl Drop for EngineRuntime {
 mod tests {
     use super::EngineRuntime;
     use crate::error::InvalidTransition;
+    use crate::runtime::concurrency::ConcurrencyConfig;
     use crate::runtime::lifecycle::LifecycleState;
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -240,6 +258,26 @@ mod tests {
 
         assert!(runtime.shutdown().unwrap());
 
+        assert_eq!(runtime.state(), LifecycleState::Stopped);
+        assert!(runtime.shutdown_token().is_cancelled());
+    }
+
+    #[test]
+    fn configured_runtime_preserves_lifecycle_and_shutdown_behavior() {
+        let runtime = EngineRuntime::with_concurrency(ConcurrencyConfig::new(1, 1).unwrap());
+
+        assert_eq!(runtime.state(), LifecycleState::Created);
+        assert!(!runtime.shutdown_token().is_cancelled());
+
+        runtime.transition(LifecycleState::Starting).unwrap();
+        runtime.transition(LifecycleState::Configuring).unwrap();
+        runtime.transition(LifecycleState::Dependencies).unwrap();
+        runtime.transition(LifecycleState::Capabilities).unwrap();
+        runtime.transition(LifecycleState::Registering).unwrap();
+        runtime.transition(LifecycleState::Ready).unwrap();
+        runtime.transition(LifecycleState::Serving).unwrap();
+
+        assert!(runtime.shutdown().unwrap());
         assert_eq!(runtime.state(), LifecycleState::Stopped);
         assert!(runtime.shutdown_token().is_cancelled());
     }

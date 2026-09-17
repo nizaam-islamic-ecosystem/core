@@ -304,6 +304,7 @@ fn cancellation_race_prevents_post_terminal_publication() {
     let stream: Stream<u32> = stream(1, BackpressurePolicy::Wait);
     stream.open().unwrap();
     let _consumer = stream.consumer().unwrap();
+    stream.publish(StreamItem::partial(0, 10)).unwrap();
 
     let producer = stream.clone();
     let (ready_tx, ready_rx) = mpsc::channel();
@@ -312,7 +313,7 @@ fn cancellation_race_prevents_post_terminal_publication() {
     let handle = thread::spawn(move || {
         ready_tx.send(()).unwrap();
         result_tx
-            .send(producer.publish(StreamItem::partial(0, 10)))
+            .send(producer.publish(StreamItem::partial(1, 20)))
             .unwrap();
     });
 

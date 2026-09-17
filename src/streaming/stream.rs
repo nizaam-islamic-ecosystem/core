@@ -126,6 +126,7 @@ struct StreamState<T> {
     next_sequence: u64,
     sequence_exhausted: bool,
     consumer_attached: bool,
+    live_producers: usize,
 }
 
 struct StreamInner<T> {
@@ -158,6 +159,7 @@ impl<T> StreamInner<T> {
                 next_sequence: 0,
                 sequence_exhausted: false,
                 consumer_attached: false,
+                live_producers: 1,
             }),
             changed: Condvar::new(),
         })
@@ -209,9 +211,20 @@ impl<T> StreamInner<T> {
 }
 
 /// A bounded application-level stream of logical items.
-#[derive(Clone)]
 pub struct Stream<T> {
     inner: Arc<StreamInner<T>>,
+}
+
+impl<T> Clone for Stream<T> {
+    fn clone(&self) -> Self {
+        let mut state = self.inner.lock();
+        state.live_producers += 1;
+        drop(state);
+
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
 }
 
 impl<T> std::fmt::Debug for Stream<T> {
@@ -429,6 +442,7 @@ impl<T> Stream<T> {
             StreamLifecycleState::Created => Err(StreamError::NotOpen),
             StreamLifecycleState::Open => {
                 state.lifecycle.transition(StreamLifecycleState::Failed)?;
+                self.inner.context.cancellation().cancel();
                 self.inner.changed.notify_all();
                 Ok(())
             }
@@ -464,6 +478,20 @@ impl<T> Stream<T> {
         Ok(StreamConsumer {
             inner: Arc::clone(&self.inner),
         })
+    }
+}
+
+impl<T> Drop for Stream<T> {
+    fn drop(&mut self) {
+        let mut state = self.inner.lock();
+        debug_assert!(state.live_producers > 0);
+        state.live_producers -= 1;
+
+        if state.live_producers == 0 && state.lifecycle.state() == StreamLifecycleState::Open {
+            self.inner.context.cancellation().cancel();
+            let _ = state.lifecycle.transition(StreamLifecycleState::Failed);
+            self.inner.changed.notify_all();
+        }
     }
 }
 
@@ -605,6 +633,44 @@ mod tests {
         );
         assert_eq!(stream.capacity(), 2);
         assert_eq!(stream.backpressure_policy(), BackpressurePolicy::Reject);
+    }
+
+    #[test]
+    fn stream_clone_does_not_require_payload_clone() {
+        struct NonClonePayload;
+
+        let engine = context();
+        let stream: Stream<NonClonePayload> = Stream::new(
+            &engine,
+            BackpressureConfig::new(1, BackpressurePolicy::Reject).unwrap(),
+        )
+        .unwrap();
+        let clone = stream.clone();
+
+        assert_eq!(stream.id(), clone.id());
+    }
+
+    #[test]
+    fn dropping_last_producer_fails_open_stream_and_wakes_consumer() {
+        let stream = stream(1, BackpressurePolicy::Wait);
+        stream.open().unwrap();
+        let consumer = stream.consumer().unwrap();
+
+        drop(stream);
+
+        assert_eq!(consumer.next_item(), Err(StreamError::Failed));
+    }
+
+    #[test]
+    fn stream_failure_cancels_its_context() {
+        let stream = stream(1, BackpressurePolicy::Reject);
+        stream.open().unwrap();
+        let task_scope = crate::runtime::TaskScope::new(stream.context().cancellation());
+
+        stream.fail().unwrap();
+
+        assert!(task_scope.is_cancelled());
+        assert_eq!(stream.state(), StreamLifecycleState::Failed);
     }
 
     #[test]
@@ -871,7 +937,7 @@ mod tests {
 
     #[test]
     fn deadline_expiration_cancels_waiting_producer() {
-        let deadline = crate::runtime::Deadline::from_now(Duration::from_millis(30)).unwrap();
+        let deadline = crate::runtime::Deadline::from_now(Duration::from_millis(250)).unwrap();
         let engine = context().with_deadline(deadline);
         let stream = Stream::new(
             &engine,

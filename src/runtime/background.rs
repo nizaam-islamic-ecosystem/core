@@ -159,6 +159,28 @@ impl BackgroundTasks {
             return Err(BoundedSpawnError::Closed);
         }
 
+        let handles = std::mem::take(&mut state.handles);
+        let mut completed_handles = Vec::new();
+        for handle in handles {
+            if handle.is_finished() {
+                completed_handles.push(handle);
+            } else {
+                state.handles.push(handle);
+            }
+        }
+
+        let mut panic_payload = None;
+        for handle in completed_handles {
+            if let Err(payload) = handle.join() {
+                panic_payload.get_or_insert(payload);
+            }
+        }
+
+        if let Some(payload) = panic_payload {
+            drop(state);
+            std::panic::resume_unwind(payload);
+        }
+
         {
             let mut occupancy = concurrency
                 .lock()
@@ -206,31 +228,8 @@ impl BackgroundTasks {
             }
         };
 
-        let mut retained_handles = Vec::with_capacity(state.handles.len() + 1);
-        let mut completed_handles = Vec::new();
-
-        for existing in state.handles.drain(..) {
-            if existing.is_finished() {
-                completed_handles.push(existing);
-            } else {
-                retained_handles.push(existing);
-            }
-        }
-
-        let mut panic_payload = None;
-        for existing in completed_handles {
-            if let Err(payload) = existing.join() {
-                panic_payload.get_or_insert(payload);
-            }
-        }
-
-        retained_handles.push(handle);
-        state.handles = retained_handles;
+        state.handles.push(handle);
         drop(state);
-
-        if let Some(payload) = panic_payload {
-            std::panic::resume_unwind(payload);
-        }
 
         Ok(())
     }
@@ -568,6 +567,12 @@ mod tests {
         finished_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("bounded task did not finish");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while tasks.active_count() != 0 && std::time::Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(tasks.active_count(), 0);
 
         tasks.spawn_bounded(|_| {}).unwrap();
 

@@ -319,7 +319,9 @@ impl Task {
         let mut state = self.state.lock().expect("task state lock poisoned");
         self.synchronize_cancellation(&mut state);
         state.lifecycle.transition(TaskLifecycleState::Failed)?;
-        state.failure = Some(failure.into());
+        if state.failure.is_none() {
+            state.failure = Some(failure.into());
+        }
         Ok(())
     }
 
@@ -508,6 +510,18 @@ mod tests {
 
         assert_eq!(task.state(), TaskLifecycleState::Failed);
         assert_eq!(task.failure().as_deref(), Some("worker failed"));
+    }
+
+    #[test]
+    fn repeated_task_failure_preserves_first_failure_detail() {
+        let task = Task::new(TaskOwner::engine(), scope(), TaskCriticality::Required);
+
+        task.start().unwrap();
+        task.fail("first failure").unwrap();
+        task.fail("second failure").unwrap();
+
+        assert_eq!(task.state(), TaskLifecycleState::Failed);
+        assert_eq!(task.failure().as_deref(), Some("first failure"));
     }
 
     #[test]

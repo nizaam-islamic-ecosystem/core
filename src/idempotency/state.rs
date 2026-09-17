@@ -16,6 +16,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::idempotency::key::IdempotencyIdentity;
 use crate::idempotency::record::{IdempotencyRecord, RecordedOutcome};
+use crate::status::Status;
 
 /// Logical state of an idempotent submission.
 ///
@@ -171,6 +172,10 @@ pub enum IdempotencyStateError {
     /// An `InFlight` or `Unknown` record cannot carry a final recorded outcome
     /// or result reference.
     InvalidInFlightMetadata(IdempotencyState),
+    /// A terminal idempotency state must carry a matching recorded outcome.
+    InvalidTerminalMetadata(IdempotencyState),
+    /// An in-flight or unknown logical action cannot be removed from the store.
+    RemovalNotAllowed(IdempotencyState),
 }
 
 impl std::fmt::Display for IdempotencyStateError {
@@ -187,6 +192,16 @@ impl std::fmt::Display for IdempotencyStateError {
             Self::InvalidInFlightMetadata(state) => write!(
                 formatter,
                 "idempotency state {:?} cannot carry a recorded outcome or result reference",
+                state
+            ),
+            Self::InvalidTerminalMetadata(state) => write!(
+                formatter,
+                "terminal idempotency state {:?} requires a matching recorded outcome",
+                state
+            ),
+            Self::RemovalNotAllowed(state) => write!(
+                formatter,
+                "idempotency state {:?} cannot be removed while unresolved",
                 state
             ),
         }
@@ -326,12 +341,30 @@ impl IdempotencyStateStore {
         outcome: Option<RecordedOutcome>,
         result_reference: Option<String>,
     ) -> Result<IdempotencyRecord, IdempotencyStateError> {
-        if matches!(
-            next_state,
-            IdempotencyState::InFlight | IdempotencyState::Unknown
-        ) && (outcome.is_some() || result_reference.is_some())
-        {
-            return Err(IdempotencyStateError::InvalidInFlightMetadata(next_state));
+        match next_state {
+            IdempotencyState::InFlight | IdempotencyState::Unknown => {
+                if outcome.is_some() || result_reference.is_some() {
+                    return Err(IdempotencyStateError::InvalidInFlightMetadata(next_state));
+                }
+            }
+            IdempotencyState::Succeeded
+            | IdempotencyState::Failed
+            | IdempotencyState::Cancelled => {
+                let Some(outcome) = outcome.as_ref() else {
+                    return Err(IdempotencyStateError::InvalidTerminalMetadata(next_state));
+                };
+
+                let expected_status = match next_state {
+                    IdempotencyState::Succeeded => Status::Success,
+                    IdempotencyState::Failed => Status::Failure,
+                    IdempotencyState::Cancelled => Status::Cancelled,
+                    IdempotencyState::InFlight | IdempotencyState::Unknown => unreachable!(),
+                };
+
+                if outcome.status() != expected_status {
+                    return Err(IdempotencyStateError::InvalidTerminalMetadata(next_state));
+                }
+            }
         }
 
         let mut records = self
@@ -364,9 +397,10 @@ impl IdempotencyStateStore {
         Ok(updated)
     }
 
-    /// Explicitly removes a record from the store.
+    /// Explicitly removes a resolved terminal record from the store.
     ///
-    /// Removal is never performed implicitly by [`Self::reserve`] or
+    /// `InFlight` and `Unknown` records are retained until they are resolved;
+    /// removal is never performed implicitly by [`Self::reserve`] or
     /// [`Self::lookup`].
     pub fn remove(
         &self,
@@ -376,6 +410,17 @@ impl IdempotencyStateStore {
             .records
             .write()
             .map_err(|_| IdempotencyStateError::LockPoisoned)?;
+
+        let Some(existing) = records.get(identity) else {
+            return Ok(None);
+        };
+
+        if matches!(
+            existing.state(),
+            IdempotencyState::InFlight | IdempotencyState::Unknown
+        ) {
+            return Err(IdempotencyStateError::RemovalNotAllowed(*existing.state()));
+        }
 
         Ok(records.remove(identity))
     }
@@ -648,6 +693,82 @@ mod tests {
     }
 
     #[test]
+    fn terminal_states_require_matching_recorded_outcomes() {
+        let cases = [
+            (IdempotencyState::Succeeded, Status::Failure),
+            (IdempotencyState::Failed, Status::Success),
+            (IdempotencyState::Cancelled, Status::Failure),
+        ];
+
+        for (state, status) in cases {
+            let store = IdempotencyStateStore::new();
+            let initial = record("service-a", "key-1", "operation-1", None, 500);
+            store.reserve(initial.clone(), 100).unwrap();
+
+            let result = store.transition(
+                initial.identity(),
+                state,
+                Some(RecordedOutcome::new(status, None)),
+                None,
+            );
+
+            assert_eq!(
+                result,
+                Err(IdempotencyStateError::InvalidTerminalMetadata(state))
+            );
+            assert_eq!(store.get(initial.identity()).unwrap(), Some(initial));
+        }
+    }
+
+    #[test]
+    fn terminal_states_accept_matching_recorded_outcomes() {
+        let cases = [
+            (IdempotencyState::Succeeded, Status::Success),
+            (IdempotencyState::Failed, Status::Failure),
+            (IdempotencyState::Cancelled, Status::Cancelled),
+        ];
+
+        for (state, status) in cases {
+            let store = IdempotencyStateStore::new();
+            let initial = record("service-a", "key-1", "operation-1", None, 500);
+            store.reserve(initial.clone(), 100).unwrap();
+
+            let updated = store
+                .transition(
+                    initial.identity(),
+                    state,
+                    Some(RecordedOutcome::new(status, None)),
+                    None,
+                )
+                .unwrap();
+
+            assert_eq!(*updated.state(), state);
+            assert_eq!(updated.outcome().map(RecordedOutcome::status), Some(status));
+        }
+    }
+
+    #[test]
+    fn terminal_states_cannot_be_completed_without_an_outcome() {
+        for state in [
+            IdempotencyState::Succeeded,
+            IdempotencyState::Failed,
+            IdempotencyState::Cancelled,
+        ] {
+            let store = IdempotencyStateStore::new();
+            let initial = record("service-a", "key-1", "operation-1", None, 500);
+            store.reserve(initial.clone(), 100).unwrap();
+
+            let result = store.transition(initial.identity(), state, None, None);
+
+            assert_eq!(
+                result,
+                Err(IdempotencyStateError::InvalidTerminalMetadata(state))
+            );
+            assert_eq!(store.get(initial.identity()).unwrap(), Some(initial));
+        }
+    }
+
+    #[test]
     fn invalid_terminal_reopen_is_rejected() {
         let store = IdempotencyStateStore::new();
         let initial = record("service-a", "key-1", "operation-1", None, 500);
@@ -734,19 +855,40 @@ mod tests {
     }
 
     #[test]
-    fn remove_requires_explicit_action() {
+    fn remove_requires_a_resolved_terminal_record() {
         let store = IdempotencyStateStore::new();
-        let record = record("service-a", "key-1", "operation-1", None, 100);
+        let initial = record("service-a", "key-1", "operation-1", None, 100);
 
-        store.reserve(record.clone(), 50).unwrap();
+        store.reserve(initial.clone(), 50).unwrap();
 
-        assert_eq!(store.remove(record.identity()).unwrap(), Some(record));
-        assert!(
-            store
-                .get(&identity("service-a", "key-1"))
-                .unwrap()
-                .is_none()
+        assert_eq!(
+            store.remove(initial.identity()),
+            Err(IdempotencyStateError::RemovalNotAllowed(
+                IdempotencyState::InFlight
+            ))
         );
+
+        store
+            .transition(initial.identity(), IdempotencyState::Unknown, None, None)
+            .unwrap();
+        assert_eq!(
+            store.remove(initial.identity()),
+            Err(IdempotencyStateError::RemovalNotAllowed(
+                IdempotencyState::Unknown
+            ))
+        );
+
+        let resolved = store
+            .transition(
+                initial.identity(),
+                IdempotencyState::Succeeded,
+                Some(RecordedOutcome::new(Status::Success, None)),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(store.remove(resolved.identity()).unwrap(), Some(resolved));
+        assert!(store.get(initial.identity()).unwrap().is_none());
     }
 
     #[test]

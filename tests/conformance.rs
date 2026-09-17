@@ -60,12 +60,16 @@ fn operation_context_for_attempt(
     )
 }
 
-fn context_for_attempt(operation_id: &str, node_id: &str, attempt_id: &str) -> EngineContext {
-    EngineContext::new(operation_context_for_attempt(
-        operation_id,
-        node_id,
-        attempt_id,
-    ))
+fn context_for_attempt(
+    operation_id: &str,
+    node_id: &str,
+    attempt_id: &str,
+) -> (EngineContext, OperationContext) {
+    let operation_context = operation_context_for_attempt(operation_id, node_id, attempt_id);
+    (
+        EngineContext::new(operation_context.clone()),
+        operation_context,
+    )
 }
 
 fn request_with_context(
@@ -309,7 +313,7 @@ fn security_rejection_must_stop_downstream_execution() {
         },
     ));
 
-    let mut context = context_for_attempt(
+    let (mut context, operation_context) = context_for_attempt(
         "security-rejection",
         "conformance-node-2",
         "conformance-attempt-1",
@@ -318,11 +322,7 @@ fn security_rejection_must_stop_downstream_execution() {
         "security-rejection-message",
         "conformance.test",
         b"payload",
-        operation_context_for_attempt(
-            "security-rejection",
-            "conformance-node-2",
-            "conformance-attempt-1",
-        ),
+        operation_context,
     );
     let downstream_called = Arc::new(Mutex::new(false));
     let downstream_called_by_handler = Arc::clone(&downstream_called);
@@ -361,7 +361,7 @@ fn generic_authorization_must_precede_capability_execution() {
         },
     ));
 
-    let mut context = context_for_attempt(
+    let (mut context, operation_context) = context_for_attempt(
         "authorization-order",
         "conformance-node-3",
         "conformance-attempt-1",
@@ -370,11 +370,7 @@ fn generic_authorization_must_precede_capability_execution() {
         "authorization-order-message",
         "conformance.capability",
         b"opaque payload",
-        operation_context_for_attempt(
-            "authorization-order",
-            "conformance-node-3",
-            "conformance-attempt-1",
-        ),
+        operation_context,
     );
 
     let downstream_events = Arc::clone(&events);
@@ -411,7 +407,7 @@ fn core_authorization_must_not_require_domain_payload_interpretation() {
 
     let original_payload = vec![0, 255, 17, 42, 128, 3, 99];
 
-    let mut context = context_for_attempt(
+    let (mut context, operation_context) = context_for_attempt(
         "payload-opaque",
         "conformance-node-4",
         "conformance-attempt-1",
@@ -420,11 +416,7 @@ fn core_authorization_must_not_require_domain_payload_interpretation() {
         "payload-opaque-message",
         "domain.operation",
         &original_payload,
-        operation_context_for_attempt(
-            "payload-opaque",
-            "conformance-node-4",
-            "conformance-attempt-1",
-        ),
+        operation_context,
     );
 
     let result: Result<UniversalResponse, RequestPipelineError<()>> =
@@ -465,12 +457,12 @@ fn trusted_security_context_must_preserve_principal_and_calling_service() {
     let expected_principal = authenticated_principal.clone();
     let expected_calling_service = calling_service.clone();
 
-    let mut context = context_for_attempt(
+    let (context, operation_context) = context_for_attempt(
         "identity-preservation",
         "conformance-node-5",
         "conformance-attempt-1",
-    )
-    .with_security(SecurityContext::new(
+    );
+    let mut context = context.with_security(SecurityContext::new(
         user_principal("original-principal"),
         Some(calling_service.clone()),
     ));
@@ -478,11 +470,7 @@ fn trusted_security_context_must_preserve_principal_and_calling_service() {
         "identity-preservation-message",
         "conformance.identity",
         b"payload",
-        operation_context_for_attempt(
-            "identity-preservation",
-            "conformance-node-5",
-            "conformance-attempt-1",
-        ),
+        operation_context,
     );
 
     let result: Result<UniversalResponse, RequestPipelineError<()>> =
@@ -539,17 +527,13 @@ fn concurrent_requests_must_isolate_security_context() {
 
         handles.push(std::thread::spawn(move || {
             let attempt_id = format!("{operation_id}-attempt-1");
-            let mut context =
+            let (mut context, operation_context) =
                 context_for_attempt(operation_id, "conformance-concurrent-node", &attempt_id);
             let mut request = request_with_context(
                 message_id,
                 "conformance.concurrent",
                 b"payload",
-                operation_context_for_attempt(
-                    operation_id,
-                    "conformance-concurrent-node",
-                    &attempt_id,
-                ),
+                operation_context,
             );
 
             barrier.wait();
@@ -611,12 +595,12 @@ fn retry_attempt_identity_survives_the_security_pipeline() {
         ("retry-security-message-1", "retry-security-attempt-1"),
         ("retry-security-message-2", "retry-security-attempt-2"),
     ] {
-        let mut context = context_for_attempt(
+        let (context, operation_context) = context_for_attempt(
             "retry-security-operation",
             "retry-security-node",
             attempt_id,
-        )
-        .with_security(SecurityContext::new(
+        );
+        let mut context = context.with_security(SecurityContext::new(
             principal.clone(),
             Some(calling_service.clone()),
         ));
@@ -625,11 +609,7 @@ fn retry_attempt_identity_survives_the_security_pipeline() {
             message_id,
             "conformance.retry-security",
             b"retry-payload",
-            operation_context_for_attempt(
-                "retry-security-operation",
-                "retry-security-node",
-                attempt_id,
-            ),
+            operation_context,
         );
 
         let observed_downstream = Arc::clone(&observed_downstream);
@@ -702,12 +682,12 @@ fn failed_attempt_can_be_followed_by_new_attempt_with_same_security_context() {
     .unwrap();
     first_attempt.start().unwrap();
 
-    let mut first_context = EngineContext::new(operation_context_for_attempt(
+    let (first_context, first_operation_context) = context_for_attempt(
         "retry-preservation-operation",
         "retry-preservation-node",
         "retry-preservation-attempt-1",
-    ))
-    .with_security(SecurityContext::new(
+    );
+    let mut first_context = first_context.with_security(SecurityContext::new(
         principal.clone(),
         Some(calling_service.clone()),
     ));
@@ -716,11 +696,7 @@ fn failed_attempt_can_be_followed_by_new_attempt_with_same_security_context() {
         "retry-preservation-message-1",
         "conformance.retry-preservation",
         b"payload",
-        operation_context_for_attempt(
-            "retry-preservation-operation",
-            "retry-preservation-node",
-            "retry-preservation-attempt-1",
-        ),
+        first_operation_context,
     );
 
     let first_result: Result<UniversalResponse, RequestPipelineError<()>> = pipeline.run_request(
@@ -748,12 +724,12 @@ fn failed_attempt_can_be_followed_by_new_attempt_with_same_security_context() {
     .unwrap();
     second_attempt.start().unwrap();
 
-    let mut second_context = EngineContext::new(operation_context_for_attempt(
+    let (second_context, second_operation_context) = context_for_attempt(
         "retry-preservation-operation",
         "retry-preservation-node",
         "retry-preservation-attempt-2",
-    ))
-    .with_security(SecurityContext::new(
+    );
+    let mut second_context = second_context.with_security(SecurityContext::new(
         principal.clone(),
         Some(calling_service.clone()),
     ));
@@ -762,11 +738,7 @@ fn failed_attempt_can_be_followed_by_new_attempt_with_same_security_context() {
         "retry-preservation-message-2",
         "conformance.retry-preservation",
         b"payload",
-        operation_context_for_attempt(
-            "retry-preservation-operation",
-            "retry-preservation-node",
-            "retry-preservation-attempt-2",
-        ),
+        second_operation_context,
     );
 
     let second_result: Result<UniversalResponse, RequestPipelineError<()>> = pipeline.run_request(
@@ -810,7 +782,7 @@ fn security_rejection_does_not_create_an_automatic_retry_attempt() {
     .unwrap();
 
     let attempt_id = attempt.attempt_id().clone();
-    let mut context = context_for_attempt(
+    let (mut context, operation_context) = context_for_attempt(
         "rejection-operation",
         "rejection-node",
         "rejection-attempt-1",
@@ -819,11 +791,7 @@ fn security_rejection_does_not_create_an_automatic_retry_attempt() {
         "rejection-message",
         "conformance.rejection",
         b"payload",
-        operation_context_for_attempt(
-            "rejection-operation",
-            "rejection-node",
-            "rejection-attempt-1",
-        ),
+        operation_context,
     );
 
     let downstream_called = Arc::new(Mutex::new(false));
@@ -864,7 +832,7 @@ fn authorization_keeps_capability_identity_stable_across_attempts() {
         },
     ));
 
-    let mut first_context = context_for_attempt(
+    let (mut first_context, first_operation_context) = context_for_attempt(
         "retry-capability-operation",
         "retry-capability-node",
         "retry-capability-attempt-1",
@@ -873,11 +841,7 @@ fn authorization_keeps_capability_identity_stable_across_attempts() {
         "retry-capability-message-1",
         "conformance.retry-capability",
         b"first",
-        operation_context_for_attempt(
-            "retry-capability-operation",
-            "retry-capability-node",
-            "retry-capability-attempt-1",
-        ),
+        first_operation_context,
     );
 
     let first_result: Result<UniversalResponse, RequestPipelineError<()>> = pipeline.run_request(
@@ -887,7 +851,7 @@ fn authorization_keeps_capability_identity_stable_across_attempts() {
     );
     assert!(first_result.is_ok());
 
-    let mut second_context = context_for_attempt(
+    let (mut second_context, second_operation_context) = context_for_attempt(
         "retry-capability-operation",
         "retry-capability-node",
         "retry-capability-attempt-2",
@@ -896,11 +860,7 @@ fn authorization_keeps_capability_identity_stable_across_attempts() {
         "retry-capability-message-2",
         "conformance.retry-capability",
         b"second",
-        operation_context_for_attempt(
-            "retry-capability-operation",
-            "retry-capability-node",
-            "retry-capability-attempt-2",
-        ),
+        second_operation_context,
     );
 
     let second_result: Result<UniversalResponse, RequestPipelineError<()>> = pipeline.run_request(

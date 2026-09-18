@@ -1,4 +1,4 @@
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use super::{
     CancellationToken,
@@ -6,7 +6,7 @@ use super::{
     concurrency::ConcurrencyConfig,
     lifecycle::{Lifecycle, LifecycleState},
 };
-use crate::error::InvalidTransition;
+use crate::{error::InvalidTransition, events::EventLifecycle};
 
 /// Minimal lifecycle owner for an engine instance.
 ///
@@ -19,6 +19,7 @@ pub struct EngineRuntime {
     lifecycle: Mutex<Lifecycle>,
     shutdown: CancellationToken,
     background: BackgroundTasks,
+    event_lifecycle: Arc<EventLifecycle>,
     shutdown_state: Mutex<ShutdownState>,
     shutdown_complete: Condvar,
 }
@@ -45,6 +46,7 @@ impl EngineRuntime {
         Self {
             lifecycle: Mutex::new(Lifecycle::new()),
             background: BackgroundTasks::new(shutdown.clone()),
+            event_lifecycle: Arc::new(EventLifecycle::new()),
             shutdown,
             shutdown_state: Mutex::new(ShutdownState::NotStarted),
             shutdown_complete: Condvar::new(),
@@ -61,6 +63,7 @@ impl EngineRuntime {
         Self {
             lifecycle: Mutex::new(Lifecycle::new()),
             background: BackgroundTasks::with_concurrency(shutdown.clone(), config),
+            event_lifecycle: Arc::new(EventLifecycle::new()),
             shutdown,
             shutdown_state: Mutex::new(ShutdownState::NotStarted),
             shutdown_complete: Condvar::new(),
@@ -108,7 +111,15 @@ impl EngineRuntime {
         self.lifecycle
             .lock()
             .expect("lifecycle lock poisoned")
-            .transition(next)
+            .transition(next)?;
+
+        match next {
+            LifecycleState::Draining => self.event_lifecycle().begin_draining(),
+            LifecycleState::Stopped => self.event_lifecycle().stop(),
+            _ => {}
+        }
+
+        Ok(())
     }
 
     /// Returns the runtime-wide shutdown cancellation token.
@@ -119,6 +130,16 @@ impl EngineRuntime {
     /// Returns the runtime-owned background task manager.
     pub fn background_tasks(&self) -> &BackgroundTasks {
         &self.background
+    }
+
+    /// Returns the Event subsystem lifecycle owned by this runtime.
+    ///
+    /// The accessor remains crate-private because the Event subsystem itself
+    /// is internal Core infrastructure. Event publication continues to use the
+    /// Event-specific lifecycle while the Engine Runtime remains authoritative
+    /// over the overall runtime lifecycle.
+    pub(crate) fn event_lifecycle(&self) -> Arc<EventLifecycle> {
+        Arc::clone(&self.event_lifecycle)
     }
 
     /// Gracefully shuts down the runtime.
@@ -224,6 +245,7 @@ impl EngineRuntime {
 
 impl Drop for EngineRuntime {
     fn drop(&mut self) {
+        self.event_lifecycle().stop();
         self.background.shutdown();
     }
 }
@@ -260,6 +282,48 @@ mod tests {
 
         assert_eq!(runtime.state(), LifecycleState::Stopped);
         assert!(runtime.shutdown_token().is_cancelled());
+    }
+
+    #[test]
+    fn event_lifecycle_starts_open_with_runtime() {
+        let runtime = EngineRuntime::new();
+
+        assert_eq!(
+            runtime.event_lifecycle().state(),
+            crate::events::EventLifecycleState::Serving
+        );
+        assert!(runtime.event_lifecycle().allows_publication());
+    }
+
+    #[test]
+    fn runtime_draining_closes_event_publication_before_background_cleanup() {
+        use std::sync::mpsc;
+
+        let runtime = serving_runtime();
+        let event_lifecycle = runtime.event_lifecycle();
+        let (state_tx, state_rx) = mpsc::channel();
+
+        runtime
+            .background_tasks()
+            .spawn(move |cancellation| {
+                while !cancellation.is_cancelled() {
+                    thread::yield_now();
+                }
+
+                state_tx.send(event_lifecycle.state()).unwrap();
+            })
+            .unwrap();
+
+        assert!(runtime.shutdown().unwrap());
+
+        assert_eq!(
+            state_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            crate::events::EventLifecycleState::Draining
+        );
+        assert_eq!(
+            runtime.event_lifecycle().state(),
+            crate::events::EventLifecycleState::Stopped
+        );
     }
 
     #[test]
@@ -336,6 +400,10 @@ mod tests {
 
         assert_eq!(runtime.state(), LifecycleState::Stopped);
         assert!(runtime.shutdown_token().is_cancelled());
+        assert_eq!(
+            runtime.event_lifecycle().state(),
+            crate::events::EventLifecycleState::Stopped
+        );
     }
 
     #[test]

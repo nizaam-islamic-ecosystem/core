@@ -14,7 +14,6 @@ pub mod status;
 pub mod artifact;
 pub mod client;
 pub mod config;
-pub mod conformance;
 pub mod contracts;
 pub mod control_plane;
 pub mod error;

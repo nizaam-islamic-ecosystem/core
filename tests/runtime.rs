@@ -33,6 +33,10 @@ use nizaam_core::contracts::{
     Participants, PayloadDescriptor, UniversalRequest, UniversalResponse,
     validation::validate_request,
 };
+use nizaam_core::events::{
+    DeliveryConfig, DeliveryDispatcher, DeliveryOutcome, Event, EventLifecycle, EventPublisher,
+    EventSubscription, Scope,
+};
 use nizaam_core::identity::{
     CapabilityId, ContractId, CorrelationId, EngineId, MessageId, OperationId,
 };
@@ -582,16 +586,17 @@ fn independent_runtime_task_scopes_execute_concurrently_without_shared_cancellat
 fn runtime_shutdown_cancels_and_joins_owned_background_work() {
     let runtime = Arc::new(serving_runtime());
 
-    let started = Arc::new(AtomicBool::new(false));
+    let (started_sender, started_receiver) = std::sync::mpsc::channel();
     let finished = Arc::new(AtomicBool::new(false));
 
-    let started_by_task = Arc::clone(&started);
     let finished_by_task = Arc::clone(&finished);
 
     runtime
         .background_tasks()
         .spawn(move |cancellation| {
-            started_by_task.store(true, Ordering::SeqCst);
+            started_sender
+                .send(())
+                .expect("test thread must still be waiting for task start");
 
             while !cancellation.is_cancelled() {
                 thread::yield_now();
@@ -601,9 +606,9 @@ fn runtime_shutdown_cancels_and_joins_owned_background_work() {
         })
         .unwrap();
 
-    while !started.load(Ordering::SeqCst) {
-        thread::yield_now();
-    }
+    started_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("owned background task must start before runtime shutdown is tested");
 
     runtime.shutdown().unwrap();
 
@@ -675,6 +680,130 @@ fn runtime_shutdown_is_idempotent_after_background_work_has_stopped() {
 
     assert_eq!(runtime.state(), LifecycleState::Stopped);
     assert!(runtime.shutdown_token().is_cancelled());
+}
+
+// ---------------------------------------------------------------------------
+// Runtime + Event lifecycle/cancellation integration
+// ---------------------------------------------------------------------------
+
+#[test]
+fn runtime_shutdown_closes_event_publisher_owned_by_runtime() {
+    let runtime = serving_runtime();
+    let event_lifecycle = Arc::new(EventLifecycle::new());
+    let publisher = EventPublisher::new(event_lifecycle, runtime.shutdown_token());
+
+    publisher.activate().unwrap();
+    publisher
+        .publish(
+            Event::new(
+                nizaam_core::identity::EventId::new("runtime-owned-before-shutdown").unwrap(),
+                "runtime.event",
+                Scope::new("runtime:test").unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    runtime.shutdown().unwrap();
+
+    assert!(matches!(
+        publisher.publish(
+            Event::new(
+                nizaam_core::identity::EventId::new("runtime-owned-after-shutdown").unwrap(),
+                "runtime.event",
+                Scope::new("runtime:test").unwrap(),
+            )
+            .unwrap(),
+        ),
+        Err(nizaam_core::events::PublisherError::Closed)
+    ));
+    assert!(publisher.is_closed());
+}
+
+#[test]
+fn runtime_shutdown_cancels_runtime_owned_event_subscription() {
+    let runtime = serving_runtime();
+    let subscription = EventSubscription::new(
+        "runtime.event",
+        Scope::new("runtime:test").unwrap(),
+        |_event: &Event| {},
+        runtime.shutdown_token(),
+    )
+    .unwrap();
+
+    subscription.activate().unwrap();
+    assert!(subscription.is_active());
+
+    runtime.shutdown().unwrap();
+
+    assert!(subscription.is_cancelled());
+}
+
+#[test]
+fn runtime_shutdown_cancels_runtime_owned_event_delivery() {
+    let runtime = serving_runtime();
+    let runtime_cancellation = runtime.shutdown_token().clone();
+
+    let (started_sender, started_receiver) = std::sync::mpsc::channel();
+    let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
+    let handler_cancellation = runtime_cancellation.clone();
+
+    let subscription = Arc::new(
+        EventSubscription::new(
+            "runtime.event",
+            Scope::new("runtime:test").unwrap(),
+            move |_event: &Event| {
+                started_sender
+                    .send(())
+                    .expect("test thread must still be waiting for event handler start");
+
+                while !handler_cancellation.is_cancelled() {
+                    thread::yield_now();
+                }
+
+                finished_sender
+                    .send(())
+                    .expect("test thread must still be waiting for event handler completion");
+            },
+            runtime.shutdown_token(),
+        )
+        .unwrap(),
+    );
+    subscription.activate().unwrap();
+
+    let dispatcher =
+        DeliveryDispatcher::new(DeliveryConfig::new(4, 1, 1).unwrap(), runtime_cancellation)
+            .unwrap();
+
+    let handle = dispatcher.register(Arc::clone(&subscription)).unwrap();
+
+    assert_eq!(
+        handle
+            .enqueue(Arc::new(
+                Event::new(
+                    nizaam_core::identity::EventId::new("runtime-delivery-event").unwrap(),
+                    "runtime.event",
+                    Scope::new("runtime:test").unwrap(),
+                )
+                .unwrap(),
+            ))
+            .unwrap(),
+        DeliveryOutcome::Accepted
+    );
+
+    started_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("event delivery handler must start before runtime shutdown is tested");
+
+    runtime.shutdown().unwrap();
+
+    finished_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("runtime shutdown cancellation must reach the active Event delivery handler");
+
+    assert!(subscription.is_cancelled());
+
+    dispatcher.shutdown();
 }
 
 // ---------------------------------------------------------------------------

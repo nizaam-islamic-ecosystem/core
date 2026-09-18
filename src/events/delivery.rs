@@ -4,11 +4,11 @@
 //! event semantics, security, subscription lifecycle, retry, persistence, and
 //! transport remain owned by their respective Core subsystems.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::{
     Arc, Condvar, Mutex,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
 
@@ -40,6 +40,8 @@ pub enum DeliveryError {
     DispatcherClosed,
     /// The maximum number of active delivery subscriptions has been reached.
     SubscriptionLimitReached,
+    /// The subscription is already registered with this dispatcher.
+    SubscriptionAlreadyRegistered,
     /// The subscription has not been activated.
     SubscriptionNotActive,
     /// The existing Core authorization mechanism failed while admitting delivery.
@@ -60,6 +62,9 @@ impl std::fmt::Display for DeliveryError {
             Self::DispatcherClosed => formatter.write_str("event delivery dispatcher is closed"),
             Self::SubscriptionLimitReached => {
                 formatter.write_str("event delivery subscription limit is full")
+            }
+            Self::SubscriptionAlreadyRegistered => {
+                formatter.write_str("event subscription is already registered")
             }
             Self::SubscriptionNotActive => formatter.write_str("event subscription is not active"),
             Self::AuthorizationFailed(error) => {
@@ -130,7 +135,7 @@ struct DeliveryShared {
     ready: ReadyQueue,
     cancellation: CancellationToken,
     config: DeliveryConfig,
-    registered: AtomicUsize,
+    registered_subscriptions: Mutex<HashSet<usize>>,
     closed: AtomicBool,
 }
 
@@ -140,7 +145,7 @@ impl DeliveryShared {
             ready: ReadyQueue::new(config.max_subscriptions()),
             cancellation,
             config,
-            registered: AtomicUsize::new(0),
+            registered_subscriptions: Mutex::new(HashSet::new()),
             closed: AtomicBool::new(false),
         }
     }
@@ -153,46 +158,58 @@ impl DeliveryShared {
         self.cancellation.is_cancelled()
     }
 
-    fn try_register(&self) -> Result<(), DeliveryError> {
+    fn try_register(&self, subscription: &Arc<EventSubscription>) -> Result<(), DeliveryError> {
         if self.is_closed() || self.is_cancelled() {
             return Err(DeliveryError::DispatcherClosed);
         }
 
-        let mut current = self.registered.load(Ordering::Acquire);
+        let key = Arc::as_ptr(subscription) as usize;
+        let mut registered = self
+            .registered_subscriptions
+            .lock()
+            .expect("event registration lock poisoned");
 
-        loop {
-            if current >= self.config.max_subscriptions() {
-                return Err(DeliveryError::SubscriptionLimitReached);
-            }
-
-            match self.registered.compare_exchange_weak(
-                current,
-                current + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    if self.is_closed() || self.is_cancelled() {
-                        self.registered.fetch_sub(1, Ordering::AcqRel);
-                        return Err(DeliveryError::DispatcherClosed);
-                    }
-                    return Ok(());
-                }
-                Err(observed) => current = observed,
-            }
+        if self.is_closed() || self.is_cancelled() {
+            return Err(DeliveryError::DispatcherClosed);
         }
+
+        if registered.contains(&key) {
+            return Err(DeliveryError::SubscriptionAlreadyRegistered);
+        }
+
+        if registered.len() >= self.config.max_subscriptions() {
+            return Err(DeliveryError::SubscriptionLimitReached);
+        }
+
+        registered.insert(key);
+
+        Ok(())
     }
 
-    fn unregister(&self) {
-        let _ = self
-            .registered
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current.checked_sub(1)
-            });
+    fn unregister(&self, subscription: &Arc<EventSubscription>) {
+        let key = Arc::as_ptr(subscription) as usize;
+        self.registered_subscriptions
+            .lock()
+            .expect("event registration lock poisoned")
+            .remove(&key);
     }
 
     fn close(&self) {
-        if !self.closed.swap(true, Ordering::AcqRel) {
+        let should_close = {
+            let mut registered = self
+                .registered_subscriptions
+                .lock()
+                .expect("event registration lock poisoned");
+
+            if self.closed.swap(true, Ordering::AcqRel) {
+                false
+            } else {
+                registered.clear();
+                true
+            }
+        };
+
+        if should_close {
             self.cancellation.cancel();
             self.ready.close();
         }
@@ -465,6 +482,15 @@ impl DeliveryPath {
     }
 }
 
+/// Releases this path's registration if it has not already been closed.
+impl Drop for DeliveryPath {
+    fn drop(&mut self) {
+        if self.registered.swap(false, Ordering::AcqRel) {
+            self.shared.unregister(&self.subscription);
+        }
+    }
+}
+
 /// Handle used by the publisher to hand an immutable event to one subscription.
 #[derive(Clone)]
 pub struct DeliveryHandle {
@@ -538,10 +564,10 @@ impl DeliveryDispatcher {
         &self,
         subscription: Arc<EventSubscription>,
     ) -> Result<DeliveryHandle, DeliveryError> {
-        self.shared.try_register()?;
+        self.shared.try_register(&subscription)?;
 
         if !matches!(subscription.state(), SubscriptionLifecycleState::Active) {
-            self.shared.unregister();
+            self.shared.unregister(&subscription);
             return Err(DeliveryError::SubscriptionNotActive);
         }
 
@@ -623,7 +649,7 @@ impl DeliveryPath {
         }
 
         if self.registered.swap(false, Ordering::AcqRel) {
-            self.shared.unregister();
+            self.shared.unregister(&self.subscription);
         }
     }
 }
@@ -1032,6 +1058,56 @@ mod tests {
 
         let _ = receiver.recv_timeout(Duration::from_millis(100));
         dispatcher.shutdown();
+    }
+
+    #[test]
+    fn dispatcher_rejects_duplicate_subscription_registration() {
+        let dispatcher =
+            DeliveryDispatcher::new(config(2, 1, 2), CancellationToken::new()).unwrap();
+        let owner = CancellationToken::new();
+        let subscription = Arc::new(subscription(|_event: &Event| {}, &owner));
+        activate(&subscription);
+
+        let first_handle = dispatcher.register(Arc::clone(&subscription)).unwrap();
+
+        assert!(matches!(
+            dispatcher.register(Arc::clone(&subscription)),
+            Err(DeliveryError::SubscriptionAlreadyRegistered)
+        ));
+
+        first_handle.close();
+
+        let second_handle = dispatcher.register(Arc::clone(&subscription)).unwrap();
+        second_handle.close();
+
+        dispatcher.shutdown();
+    }
+
+    #[test]
+    fn dropping_a_delivery_handle_releases_registration_capacity() {
+        let dispatcher =
+            DeliveryDispatcher::new(config(2, 1, 1), CancellationToken::new()).unwrap();
+        let owner = CancellationToken::new();
+
+        let subscription_a = subscription(|_event: &Event| {}, &owner);
+        activate(&subscription_a);
+        let handle_a = dispatcher.register(subscription_a).unwrap();
+        drop(handle_a);
+
+        let subscription_b = subscription(|_event: &Event| {}, &owner);
+        activate(&subscription_b);
+        let handle_b = dispatcher.register(subscription_b).unwrap();
+        handle_b.close();
+
+        dispatcher.shutdown();
+    }
+
+    #[test]
+    fn duplicate_subscription_error_has_explicit_error_text() {
+        assert_eq!(
+            DeliveryError::SubscriptionAlreadyRegistered.to_string(),
+            "event subscription is already registered"
+        );
     }
 
     #[test]

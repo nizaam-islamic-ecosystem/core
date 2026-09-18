@@ -34,8 +34,8 @@ use nizaam_core::contracts::{
     validation::validate_request,
 };
 use nizaam_core::events::{
-    DeliveryConfig, DeliveryDispatcher, DeliveryOutcome, Event, EventLifecycle, EventPublisher,
-    EventSubscription, Scope,
+    DeliveryConfig, DeliveryDispatcher, DeliveryOutcome, Event, EventPublisher, EventSubscription,
+    Scope,
 };
 use nizaam_core::identity::{
     CapabilityId, ContractId, CorrelationId, EngineId, MessageId, OperationId,
@@ -689,8 +689,7 @@ fn runtime_shutdown_is_idempotent_after_background_work_has_stopped() {
 #[test]
 fn runtime_shutdown_closes_event_publisher_owned_by_runtime() {
     let runtime = serving_runtime();
-    let event_lifecycle = Arc::new(EventLifecycle::new());
-    let publisher = EventPublisher::new(event_lifecycle, runtime.shutdown_token());
+    let publisher = EventPublisher::new(runtime.event_lifecycle(), runtime.shutdown_token());
 
     publisher.activate().unwrap();
     publisher
@@ -703,6 +702,21 @@ fn runtime_shutdown_closes_event_publisher_owned_by_runtime() {
             .unwrap(),
         )
         .unwrap();
+
+    runtime.transition(LifecycleState::Draining).unwrap();
+
+    assert!(matches!(
+        publisher.publish(
+            Event::new(
+                nizaam_core::identity::EventId::new("runtime-owned-during-draining").unwrap(),
+                "runtime.event",
+                Scope::new("runtime:test").unwrap(),
+            )
+            .unwrap(),
+        ),
+        Err(nizaam_core::events::PublisherError::EventSubsystemUnavailable)
+    ));
+    assert!(publisher.is_active());
 
     runtime.shutdown().unwrap();
 
@@ -742,10 +756,10 @@ fn runtime_shutdown_cancels_runtime_owned_event_subscription() {
 #[test]
 fn runtime_shutdown_cancels_runtime_owned_event_delivery() {
     let runtime = serving_runtime();
-    let runtime_cancellation = runtime.shutdown_token().clone();
-
     let (started_sender, started_receiver) = std::sync::mpsc::channel();
     let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
+    let runtime_cancellation = runtime.shutdown_token().clone();
+
     let handler_cancellation = runtime_cancellation.clone();
 
     let subscription = Arc::new(
@@ -755,7 +769,7 @@ fn runtime_shutdown_cancels_runtime_owned_event_delivery() {
             move |_event: &Event| {
                 started_sender
                     .send(())
-                    .expect("test thread must still be waiting for event handler start");
+                    .expect("test thread must still be waiting for handler start");
 
                 while !handler_cancellation.is_cancelled() {
                     thread::yield_now();
@@ -763,7 +777,7 @@ fn runtime_shutdown_cancels_runtime_owned_event_delivery() {
 
                 finished_sender
                     .send(())
-                    .expect("test thread must still be waiting for event handler completion");
+                    .expect("test thread must still be waiting for handler completion");
             },
             runtime.shutdown_token(),
         )
@@ -793,13 +807,13 @@ fn runtime_shutdown_cancels_runtime_owned_event_delivery() {
 
     started_receiver
         .recv_timeout(Duration::from_secs(2))
-        .expect("event delivery handler must start before runtime shutdown is tested");
+        .expect("Event delivery handler must start before runtime shutdown is tested");
 
     runtime.shutdown().unwrap();
 
     finished_receiver
         .recv_timeout(Duration::from_secs(2))
-        .expect("runtime shutdown cancellation must reach the active Event delivery handler");
+        .expect("runtime shutdown cancellation must reach an active Event delivery handler");
 
     assert!(subscription.is_cancelled());
 

@@ -12,7 +12,6 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     mpsc,
 };
-use std::thread;
 use std::time::Duration;
 
 use nizaam_core::events::{
@@ -271,16 +270,17 @@ fn one_event_occurrence_is_delivered_to_multiple_matching_subscribers() {
 fn publication_is_only_a_delivery_handoff() {
     let lifecycle = Arc::new(nizaam_core::events::EventLifecycle::new());
     let owner = CancellationToken::new();
-    let calls = Arc::new(AtomicUsize::new(0));
+    let (sender, receiver) = mpsc::channel();
 
     let publisher = EventPublisher::new(Arc::clone(&lifecycle), &owner);
     publisher.activate().unwrap();
 
-    let calls_for_handler = Arc::clone(&calls);
     let subscription = publisher
         .subscribe(subscription(
             move |_event: &Event| {
-                calls_for_handler.fetch_add(1, Ordering::SeqCst);
+                sender
+                    .send(())
+                    .expect("test thread must still be waiting for delivery");
             },
             &owner,
         ))
@@ -288,7 +288,6 @@ fn publication_is_only_a_delivery_handoff() {
 
     let publication = publisher.publish(event("handoff-1")).unwrap();
 
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(publication.subscription_count(), 1);
 
     let dispatcher = dispatcher(4, 1);
@@ -299,14 +298,7 @@ fn publication_is_only_a_delivery_handoff() {
         DeliveryOutcome::Accepted
     );
 
-    for _ in 0..20 {
-        if calls.load(Ordering::SeqCst) == 1 {
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    receive(&receiver);
 
     dispatcher.shutdown();
 }

@@ -310,6 +310,12 @@ impl EventPublisher {
             .write()
             .expect("event publisher subscription lock poisoned");
 
+        match self.state() {
+            PublisherLifecycleState::Closed => return Err(PublisherError::Closed),
+            PublisherLifecycleState::Created => return Err(PublisherError::NotActive),
+            PublisherLifecycleState::Active => {}
+        }
+
         subscriptions.push(Arc::clone(&subscription));
 
         drop(subscriptions);
@@ -374,6 +380,12 @@ impl EventPublisher {
                 .read()
                 .expect("event publisher subscription lock poisoned");
 
+            match self.state() {
+                PublisherLifecycleState::Closed => return Err(PublisherError::Closed),
+                PublisherLifecycleState::Created => return Err(PublisherError::NotActive),
+                PublisherLifecycleState::Active => {}
+            }
+
             subscriptions
                 .iter()
                 .filter(|subscription| subscription.matches(event.event_type(), event.scope()))
@@ -389,17 +401,15 @@ impl EventPublisher {
     /// Closing stops new publications and terminates publisher-owned
     /// subscriptions. Delivery resources are cleaned up by Delivery.
     pub fn close(&self) {
-        let previous = self.lifecycle.swap(CLOSED, Ordering::AcqRel);
-
-        if previous == CLOSED {
-            return;
-        }
-
         let subscriptions = {
             let mut registered = self
                 .subscriptions
                 .write()
                 .expect("event publisher subscription lock poisoned");
+
+            if self.lifecycle.swap(CLOSED, Ordering::AcqRel) == CLOSED {
+                return;
+            }
 
             std::mem::take(&mut *registered)
         };
@@ -600,6 +610,40 @@ mod tests {
 
         assert!(matches!(
             publisher.subscribe(subscription),
+            Err(PublisherError::Closed)
+        ));
+    }
+
+    #[test]
+    fn closed_publisher_recheck_prevents_late_subscription_admission() {
+        let publisher = publisher();
+        publisher.activate().unwrap();
+        publisher.close();
+
+        let owner = CancellationToken::new();
+        let subscription = EventSubscription::new(
+            "operation.completed",
+            Scope::new("engine:test").unwrap(),
+            |_event: &Event| {},
+            &owner,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            publisher.subscribe(subscription),
+            Err(PublisherError::Closed)
+        ));
+        assert_eq!(publisher.subscription_count(), 0);
+    }
+
+    #[test]
+    fn closed_publisher_recheck_prevents_late_publication_handoff() {
+        let publisher = publisher();
+        publisher.activate().unwrap();
+        publisher.close();
+
+        assert!(matches!(
+            publisher.publish(event()),
             Err(PublisherError::Closed)
         ));
     }

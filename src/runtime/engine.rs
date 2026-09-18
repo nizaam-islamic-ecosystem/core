@@ -134,11 +134,9 @@ impl EngineRuntime {
 
     /// Returns the Event subsystem lifecycle owned by this runtime.
     ///
-    /// The accessor remains crate-private because the Event subsystem itself
-    /// is internal Core infrastructure. Event publication continues to use the
-    /// Event-specific lifecycle while the Engine Runtime remains authoritative
-    /// over the overall runtime lifecycle.
-    pub(crate) fn event_lifecycle(&self) -> Arc<EventLifecycle> {
+    /// Event publishers created for this runtime should bind to this lifecycle
+    /// so runtime draining and shutdown remain authoritative over publication.
+    pub fn event_lifecycle(&self) -> Arc<EventLifecycle> {
         Arc::clone(&self.event_lifecycle)
     }
 

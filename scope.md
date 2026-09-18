@@ -30,8 +30,8 @@ Implementation began with an existing Cargo library skeleton at the repository r
 | 11 | Observability, Health, Configuration         | 11    | verified    |
 | 12 | Streaming, Concurrency, Background Tasks     | 12    | verified    |
 | 13 | Retry and Idempotency                        | 13    | verified    |
-| 14 | Internal Events                              | 14    | in progress |
-| 15 | Control Plane                                | 15    | not started |
+| 14 | Internal Events                              | 14    | verified    |
+| 15 | Control Plane                                | 15    | in progress |
 | 16 | Engine SDK                                   | 16    | not started |
 | 17 | Testing and Conformance hardening            | 17    | not started |
 
@@ -8498,6 +8498,8 @@ Clippy, compilation, unit tests, integration tests, and documentation tests.
 
 ## Phase 14: Internal Events
 
+**Status: verified**
+
 ### Goal
 
 Provide a small, reusable, lifecycle-aware mechanism for publishing and
@@ -8562,6 +8564,37 @@ Phase 13
 ```
 
 Phase 14 MUST NOT replace or create competing versions of these mechanisms.
+
+---
+
+### What got built
+
+Implemented and verified the Phase 14 Internal Event subsystem as a
+transport-independent, lifecycle-aware Core mechanism.
+
+The implementation provides:
+
+* stable `EventId`, `EventType`, and `Scope` primitives;
+* immutable internal Event occurrences;
+* Event context built on the existing operation and security context mechanisms;
+* publisher and subscription lifecycle management;
+* explicit ownership and cancellation propagation;
+* bounded per-subscription event delivery;
+* FIFO ordering within a subscription;
+* independent execution across matching subscriptions;
+* subscriber failure isolation;
+* authorization through the existing Core security model;
+* runtime shutdown integration through the Engine Runtime lifecycle;
+* separation between Event publication and subscriber execution;
+* structural Event contract validation through the existing Universal Contract
+  layer;
+* separation between Event identity and Message identity; and
+* transport-independent local Event usage without introducing a distributed
+  messaging system.
+
+Phase 14 does not introduce durable persistence, replay, acknowledgement
+protocols, automatic retry, idempotency semantics, workflow execution, or
+Control Plane routing.
 
 ---
 
@@ -11008,6 +11041,32 @@ Phase 14 must not become:
 
 ---
 
+### Verification
+
+Phase 14 was verified through the complete Core unit and integration test
+suite.
+
+The Event implementation is covered at all required testing levels:
+
+```text
+Level 1
+→ source-file unit tests
+
+Level 2
+→ module composition tests in events/mod.rs
+
+Level 3
+→ public cross-module integration tests in tests/events.rs
+
+Runtime integration
+→ tests/runtime.rs
+
+Cross-cutting architecture verification
+→ tests/conformance.rs
+```
+
+---
+
 ### Files and Folders
 
 **Events**
@@ -11584,6 +11643,44 @@ no automatic retry
 
 Phase 14 is intentionally a small, lifecycle-aware internal notification
 mechanism rather than a general-purpose messaging platform.
+
+### Checklist
+
+* [x] Implement internal Event identity
+* [x] Implement Event type
+* [x] Implement Event scope
+* [x] Implement immutable Event occurrences
+* [x] Implement Event context and correlation propagation
+* [x] Implement Event publication
+* [x] Implement Event subscription
+* [x] Implement Event matching and scope filtering
+* [x] Implement bounded Event delivery
+* [x] Implement per-subscription FIFO ordering
+* [x] Implement independent cross-subscription concurrency
+* [x] Implement subscriber failure isolation
+* [x] Implement bounded buffering and overload behavior
+* [x] Implement publisher lifecycle
+* [x] Implement subscription lifecycle
+* [x] Implement publisher and subscription ownership
+* [x] Integrate established Core cancellation mechanisms
+* [x] Integrate existing security and authorization mechanisms
+* [x] Integrate Event lifecycle with Engine Runtime shutdown
+* [x] Preserve distinct Event and Message identity
+* [x] Preserve separation between Events and Streams
+* [x] Preserve separation between Events and Transport
+* [x] Preserve separation between Events and Provenance
+* [x] Preserve separation between Events and Observability
+* [x] Preserve the Phase 13 retry/idempotency boundary
+* [x] Keep Events transport-independent
+* [x] Keep Events non-durable by default
+* [x] Keep replay and acknowledgement outside the base mechanism
+* [x] Add source-file unit tests
+* [x] Add module-level composition tests in `events/mod.rs`
+* [x] Add public cross-module integration tests in `tests/events.rs`
+* [x] Add Runtime/Event integration coverage in `tests/runtime.rs`
+* [x] Add cross-cutting conformance coverage in `tests/conformance.rs`
+* [x] Preserve previously verified Core behavior
+* [x] Run complete repository verification
 
 ---
 
@@ -17718,6 +17815,69 @@ architecture.
   runtime/executor.
 * Streams and tasks integrate with the existing Phase 8–11 mechanisms without
   replacing their responsibilities.
+* Internal Events are optional Core infrastructure and MUST NOT require the
+  ecosystem to adopt an event-driven architecture.
+* An Event is a one-way notification that something happened or became true.
+  It is distinct from a Request, Response, Stream Item, Transport Frame,
+  Log, Metric, and Provenance Record.
+* The base Event mechanism is transport-independent and local/in-process.
+  Phase 14 does not implement a distributed message broker or durable event
+  transport.
+* Event identity is distinct from message identity:
+  `EventId` identifies the event occurrence, while `MessageId` identifies the
+  enclosing universal message when an event is represented through the
+  contract layer.
+* Event type and scope are explicit semantic properties. Scope uses exact
+  matching and does not introduce implicit hierarchical or wildcard
+  interpretation.
+* Event publication and subscriber execution are separate responsibilities.
+  The publisher selects matching subscriptions and creates a delivery handoff;
+  delivery infrastructure performs subscriber execution.
+* Event delivery is bounded and best-effort by default, with at-most-once
+  semantics. The base mechanism does not add durable delivery guarantees.
+* Ordering is preserved per publisher/subscription. No global ordering
+  guarantee is defined across unrelated publishers.
+* Independent subscriptions may execute concurrently without introducing
+  global serialization.
+* A slow subscriber must not indefinitely block publication or unrelated
+  subscriptions. Bounded queues and delivery scheduling provide explicit
+  overload behavior.
+* Subscriber failure, including a subscriber panic, must not automatically
+  terminate unrelated subscriptions or the Event subsystem.
+* Event subscriptions use the established Core cancellation mechanisms.
+  Phase 14 does not introduce a competing event-specific cancellation model.
+* Publisher and subscription ownership are explicit. Owner cancellation
+  propagates to owned Event resources and runtime shutdown participates in
+  Event lifecycle termination.
+* Event security reuses the existing Phase 9 authorization and security
+  context mechanisms. Phase 14 does not introduce a second authorization
+  framework.
+* Event context reuses existing Core operation, correlation, and security
+  context mechanisms. The full `EngineContext` is not copied automatically
+  into every Event.
+* Event payloads remain opaque to Core. Engines own event meaning, event type
+  definitions, payload schema, and emission conditions.
+* Events do not automatically become public ecosystem-wide APIs. Crossing a
+  formal engine/platform communication boundary requires an explicitly
+  defined communication mechanism.
+* Internal Events remain separate from the Control Plane. Events are internal
+  notifications; the Control Plane is responsible for formal communication,
+  admission, destination resolution, and routing.
+* Events remain separate from Phase 12 application streams. A stream item is
+  part of an ordered operation result sequence, while an Event is an
+  occurrence notification.
+* Events remain separate from Phase 10 provenance. Events announce occurrences;
+  provenance records historical relationships and execution facts.
+* Events remain separate from Phase 11 observability. An Event may generate
+  logs, metrics, traces, or diagnostics, but it does not replace those systems.
+* Phase 14 does not create an independent retry or idempotency framework.
+  Explicit retry/idempotent handling uses the established Phase 13 mechanisms.
+* Event persistence, replay, acknowledgements, consumer offsets, checkpoints,
+  and durable recovery are outside the base Phase 14 mechanism.
+* Event lifecycle is coordinated with the Engine Runtime lifecycle without
+  creating a competing runtime lifecycle state machine.
+* Phase 14 extends previously verified Core mechanisms rather than replacing
+  them.
 
 ## Open Questions
 
@@ -17725,9 +17885,9 @@ None currently. Concrete trait signatures, provider choices, serialization, asyn
 
 ### Current State
 
-Phase 13 is implemented, merged, and verified.
+Phase 14 is implemented, merged, and verified.
 
-Phases 0 through 13 are now verified.
+Phases 0 through 14 are now verified.
 
 The Core currently provides:
 
@@ -17742,48 +17902,45 @@ The Core currently provides:
 * Middleware and Security;
 * Artifact and Provenance systems;
 * Configuration, Health, and Observability;
-* Streaming, Concurrency, and Background Tasks; and
-* Retry and Idempotency mechanisms.
+* Streaming, Concurrency, and Background Tasks;
+* Retry and Idempotency mechanisms; and
+* the Internal Event subsystem.
 
-Phase 13 preserves the established Core architecture:
-
-```text
-Operation
-    │
-    ├── Attempt 1
-    │      ↓
-    │    FAILED
-    │      ↓
-    ├── Attempt 2
-    │      ↓
-    │    ...
-    │
-    └── same OperationId
-
-```
+Phase 14 provides optional internal notification infrastructure while remaining
+separate from transport, streaming, Control Plane routing, durable messaging,
+workflow execution, and domain semantics.
 
 ### Next Step
 
-Proceed to Phase 14: Internal Events.
+Proceed to Phase 15: Control Plane.
 
-Phase 14 will introduce the shared internal event mechanism for Core and engine
-runtime communication, including:
+Phase 15 introduces the communication-focused Control Plane responsible for:
 
-* event identity;
-* event type;
-* event scope;
-* event payload;
-* event publication;
-* event subscription;
-* delivery semantics;
-* cancellation;
-* ownership;
-* ordering; and
-* lifecycle support.
+* communication admission;
+* request validation at the communication boundary;
+* destination resolution;
+* routing;
+* context propagation;
+* communication failure handling; and
+* coordination with the existing Runtime, Security, Contract, Transport,
+  Capability, and Event mechanisms.
 
-Phase 14 must remain an optional internal infrastructure mechanism and must not
-turn Nizaam into an event-driven architecture by default.
+The Control Plane must remain separate from the Internal Event subsystem.
 
-It must also remain separate from the Control Plane. Internal Events provide
-internal/local notification, while the Phase 15 Control Plane provides formal
-communication and routing.
+Internal Events provide optional internal/local notification:
+
+```text
+Internal Event
+→ local occurrence notification
+
+The Control Plane provides formal communication and routing:
+
+Control Plane
+→ communication admission
+→ destination resolution
+→ routing
+→ communication failure handling
+```
+
+Internal Events must not automatically become Control Plane messages, and the
+Control Plane must not replace the existing Event subsystem.

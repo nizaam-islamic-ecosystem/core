@@ -3,6 +3,7 @@ use core::fmt;
 use crate::contracts::compatibility::compare_versions;
 use crate::contracts::descriptor::Interaction;
 use crate::contracts::envelope::MessageEnvelope;
+use crate::contracts::event::UniversalEvent;
 use crate::contracts::request::UniversalRequest;
 use crate::contracts::response::UniversalResponse;
 
@@ -11,6 +12,8 @@ use crate::contracts::response::UniversalResponse;
 pub enum ValidationError {
     EmptyPayload,
     InteractionMismatch,
+    EmptyEventType,
+    EmptyEventScope,
     CapabilityRequirementMismatch,
     MinimumContractVersionMismatch,
     PayloadDescriptorMismatch,
@@ -21,6 +24,8 @@ impl fmt::Display for ValidationError {
         let message = match self {
             Self::EmptyPayload => "a contract payload must not be empty",
             Self::InteractionMismatch => "the envelope interaction does not match its message kind",
+            Self::EmptyEventType => "an event type must not be empty",
+            Self::EmptyEventScope => "an event scope must not be empty",
             Self::CapabilityRequirementMismatch => {
                 "the required capability does not match the contract"
             }
@@ -78,16 +83,38 @@ pub fn validate_response(response: &UniversalResponse) -> Result<(), ValidationE
     validate_envelope(&response.envelope)
 }
 
+/// Validates the structural invariants of a universal Event.
+///
+/// Event-specific semantics are limited to the Event interaction marker, the
+/// non-empty Event type, and the non-empty Event scope. Generic envelope rules
+/// continue to be enforced by [`validate_envelope`].
+pub fn validate_event(event: &UniversalEvent) -> Result<(), ValidationError> {
+    if event.envelope.metadata.descriptor.interaction != Interaction::Event {
+        return Err(ValidationError::InteractionMismatch);
+    }
+
+    if event.event_type().trim().is_empty() {
+        return Err(ValidationError::EmptyEventType);
+    }
+
+    if event.scope().trim().is_empty() {
+        return Err(ValidationError::EmptyEventScope);
+    }
+
+    validate_envelope(&event.envelope)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::contracts::descriptor::{
         ContractDescriptor, EncodedPayload, Interaction, PayloadDescriptor, Version,
     };
+    use crate::contracts::event::UniversalEvent;
     use crate::contracts::metadata::{ContractMetadata, Participants};
     use crate::contracts::request::UniversalRequest;
     use crate::identity::{
-        CapabilityId, ContractId, CorrelationId, EngineId, MessageId, OperationId,
+        CapabilityId, ContractId, CorrelationId, EngineId, EventId, MessageId, OperationId,
     };
     use crate::operation::{Operation, OperationContext};
 
@@ -261,6 +288,43 @@ mod tests {
     }
 
     #[test]
+    fn valid_event_passes_structural_validation() {
+        let descriptor = ContractDescriptor::new(
+            ContractId::new("event.contract").unwrap(),
+            CapabilityId::new("events.read").unwrap(),
+            Version::new(1, 0, 0),
+            Interaction::Event,
+            PayloadDescriptor::new("application/octet-stream", Version::new(1, 0, 0)).unwrap(),
+        );
+        let metadata = ContractMetadata::new(
+            descriptor.clone(),
+            Participants::new(
+                EngineId::new("publisher").unwrap(),
+                EngineId::new("subscriber").unwrap(),
+            ),
+        );
+        let envelope = MessageEnvelope::new(
+            MessageId::new("event-message-1").unwrap(),
+            OperationContext::new(Operation::new(
+                OperationId::new("event-operation-1").unwrap(),
+                CorrelationId::new("event-correlation-1").unwrap(),
+            )),
+            metadata,
+            EncodedPayload::new(descriptor.payload, b"event payload"),
+        );
+
+        let event = UniversalEvent::new(
+            envelope,
+            EventId::new("event-1").unwrap(),
+            "operation.completed",
+            "engine:test",
+        )
+        .unwrap();
+
+        assert_eq!(validate_event(&event), Ok(()));
+    }
+
+    #[test]
     fn validation_error_display_messages() {
         assert_eq!(
             ValidationError::EmptyPayload.to_string(),
@@ -269,6 +333,14 @@ mod tests {
         assert_eq!(
             ValidationError::InteractionMismatch.to_string(),
             "the envelope interaction does not match its message kind"
+        );
+        assert_eq!(
+            ValidationError::EmptyEventType.to_string(),
+            "an event type must not be empty"
+        );
+        assert_eq!(
+            ValidationError::EmptyEventScope.to_string(),
+            "an event scope must not be empty"
         );
         assert_eq!(
             ValidationError::CapabilityRequirementMismatch.to_string(),

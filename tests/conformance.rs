@@ -1,21 +1,26 @@
-//! Integration tests for Phase 9 architectural conformance.
+//! Integration tests for cross-cutting architectural conformance.
 //!
-//! These tests verify the security and middleware boundaries as an external
-//! Core consumer would observe them. Individual primitive behavior belongs to
-//! unit tests, public security API composition belongs to `tests/security.rs`,
-//! and runtime-specific execution coverage belongs to `tests/runtime.rs`.
+//! These tests verify Core boundaries as an external consumer would observe
+//! them. Individual primitive behavior belongs to unit tests, public security
+//! API composition belongs to `tests/security.rs`, Event subsystem behavior
+//! belongs to `tests/events.rs`, and runtime-specific execution coverage
+//! belongs to `tests/runtime.rs`.
 
 use std::sync::{Arc, Barrier, Mutex};
 
 use nizaam_core::contracts::{
     ContractDescriptor, ContractMetadata, EncodedPayload, Interaction, MessageEnvelope,
-    Participants, PayloadDescriptor, UniversalRequest, UniversalResponse,
+    Participants, PayloadDescriptor, UniversalEvent, UniversalRequest, UniversalResponse,
+};
+use nizaam_core::events::{
+    Event, EventContext, EventLifecycle, EventPublisher, EventSubscription, Scope,
 };
 use nizaam_core::identity::{
-    AttemptId, CapabilityId, ContractId, CorrelationId, EngineId, MessageId, NodeId, OperationId,
+    AttemptId, CapabilityId, ContractId, CorrelationId, EngineId, EventId, MessageId, NodeId,
+    OperationId,
 };
 use nizaam_core::middleware::stages::{Middleware, MiddlewareResult};
-use nizaam_core::operation::{Operation, OperationContext};
+use nizaam_core::operation::{CancellationToken, Operation, OperationContext};
 use nizaam_core::prelude::{Status, Version};
 use nizaam_core::retry::{Attempt, AttemptLifecycleState};
 use nizaam_core::runtime::pipeline::RequestPipelineError;
@@ -270,6 +275,241 @@ impl Authorizer for InspectingAuthorizer {
 
         Ok(AuthorizationDecision::Allow)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 14 Event architectural conformance
+// ---------------------------------------------------------------------------
+
+fn event_envelope_with_context(
+    message_id: &str,
+    operation_context: OperationContext,
+) -> MessageEnvelope {
+    let mut envelope = request_with_context(
+        message_id,
+        "conformance.event-capability",
+        b"opaque event payload",
+        operation_context,
+    )
+    .envelope;
+
+    envelope.metadata.descriptor.interaction = Interaction::Event;
+    envelope
+}
+
+#[test]
+fn event_and_message_identity_must_remain_distinct_at_the_contract_boundary() {
+    let event_id = EventId::new("conformance-event-1").unwrap();
+    let envelope = event_envelope_with_context(
+        "conformance-event-message-1",
+        operation_context("conformance-event-operation"),
+    );
+
+    let event = UniversalEvent::new(
+        envelope,
+        event_id.clone(),
+        "operation.completed",
+        "engine:test",
+    )
+    .unwrap();
+
+    assert!(event.has_event_interaction());
+    assert_eq!(event.event_id(), &event_id);
+    assert_eq!(event.message_id().as_str(), "conformance-event-message-1");
+    assert_ne!(event.event_id().as_str(), event.message_id().as_str());
+}
+
+#[test]
+fn event_semantic_metadata_must_remain_distinct_from_request_capability_metadata() {
+    let envelope = event_envelope_with_context(
+        "conformance-event-message-2",
+        operation_context("conformance-event-operation-2"),
+    );
+
+    let event = UniversalEvent::new(
+        envelope,
+        EventId::new("conformance-event-2").unwrap(),
+        "operation.completed",
+        "engine:test",
+    )
+    .unwrap();
+
+    assert_eq!(
+        event.envelope.metadata.descriptor.capability_id.as_str(),
+        "conformance.event-capability"
+    );
+    assert_eq!(event.event_type(), "operation.completed");
+    assert_eq!(event.scope(), "engine:test");
+    assert_ne!(
+        event.event_type(),
+        event.envelope.metadata.descriptor.capability_id.as_str()
+    );
+    assert_eq!(
+        event.envelope.metadata.descriptor.interaction,
+        Interaction::Event
+    );
+}
+
+#[test]
+fn event_context_must_reuse_core_operation_and_security_context() {
+    let operation_context = operation_context("conformance-event-context");
+    let principal = user_principal("event-context-user");
+    let calling_service = service_principal("event-context-service");
+    let security_context = SecurityContext::new(principal.clone(), Some(calling_service.clone()));
+
+    let event_context = EventContext::empty()
+        .with_operation_context(operation_context.clone())
+        .with_security_context(security_context.clone());
+
+    let event = Event::new_with_context(
+        EventId::new("conformance-event-context-1").unwrap(),
+        "operation.completed",
+        Scope::new("engine:test").unwrap(),
+        event_context,
+    )
+    .unwrap();
+
+    assert_eq!(
+        event.context().operation_context(),
+        Some(&operation_context)
+    );
+    assert_eq!(event.context().security_context(), Some(&security_context));
+    assert_eq!(
+        event.context().security_context().unwrap().principal(),
+        &principal
+    );
+    assert_eq!(
+        event
+            .context()
+            .security_context()
+            .unwrap()
+            .calling_service(),
+        Some(&calling_service)
+    );
+}
+
+#[test]
+fn event_subscription_authorization_must_use_existing_core_security_context_and_authorizer() {
+    struct InspectingEventAuthorizer {
+        expected_principal: PrincipalIdentity,
+        expected_calling_service: PrincipalIdentity,
+        expected_capability: CapabilityId,
+        observed_calls: Arc<Mutex<usize>>,
+    }
+
+    impl Authorizer for InspectingEventAuthorizer {
+        fn authorize(
+            &self,
+            request: &AuthorizationRequest<'_>,
+        ) -> Result<AuthorizationDecision, AuthorizationError> {
+            assert_eq!(request.principal(), &self.expected_principal);
+            assert_eq!(
+                request.calling_service(),
+                Some(&self.expected_calling_service)
+            );
+            assert_eq!(request.capability(), &self.expected_capability);
+            *self.observed_calls.lock().unwrap() += 1;
+            Ok(AuthorizationDecision::Allow)
+        }
+    }
+
+    let owner = CancellationToken::new();
+    let principal = user_principal("event-subscriber-user");
+    let calling_service = service_principal("event-subscriber-service");
+    let capability = CapabilityId::new("events.read").unwrap();
+    let observed_calls = Arc::new(Mutex::new(0usize));
+
+    let subscription = EventSubscription::new(
+        "operation.completed",
+        Scope::new("engine:test").unwrap(),
+        |_event: &Event| {},
+        &owner,
+    )
+    .unwrap()
+    .with_security_context(SecurityContext::new(
+        principal.clone(),
+        Some(calling_service.clone()),
+    ))
+    .with_authorizer(Arc::new(InspectingEventAuthorizer {
+        expected_principal: principal,
+        expected_calling_service: calling_service,
+        expected_capability: capability.clone(),
+        observed_calls: Arc::clone(&observed_calls),
+    }))
+    .requiring_capability(capability.clone());
+
+    assert_eq!(subscription.authorization_capability(), Some(&capability));
+    assert_eq!(
+        subscription.authorization_decision().unwrap(),
+        AuthorizationDecision::Allow
+    );
+    assert_eq!(*observed_calls.lock().unwrap(), 1);
+}
+
+#[test]
+fn event_publication_and_request_pipeline_must_remain_independent() {
+    let event_calls = Arc::new(Mutex::new(0usize));
+    let lifecycle = Arc::new(EventLifecycle::new());
+    let owner = CancellationToken::new();
+    let publisher = EventPublisher::new(Arc::clone(&lifecycle), &owner);
+    publisher.activate().unwrap();
+
+    let event_calls_for_handler = Arc::clone(&event_calls);
+    let subscription = EventSubscription::new(
+        "operation.completed",
+        Scope::new("engine:test").unwrap(),
+        move |_event: &Event| {
+            *event_calls_for_handler.lock().unwrap() += 1;
+        },
+        &owner,
+    )
+    .unwrap();
+
+    publisher.subscribe(subscription).unwrap();
+
+    let publication = publisher
+        .publish(
+            Event::new(
+                EventId::new("conformance-independent-event").unwrap(),
+                "operation.completed",
+                Scope::new("engine:test").unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    assert_eq!(publication.subscription_count(), 1);
+    assert_eq!(*event_calls.lock().unwrap(), 0);
+
+    let pipeline_events = Arc::new(Mutex::new(Vec::new()));
+    let pipeline_events_for_downstream = Arc::clone(&pipeline_events);
+    let pipeline = ExecutionPipeline::new().with_middleware(RecordingMiddleware {
+        events: Arc::clone(&pipeline_events),
+    });
+
+    let mut context = context("conformance-event-request-independence");
+    let mut request = request(
+        "conformance-event-request-message",
+        "conformance-event-request",
+        "conformance.request",
+        b"request",
+    );
+
+    let result: Result<UniversalResponse, RequestPipelineError<()>> =
+        pipeline.run_request(&mut context, &mut request, move |_context, request| {
+            pipeline_events_for_downstream
+                .lock()
+                .unwrap()
+                .push("downstream");
+            Ok(response(request, b"response"))
+        });
+
+    assert!(result.is_ok());
+    assert_eq!(
+        pipeline_events.lock().unwrap().as_slice(),
+        ["middleware", "downstream"]
+    );
+    assert_eq!(*event_calls.lock().unwrap(), 0);
 }
 
 #[test]

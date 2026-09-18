@@ -78,6 +78,7 @@ mod artifact;
 mod capability;
 mod contract;
 mod engine;
+mod event;
 mod message;
 mod operation;
 mod plan;
@@ -86,10 +87,10 @@ pub use artifact::ArtifactId;
 pub use capability::CapabilityId;
 pub use contract::ContractId;
 pub use engine::{EngineId, EngineInstanceId};
+pub use event::EventId;
 pub use message::{CorrelationId, MessageId};
 pub use operation::OperationId;
 pub use plan::{AttemptId, NodeId, PlanId};
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +206,15 @@ mod tests {
         assert!(AttemptId::new("").is_err());
     }
 
+    #[test]
+    fn event_id_constructs_and_rejects_empty() {
+        let id = EventId::new("event-123").unwrap();
+        assert_eq!(id.as_str(), "event-123");
+        assert_eq!(id.to_string(), "event-123");
+        assert!(EventId::new("").is_err());
+        assert!(EventId::new("   ").is_err());
+    }
+
     // -------------------------------------------------------------------------
     // FromStr round-trip for every identity type
     // -------------------------------------------------------------------------
@@ -224,6 +234,7 @@ mod tests {
         assert_eq!(PlanId::from_str("pl1").unwrap().as_str(), "pl1");
         assert_eq!(NodeId::from_str("n1").unwrap().as_str(), "n1");
         assert_eq!(AttemptId::from_str("at1").unwrap().as_str(), "at1");
+        assert_eq!(EventId::from_str("ev1").unwrap().as_str(), "ev1");
     }
 
     // -------------------------------------------------------------------------
@@ -246,6 +257,7 @@ mod tests {
         check(PlanId::new("pl").unwrap(), "pl");
         check(NodeId::new("n").unwrap(), "n");
         check(AttemptId::new("at").unwrap(), "at");
+        check(EventId::new("ev").unwrap(), "ev");
     }
 
     // -------------------------------------------------------------------------

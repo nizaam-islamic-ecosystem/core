@@ -88,7 +88,6 @@ pub struct LogEvent {
 impl LogEvent {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        event_id: EventId,
         event_name: EventName,
         level: LogLevel,
         source: LogSource,
@@ -103,16 +102,69 @@ impl LogEvent {
 
         validate_log_inputs(&source, scope, &context, &component, &message)?;
 
-        let event = Self {
-            event: build_universal_event(
-                event_id,
-                event_name,
-                source.clone(),
-                scope,
-                context.clone(),
-                message.clone(),
-                event_type,
+        let message_id = context
+            .message_id
+            .clone()
+            .unwrap_or_else(MessageId::generate);
+
+        let sender = match &source {
+            LogSource::Core => EngineId::new("core").expect("static core engine id is valid"),
+            LogSource::ControlPlane => {
+                EngineId::new("control-plane").expect("static control-plane engine id is valid")
+            }
+            LogSource::Runtime => {
+                EngineId::new("runtime").expect("static runtime engine id is valid")
+            }
+            LogSource::Engine(engine_id) => engine_id.clone(),
+        };
+
+        let descriptor = ContractDescriptor::new(
+            ContractId::new("logging.event").expect("static logging contract id is valid"),
+            CapabilityId::new("logging.emit").expect("static logging capability id is valid"),
+            Version::new(1, 0, 0),
+            Interaction::Event,
+            PayloadDescriptor::new("text/plain", Version::new(1, 0, 0))
+                .expect("static logging payload descriptor is valid"),
+        );
+
+        let payload_descriptor = descriptor.payload.clone();
+        let metadata = ContractMetadata::new(
+            descriptor,
+            Participants::new(
+                sender,
+                EngineId::new("logging-system").expect("static logging-system engine id is valid"),
             ),
+        );
+
+        let envelope = MessageEnvelope::new(
+            message_id,
+            context.operation.clone(),
+            metadata,
+            EncodedPayload::new(payload_descriptor, message.as_bytes().to_vec()),
+        );
+
+        let event_scope = match scope {
+            LogScope::Global => "global".to_owned(),
+            LogScope::Local => format!(
+                "engine:{}",
+                context
+                    .engine_id
+                    .as_ref()
+                    .expect("validated local logging events have an engine context")
+                    .as_str()
+            ),
+        };
+
+        let event = UniversalEvent::new(
+            envelope,
+            event_name.to_string(),
+            event_type.as_str(),
+            event_scope,
+        )
+        .expect("validated logging metadata must produce a valid universal Event");
+
+        let event = Self {
+            event,
             timestamp: SystemTime::now(),
             level,
             source,
@@ -158,6 +210,26 @@ impl LogEvent {
     /// Returns the complete universal Event contract.
     pub fn universal_event(&self) -> &UniversalEvent {
         &self.event
+    }
+
+    /// Returns the optional logging status.
+    pub fn status(&self) -> Option<&Status> {
+        self.status.as_ref()
+    }
+
+    /// Returns the optional error reference attached to the log record.
+    pub fn error_reference(&self) -> Option<&ErrorReference> {
+        self.error_reference.as_ref()
+    }
+
+    /// Returns the logging metadata.
+    pub fn metadata(&self) -> &LogMetadata {
+        &self.metadata
+    }
+
+    /// Returns the optional artifact reference attached to the log record.
+    pub fn artifact_reference(&self) -> Option<&ArtifactReference> {
+        self.artifact_reference.as_ref()
     }
 
     pub fn with_status(mut self, status: Status) -> Self {
@@ -240,74 +312,4 @@ fn validate_log_inputs(
         return Err(LogValidationError::SourceContextMismatch);
     }
     Ok(())
-}
-
-fn build_universal_event(
-    event_id: EventId,
-    event_name: EventName,
-    source: LogSource,
-    scope: LogScope,
-    context: LogContext,
-    message: String,
-    event_type: LogEventType,
-) -> UniversalEvent {
-    let message_id = context.message_id.clone().unwrap_or_else(|| {
-        MessageId::new(format!("log-message-{event_id}"))
-            .expect("derived logging message ids are non-empty")
-    });
-
-    let sender = match &source {
-        LogSource::Core => EngineId::new("core").expect("static core engine id is valid"),
-        LogSource::ControlPlane => {
-            EngineId::new("control-plane").expect("static control-plane engine id is valid")
-        }
-        LogSource::Runtime => EngineId::new("runtime").expect("static runtime engine id is valid"),
-        LogSource::Engine(engine_id) => engine_id.clone(),
-    };
-
-    let descriptor = ContractDescriptor::new(
-        ContractId::new("logging.event").expect("static logging contract id is valid"),
-        CapabilityId::new("logging.emit").expect("static logging capability id is valid"),
-        Version::new(1, 0, 0),
-        Interaction::Event,
-        PayloadDescriptor::new("text/plain", Version::new(1, 0, 0))
-            .expect("static logging payload descriptor is valid"),
-    );
-
-    let payload_descriptor = descriptor.payload.clone();
-    let metadata = ContractMetadata::new(
-        descriptor,
-        Participants::new(
-            sender,
-            EngineId::new("logging-system").expect("static logging-system engine id is valid"),
-        ),
-    );
-
-    let envelope = MessageEnvelope::new(
-        message_id,
-        context.operation.clone(),
-        metadata,
-        EncodedPayload::new(payload_descriptor, message.as_bytes().to_vec()),
-    );
-
-    let event_scope = match scope {
-        LogScope::Global => "global".to_owned(),
-        LogScope::Local => format!(
-            "engine:{}",
-            context
-                .engine_id
-                .as_ref()
-                .expect("validated local logging events have an engine context")
-                .as_str()
-        ),
-    };
-
-    UniversalEvent::from_parts(
-        envelope,
-        event_id,
-        event_name.to_string(),
-        event_type.as_str(),
-        event_scope,
-    )
-    .expect("validated logging metadata must produce a valid universal Event")
 }

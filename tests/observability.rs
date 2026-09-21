@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use nizaam_core::error::{ErrorClass, ErrorCode, ErrorDefinition, ErrorOwner, Severity};
 use nizaam_core::events::EventName;
-use nizaam_core::identity::{CorrelationId, EventId, OperationId};
+use nizaam_core::identity::{CorrelationId, OperationId};
 use nizaam_core::logging::{
     LogContext, LogEvent, LogEventType, LogLevel, LogScope, LogSink, LogSource, LoggingSystem,
 };
@@ -47,9 +47,8 @@ impl LogSink for ChannelSink {
     }
 }
 
-fn global_event(context: OperationContext, event_id: &str) -> LogEvent {
+fn global_event(context: OperationContext) -> LogEvent {
     LogEvent::new(
-        EventId::new(event_id).unwrap(),
         EventName::new("observability.event").unwrap(),
         LogLevel::Info,
         LogSource::Core,
@@ -101,7 +100,7 @@ fn correlation_can_be_carried_into_the_existing_logging_context() {
     let operation = operation_context();
     let correlation = CorrelationContext::from_operation_context(&operation);
 
-    let event = global_event(operation, "observability-message");
+    let event = global_event(operation);
 
     assert_eq!(
         event.context.operation.operation.correlation_id,
@@ -124,9 +123,7 @@ fn observability_logger_publishes_through_the_existing_logging_system() {
     let logger = ObservabilityLogger::new(&instance);
 
     assert_eq!(
-        logger
-            .emit(global_event(operation_context(), "observability-event"))
-            .unwrap(),
+        logger.emit(global_event(operation_context())).unwrap(),
         nizaam_core::logging::DispatchOutcome::Queued
     );
 

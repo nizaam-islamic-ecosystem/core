@@ -4,7 +4,6 @@ use std::thread;
 use std::time::Duration;
 
 use nizaam_core::events::EventName;
-use nizaam_core::identity::EventId;
 use nizaam_core::prelude::*;
 
 struct ChannelSink(mpsc::Sender<LogEvent>);
@@ -63,7 +62,6 @@ fn operation_context() -> OperationContext {
 #[test]
 fn global_events_preserve_shared_context() {
     let event = LogEvent::new(
-        EventId::new("event-1").unwrap(),
         EventName::new("logging.event").unwrap(),
         LogLevel::Info,
         LogSource::ControlPlane,
@@ -84,7 +82,6 @@ fn global_events_preserve_shared_context() {
 fn local_engine_events_require_matching_engine_context() {
     let engine_id: EngineId = EngineId::new("arabic").unwrap();
     let event: LogEvent = LogEvent::new(
-        EventId::new("event-2").unwrap(),
         EventName::new("logging.event").unwrap(),
         LogLevel::Debug,
         LogSource::Engine(engine_id.clone()),
@@ -104,7 +101,6 @@ fn local_engine_events_require_matching_engine_context() {
 fn invalid_scope_and_source_combinations_are_rejected() {
     let engine_id = EngineId::new("arabic").unwrap();
     let global_engine_event = LogEvent::new(
-        EventId::new("event-3").unwrap(),
         EventName::new("logging.event").unwrap(),
         LogLevel::Info,
         LogSource::Engine(engine_id),
@@ -121,7 +117,6 @@ fn invalid_scope_and_source_combinations_are_rejected() {
     );
 
     let local_core_event = LogEvent::new(
-        EventId::new("event-4").unwrap(),
         EventName::new("logging.event").unwrap(),
         LogLevel::Info,
         LogSource::Core,
@@ -141,7 +136,6 @@ fn invalid_scope_and_source_combinations_are_rejected() {
 #[test]
 fn empty_structured_fields_are_rejected() {
     let event = LogEvent::new(
-        EventId::new("event-5").unwrap(),
         EventName::new("logging.event").unwrap(),
         LogLevel::Info,
         LogSource::Core,
@@ -168,7 +162,6 @@ fn scoped_instances_fan_out_events_to_subscribers() {
     let instance = system.instance(LogScope::Global, source.clone());
 
     let event = LogEvent::new(
-        EventId::new("event-6").unwrap(),
         EventName::new("logging.event").unwrap(),
         LogLevel::Info,
         source,
@@ -208,7 +201,6 @@ fn instance_rejects_events_from_another_scope() {
     let system = LoggingSystem::new(1).unwrap();
     let instance = system.instance(LogScope::Global, LogSource::ControlPlane);
     let event = LogEvent::new(
-        EventId::new("event-7").unwrap(),
         EventName::new("logging.event").unwrap(),
         LogLevel::Info,
         LogSource::ControlPlane,
@@ -238,7 +230,6 @@ fn sink_can_subscribe_during_publish_without_deadlocking() {
     let instance = system.instance(LogScope::Global, LogSource::ControlPlane);
 
     let event = LogEvent::new(
-        EventId::new("event-8").unwrap(),
         EventName::new("logging.event").unwrap(),
         LogLevel::Info,
         LogSource::ControlPlane,
@@ -267,9 +258,8 @@ fn panicking_sink_is_removed_and_later_sinks_still_receive_events() {
 
     let instance = system.instance(LogScope::Global, LogSource::ControlPlane);
 
-    for event_id in ["event-9", "event-10"] {
+    for _ in 0..2 {
         let event = LogEvent::new(
-            EventId::new(event_id).unwrap(),
             EventName::new("logging.event").unwrap(),
             LogLevel::Info,
             LogSource::ControlPlane,
@@ -303,7 +293,6 @@ fn shutdown_preserves_events_accepted_before_shutdown() {
         publisher_barrier.wait();
         instance.publish(
             LogEvent::new(
-                EventId::new("event-11").unwrap(),
                 EventName::new("logging.event").unwrap(),
                 LogLevel::Info,
                 LogSource::ControlPlane,
@@ -327,7 +316,7 @@ fn shutdown_preserves_events_accepted_before_shutdown() {
     shutdown.join().unwrap().unwrap();
     match publish_result {
         Ok(DispatchOutcome::Queued) => {
-            assert_eq!(receiver.recv().unwrap().event_id().as_str(), "event-11");
+            assert!(!receiver.recv().unwrap().event_id().as_str().is_empty());
         }
         Err(InstanceError::Dispatch(DispatchError::Closed)) => {}
         result => panic!("unexpected publish result: {result:?}"),
@@ -344,7 +333,6 @@ fn shutdown_from_a_sink_callback_does_not_deadlock() {
     }));
     let instance = system.instance(LogScope::Global, LogSource::ControlPlane);
     let event = LogEvent::new(
-        EventId::new("event-12").unwrap(),
         EventName::new("logging.event").unwrap(),
         LogLevel::Info,
         LogSource::ControlPlane,

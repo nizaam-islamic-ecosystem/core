@@ -21,7 +21,7 @@ mod tests {
 
     use super::*;
     use crate::events::EventName;
-    use crate::identity::{CorrelationId, EngineId, EventId, MessageId, OperationId};
+    use crate::identity::{CorrelationId, EngineId, MessageId, OperationId};
     use crate::operation::{Operation, OperationContext};
 
     struct RecordingSink {
@@ -55,7 +55,6 @@ mod tests {
 
     fn global_event() -> LogEvent {
         LogEvent::new(
-            EventId::new("log-event-global-1").unwrap(),
             EventName::new("logging.event").unwrap(),
             LogLevel::Info,
             LogSource::Core,
@@ -70,7 +69,6 @@ mod tests {
 
     fn local_engine_event(engine_id: EngineId) -> LogEvent {
         LogEvent::new(
-            EventId::new("log-event-local-1").unwrap(),
             EventName::new("engine.event").unwrap(),
             LogLevel::Info,
             LogSource::Engine(engine_id.clone()),
@@ -85,11 +83,9 @@ mod tests {
 
     #[test]
     fn log_event_constructs_universal_event_internally() {
-        let event_id = EventId::new("log-event-1").unwrap();
         let message_id = MessageId::new("message-1").unwrap();
 
         let event = LogEvent::new(
-            event_id.clone(),
             EventName::new("logging.event").unwrap(),
             LogLevel::Info,
             LogSource::Core,
@@ -102,13 +98,11 @@ mod tests {
         .unwrap();
 
         assert!(!event.event_id().as_str().is_empty());
-        assert_eq!(event.event_id(), &event_id);
         assert_eq!(event.message_id(), &message_id);
         assert_eq!(event.event_name().as_str(), "logging.event");
         assert_eq!(event.event_type(), "diagnostic");
         assert_eq!(event.event_scope(), "global");
         assert_eq!(event.context.message_id.as_ref(), Some(&message_id));
-        assert_ne!(event.event_id().as_str(), message_id.as_str());
     }
 
     #[test]
@@ -161,7 +155,6 @@ mod tests {
         let hadith = EngineId::new("hadith-engine").unwrap();
 
         let event = LogEvent::new(
-            EventId::new("log-event-mismatch-1").unwrap(),
             EventName::new("engine.event").unwrap(),
             LogLevel::Info,
             LogSource::Engine(quran),
@@ -197,7 +190,6 @@ mod tests {
         let instance = system.instance(LogScope::Local, LogSource::Engine(engine.clone()));
 
         let event = LogEvent::new(
-            EventId::new("log-event-context-1").unwrap(),
             EventName::new("quran.request").unwrap(),
             LogLevel::Warning,
             LogSource::Engine(engine.clone()),

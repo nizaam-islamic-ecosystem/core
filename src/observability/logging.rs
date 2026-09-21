@@ -56,7 +56,7 @@ mod tests {
 
     use super::*;
     use crate::events::EventName;
-    use crate::identity::{CorrelationId, EventId, OperationId};
+    use crate::identity::{CorrelationId, OperationId};
     use crate::logging::{LogContext, LogEventType, LogLevel, LogSink, LoggingSystem};
     use crate::operation::{Operation, OperationContext};
 
@@ -75,9 +75,8 @@ mod tests {
         ))
     }
 
-    fn global_event(event_id: &str) -> LogEvent {
+    fn global_event() -> LogEvent {
         LogEvent::new(
-            EventId::new(event_id).unwrap(),
             EventName::new("observability.event").unwrap(),
             LogLevel::Info,
             LogSource::Core,
@@ -97,7 +96,7 @@ mod tests {
         system.subscribe(Arc::new(ChannelSink(sender)));
         let instance = system.instance(LogScope::Global, LogSource::Core);
         let logger = ObservabilityLogger::new(&instance);
-        let event = global_event("event-1");
+        let event = global_event();
         let event_id = event.event_id().clone();
 
         assert_eq!(logger.emit(event).unwrap(), DispatchOutcome::Queued);
@@ -125,7 +124,6 @@ mod tests {
         let logger = ObservabilityLogger::new(&instance);
 
         let event = LogEvent::new(
-            EventId::new("event-2").unwrap(),
             EventName::new("observability.event").unwrap(),
             LogLevel::Info,
             LogSource::Core,
@@ -157,7 +155,7 @@ mod tests {
         system.shutdown().unwrap();
 
         assert_eq!(
-            logger.emit(global_event("event-3")),
+            logger.emit(global_event()),
             Err(InstanceError::Dispatch(
                 crate::logging::DispatchError::Closed
             ))

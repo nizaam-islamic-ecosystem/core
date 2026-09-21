@@ -27,7 +27,6 @@ use nizaam_core::health::{
     CapabilityHealthReport, DependencyId, DependencyReport, DependencyRequirement, HealthReport,
     HealthStatus, LivenessReport, ReadinessReport,
 };
-use nizaam_core::identity::EventId;
 use nizaam_core::identity::{
     CapabilityId, ContractId, CorrelationId, EngineId, MessageId, OperationId,
 };
@@ -194,7 +193,6 @@ impl LogSink for ChannelSink {
 
 fn global_log_event(context: OperationContext) -> LogEvent {
     LogEvent::new(
-        EventId::new("phase11.log").unwrap(),
         EventName::new("phase11.log").unwrap(),
         LogLevel::Info,
         LogSource::Core,

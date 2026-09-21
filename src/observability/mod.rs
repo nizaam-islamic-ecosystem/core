@@ -30,7 +30,7 @@ pub use tracing::{
 mod test {
     use super::*;
     use crate::events::EventName;
-    use crate::identity::{CorrelationId, EventId, OperationId};
+    use crate::identity::{CorrelationId, OperationId};
     use crate::logging::{LogContext, LogEvent, LogEventType, LogLevel, LogScope, LogSource};
     use crate::operation::{Operation, OperationContext};
 
@@ -88,7 +88,6 @@ mod test {
 
         let log_context = LogContext::new(operation_context);
         let event = LogEvent::new(
-            EventId::new("event-1").unwrap(),
             EventName::new("logging.event").unwrap(),
             LogLevel::Info,
             LogSource::Core,

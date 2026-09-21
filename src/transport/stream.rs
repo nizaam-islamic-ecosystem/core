@@ -134,6 +134,14 @@ impl IncomingStream {
             )));
         }
 
+        if let Some(final_index) = self.final_index
+            && index > final_index
+        {
+            return Err(StreamError::Decode(
+                "fragment index exceeds final fragment index".into(),
+            ));
+        }
+
         if header.is_finish() {
             if let Some(old) = self.final_index {
                 if old != index {
@@ -142,6 +150,15 @@ impl IncomingStream {
                     ));
                 }
             } else {
+                if self
+                    .fragments
+                    .keys()
+                    .any(|&fragment_index| fragment_index > index)
+                {
+                    return Err(StreamError::Decode(
+                        "fragment index exceeds final fragment index".into(),
+                    ));
+                }
                 self.final_index = Some(index);
             }
         }
@@ -500,7 +517,10 @@ impl<'a> MessageStream<'a> {
             match self.source.read(&mut buf[offset..])? {
                 Some(0) => return Err(StreamError::Closed),
                 None if offset == 0 => return Ok(false),
-                None => return Err(StreamError::Closed),
+                None => {
+                    self.source_state.unusable.store(true, Ordering::Release);
+                    return Err(StreamError::Closed);
+                }
                 Some(n) => offset += n,
             }
         }

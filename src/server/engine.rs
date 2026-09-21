@@ -267,7 +267,6 @@ fn log_pipeline_error(
         .for_message(request.event.envelope.message_id.clone());
 
     let event = match LogEvent::new(
-        request.event_id().clone(),
         EventName::new("engine.server.pipeline.error").expect("static log event name is valid"),
         LogLevel::Error,
         LogSource::Core,

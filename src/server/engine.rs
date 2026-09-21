@@ -5,7 +5,8 @@
 //! state and request routing.
 
 use crate::contracts::{UniversalRequest, UniversalResponse};
-use crate::identity::{CapabilityId, EngineId};
+use crate::events::EventName;
+use crate::identity::{CapabilityId, EngineId, EngineInstanceId};
 use crate::logging::{
     LogContext, LogEvent, LogEventType, LogLevel, LogScope, LogSource, LoggingSystem,
 };
@@ -48,8 +49,18 @@ impl ServerState {
 pub type RequestHandler = Arc<dyn Fn(UniversalRequest) -> UniversalResponse + Send + Sync>;
 
 /// An engine server that listens for and handles incoming requests.
+///
+/// The server has both a logical [`EngineId`] and a concrete
+/// [`EngineInstanceId`]. The logical ID identifies the engine type or
+/// identity, while the instance ID identifies this particular running
+/// server instance.
+///
+/// Keeping both identities here allows the server boundary to enforce
+/// the same concrete-instance routing invariant used by the transport
+/// layer.
 pub struct EngineServer {
     engine_id: EngineId,
+    instance_id: EngineInstanceId,
     state: ServerState,
     handlers: Arc<Mutex<HashMap<CapabilityId, RequestHandler>>>,
     pipeline: ExecutionPipeline,
@@ -57,10 +68,11 @@ pub struct EngineServer {
 }
 
 impl EngineServer {
-    /// Creates a new engine server for the specified engine ID.
-    pub fn new(engine_id: EngineId) -> Self {
+    /// Creates a new engine server for the specified engine instance.
+    pub fn new(engine_id: EngineId, instance_id: EngineInstanceId) -> Self {
         Self {
             engine_id,
+            instance_id,
             state: ServerState::Starting,
             handlers: Arc::new(Mutex::new(HashMap::new())),
             pipeline: ExecutionPipeline::new(),
@@ -127,15 +139,24 @@ impl EngineServer {
         &self.logging
     }
 
-    /// Returns the engine ID of this server.
+    /// Returns the logical engine ID of this server.
     pub fn engine_id(&self) -> &EngineId {
         &self.engine_id
+    }
+
+    /// Returns the concrete engine instance ID of this server.
+    pub fn instance_id(&self) -> &EngineInstanceId {
+        &self.instance_id
     }
 }
 
 /// Handles an incoming request by dispatching it to the appropriate handler.
 ///
 /// Returns an error response if the server is not serving or no handler is found.
+///
+/// Before dispatching, the server validates both the logical engine target and,
+/// when present, the concrete target instance. A request addressed to another
+/// concrete instance is rejected before middleware or capability execution.
 pub fn handle_request(
     server: &EngineServer,
     mut request: UniversalRequest,
@@ -144,25 +165,48 @@ pub fn handle_request(
         return Ok(failure_response(request));
     }
 
-    if request.envelope.metadata.participants.target != server.engine_id {
+    if request.event.envelope.metadata.participants.target != server.engine_id {
         return Err(TransportError::Peer(
             "request target does not match the server identity".into(),
         ));
+    }
+
+    match request
+        .event
+        .envelope
+        .metadata
+        .participants
+        .target_instance
+        .as_ref()
+    {
+        Some(target_instance) if *target_instance != server.instance_id => {
+            return Err(TransportError::Peer(
+                "request target instance does not match the server instance".into(),
+            ));
+        }
+        None => {}
+        Some(_) => {}
     }
 
     if !server.state().is_serving() {
         return Ok(failure_response(request));
     }
 
-    let admitted_capability = request.envelope.metadata.descriptor.capability_id.clone();
+    let admitted_capability = request
+        .event
+        .envelope
+        .metadata
+        .descriptor
+        .capability_id
+        .clone();
 
-    let mut context = EngineContext::new(request.envelope.operation_context.clone());
+    let mut context = EngineContext::new(request.event.envelope.operation_context.clone());
 
     match server
         .pipeline
         .run_request(&mut context, &mut request, |context, request| {
             if context.security().is_none()
-                || request.envelope.metadata.descriptor.capability_id != admitted_capability
+                || request.event.envelope.metadata.descriptor.capability_id != admitted_capability
             {
                 return Ok::<UniversalResponse, ()>(failure_response(request.clone()));
             }
@@ -201,6 +245,7 @@ fn log_pipeline_error(
         RequestPipelineError::Configuration(
             PipelineConfigurationError::MandatoryMiddlewareNotConfigured,
         ) => "request_pipeline.configuration.mandatory_middleware_not_configured",
+        RequestPipelineError::Validation(_) => "request_pipeline.validation.failed",
         RequestPipelineError::Middleware(MiddlewareChainError::Context(
             PipelineError::Cancelled,
         )) => "request_pipeline.middleware.context.cancelled",
@@ -218,11 +263,12 @@ fn log_pipeline_error(
         }
     };
 
-    let context = LogContext::new(request.envelope.operation_context.clone())
-        .for_message(request.envelope.message_id.clone());
+    let context = LogContext::new(request.event.envelope.operation_context.clone())
+        .for_message(request.event.envelope.message_id.clone());
 
     let event = match LogEvent::new(
-        request.envelope.message_id.clone(),
+        request.event_id().clone(),
+        EventName::new("engine.server.pipeline.error").expect("static log event name is valid"),
         LogLevel::Error,
         LogSource::Core,
         LogScope::Global,
@@ -240,7 +286,14 @@ fn log_pipeline_error(
 }
 
 fn failure_response(request: UniversalRequest) -> UniversalResponse {
-    let envelope = request.envelope;
+    // `ValidationError::EmptyPayload` is a structural contract invariant, so
+    // failure responses must carry a non-empty payload as well. The failure
+    // outcome itself remains in `Status`; this byte is only an opaque,
+    // non-empty representation and does not define application payload
+    // semantics.
+    const FAILURE_PAYLOAD: &[u8] = &[0];
+
+    let envelope = request.event.envelope;
     let metadata = envelope.metadata;
     let request_descriptor = metadata.descriptor;
     let payload_descriptor = request_descriptor.payload.clone();
@@ -256,13 +309,16 @@ fn failure_response(request: UniversalRequest) -> UniversalResponse {
 
     let sender_instance = requesting_participants.target_instance.clone();
     let target_instance = requesting_participants.sender_instance.clone();
+
     let mut participants = crate::contracts::Participants::new(
         requesting_participants.target,
         requesting_participants.sender,
     );
+
     if let Some(instance) = sender_instance {
         participants = participants.with_sender_instance(instance);
     }
+
     if let Some(instance) = target_instance {
         participants = participants.with_target_instance(instance);
     }
@@ -276,7 +332,7 @@ fn failure_response(request: UniversalRequest) -> UniversalResponse {
             envelope.message_id,
             envelope.operation_context,
             response_metadata,
-            crate::contracts::EncodedPayload::new(payload_descriptor, Vec::new()),
+            crate::contracts::EncodedPayload::new(payload_descriptor, FAILURE_PAYLOAD),
         ),
         Status::Failure,
     )
@@ -291,7 +347,7 @@ mod tests {
     use crate::contracts::envelope::MessageEnvelope;
     use crate::contracts::metadata::{ContractMetadata, Participants};
     use crate::identity::{
-        CapabilityId, ContractId, CorrelationId, EngineId, MessageId, OperationId,
+        CapabilityId, ContractId, CorrelationId, EngineId, EngineInstanceId, MessageId, OperationId,
     };
     use crate::middleware::stages::{Middleware, MiddlewareResult};
     use crate::operation::{Operation, OperationContext};
@@ -333,7 +389,11 @@ mod tests {
         }
     }
 
-    fn make_request(target: &EngineId, message_id: &str) -> UniversalRequest {
+    fn make_request(
+        target: &EngineId,
+        target_instance: Option<&EngineInstanceId>,
+        message_id: &str,
+    ) -> UniversalRequest {
         let desc = ContractDescriptor::new(
             ContractId::new("test.contract").unwrap(),
             CapabilityId::new("test-cap").unwrap(),
@@ -341,70 +401,108 @@ mod tests {
             Interaction::Request,
             PayloadDescriptor::new("application/octet-stream", Version::new(1, 0, 0)).unwrap(),
         );
+
         let payload_desc = desc.payload.clone();
-        let metadata = ContractMetadata::new(
-            desc,
-            Participants::new(EngineId::new("sender").unwrap(), target.clone()),
-        );
+
+        let mut participants = Participants::new(EngineId::new("sender").unwrap(), target.clone());
+
+        if let Some(instance) = target_instance {
+            participants = participants.with_target_instance(instance.clone());
+        }
+
+        let metadata = ContractMetadata::new(desc, participants);
+
         let op_ctx = OperationContext::new(Operation::new(
             OperationId::new("op-1").unwrap(),
             CorrelationId::new("corr-1").unwrap(),
         ));
+
         let envelope = MessageEnvelope::new(
             MessageId::new(message_id).unwrap(),
             op_ctx,
             metadata,
             EncodedPayload::new(payload_desc, b"test payload"),
         );
+
         UniversalRequest::new(envelope)
+    }
+
+    fn server_ids() -> (EngineId, EngineInstanceId) {
+        (
+            EngineId::new("server").unwrap(),
+            EngineInstanceId::new("server-instance-1").unwrap(),
+        )
     }
 
     #[test]
     fn server_starts_in_starting_state() {
-        let server = EngineServer::new(EngineId::new("server").unwrap()).with_pipeline(pipeline());
+        let (engine_id, instance_id) = server_ids();
+
+        let server = EngineServer::new(engine_id, instance_id).with_pipeline(pipeline());
+
         assert_eq!(server.state(), ServerState::Starting);
     }
 
     #[test]
+    fn server_exposes_logical_and_concrete_identity() {
+        let (engine_id, instance_id) = server_ids();
+
+        let server = EngineServer::new(engine_id.clone(), instance_id.clone());
+
+        assert_eq!(server.engine_id(), &engine_id);
+        assert_eq!(server.instance_id(), &instance_id);
+    }
+
+    #[test]
     fn server_transitions_starting_to_serving() {
-        let mut server =
-            EngineServer::new(EngineId::new("server").unwrap()).with_pipeline(pipeline());
+        let (engine_id, instance_id) = server_ids();
+
+        let mut server = EngineServer::new(engine_id, instance_id).with_pipeline(pipeline());
+
         server.start();
+
         assert_eq!(server.state(), ServerState::Serving);
     }
 
     #[test]
     fn server_transitions_serving_to_draining() {
-        let mut server =
-            EngineServer::new(EngineId::new("server").unwrap()).with_pipeline(pipeline());
+        let (engine_id, instance_id) = server_ids();
+
+        let mut server = EngineServer::new(engine_id, instance_id).with_pipeline(pipeline());
+
         server.start();
         server.drain();
+
         assert_eq!(server.state(), ServerState::Draining);
     }
 
     #[test]
     fn server_transitions_to_stopped() {
-        let mut server =
-            EngineServer::new(EngineId::new("server").unwrap()).with_pipeline(pipeline());
+        let (engine_id, instance_id) = server_ids();
+
+        let mut server = EngineServer::new(engine_id, instance_id).with_pipeline(pipeline());
+
         server.start();
         server.stop();
+
         assert_eq!(server.state(), ServerState::Stopped);
     }
 
     #[test]
     fn server_can_register_and_handle_requests() {
+        let (server_id, server_instance) = server_ids();
+
         let mut server =
-            EngineServer::new(EngineId::new("server").unwrap()).with_pipeline(pipeline());
-        let target = EngineId::new("server").unwrap();
+            EngineServer::new(server_id.clone(), server_instance.clone()).with_pipeline(pipeline());
 
         server.register_handler(
             CapabilityId::new("test-cap").unwrap(),
-            Arc::new(|request| UniversalResponse::new(request.envelope, Status::Success)),
+            Arc::new(|request| UniversalResponse::new(request.event.envelope, Status::Success)),
         );
 
         server.start();
 
-        let request = make_request(&target, "msg-1");
+        let request = make_request(&server_id, Some(&server_instance), "msg-1");
         let response = handle_request(&server, request).unwrap();
 
         assert_eq!(response.status, Status::Success);
@@ -425,17 +523,19 @@ mod tests {
             }
         }
 
-        let mut server = EngineServer::new(EngineId::new("server").unwrap())
+        let (server_id, server_instance) = server_ids();
+
+        let mut server = EngineServer::new(server_id.clone(), server_instance.clone())
             .with_pipeline(ExecutionPipeline::new().with_middleware(PassThroughMiddleware));
-        let target = EngineId::new("server").unwrap();
 
         server.register_handler(
             CapabilityId::new("test-cap").unwrap(),
             Arc::new(|_| panic!("unauthenticated request reached handler")),
         );
+
         server.start();
 
-        let request = make_request(&target, "msg-no-security");
+        let request = make_request(&server_id, Some(&server_instance), "msg-no-security");
         let response = handle_request(&server, request).unwrap();
 
         assert_eq!(response.status, Status::Failure);
@@ -461,24 +561,27 @@ mod tests {
                     .clone()
                     .with_security(SecurityContext::new(principal, None));
 
-                request.envelope.metadata.descriptor.capability_id =
+                request.event.envelope.metadata.descriptor.capability_id =
                     CapabilityId::new("mutated-capability").unwrap();
 
                 MiddlewareResult::Continue
             }
         }
 
-        let mut server = EngineServer::new(EngineId::new("server").unwrap())
+        let (server_id, server_instance) = server_ids();
+
+        let mut server = EngineServer::new(server_id.clone(), server_instance.clone())
             .with_pipeline(ExecutionPipeline::new().with_middleware(MutatingMiddleware));
-        let target = EngineId::new("server").unwrap();
 
         server.register_handler(
             CapabilityId::new("test-cap").unwrap(),
             Arc::new(|_| panic!("capability mutation bypassed authorization")),
         );
+
         server.start();
 
-        let request = make_request(&target, "msg-mutated-capability");
+        let request = make_request(&server_id, Some(&server_instance), "msg-mutated-capability");
+
         let response = handle_request(&server, request).unwrap();
 
         assert_eq!(response.status, Status::Failure);
@@ -486,41 +589,52 @@ mod tests {
 
     #[test]
     fn server_records_pipeline_failures_without_exposing_credentials() {
-        let mut server = EngineServer::new(EngineId::new("server").unwrap());
-        let target = EngineId::new("server").unwrap();
+        let (server_id, server_instance) = server_ids();
+
+        let mut server = EngineServer::new(server_id.clone(), server_instance.clone());
+
         server.start();
 
-        let request = make_request(&target, "msg-logging-failure");
+        let request = make_request(&server_id, Some(&server_instance), "msg-logging-failure");
+
         let (sender, receiver) = std::sync::mpsc::channel();
+
         server
             .logging()
             .subscribe(std::sync::Arc::new(TestLogSink(sender)));
 
         let response = handle_request(&server, request).unwrap();
+
         assert_eq!(response.status, Status::Failure);
 
         let event = receiver
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("pipeline failure must produce a log event");
+
         let rendered = format!("{event:?}");
+
         assert!(
             rendered.contains("request_pipeline.configuration.mandatory_middleware_not_configured")
         );
-        assert_eq!(event.event_type, crate::logging::LogEventType::Diagnostic);
+
+        assert_eq!(event.event_type(), "diagnostic");
     }
 
     #[test]
     fn server_requires_mandatory_middleware_before_handler_dispatch() {
-        let mut server = EngineServer::new(EngineId::new("server").unwrap());
-        let target = EngineId::new("server").unwrap();
+        let (server_id, server_instance) = server_ids();
+
+        let mut server = EngineServer::new(server_id.clone(), server_instance.clone());
 
         server.register_handler(
             CapabilityId::new("test-cap").unwrap(),
             Arc::new(|_| panic!("request bypassed mandatory middleware")),
         );
+
         server.start();
 
-        let request = make_request(&target, "msg-no-middleware");
+        let request = make_request(&server_id, Some(&server_instance), "msg-no-middleware");
+
         let response = handle_request(&server, request).unwrap();
 
         assert_eq!(response.status, Status::Failure);
@@ -528,10 +642,13 @@ mod tests {
 
     #[test]
     fn server_rejects_request_when_not_serving() {
-        let server = EngineServer::new(EngineId::new("server").unwrap()).with_pipeline(pipeline());
-        let target = EngineId::new("server").unwrap();
+        let (server_id, server_instance) = server_ids();
 
-        let request = make_request(&target, "msg-1");
+        let server =
+            EngineServer::new(server_id.clone(), server_instance.clone()).with_pipeline(pipeline());
+
+        let request = make_request(&server_id, Some(&server_instance), "msg-1");
+
         let response = handle_request(&server, request).unwrap();
 
         assert_eq!(response.status, Status::Failure);
@@ -539,40 +656,48 @@ mod tests {
 
     #[test]
     fn server_rejects_non_request_interaction_before_handler_dispatch() {
+        let (server_id, server_instance) = server_ids();
+
         let mut server =
-            EngineServer::new(EngineId::new("server").unwrap()).with_pipeline(pipeline());
-        let target = EngineId::new("server").unwrap();
+            EngineServer::new(server_id.clone(), server_instance.clone()).with_pipeline(pipeline());
 
         server.register_handler(
             CapabilityId::new("test-cap").unwrap(),
             Arc::new(|_request| panic!("non-request interaction reached handler")),
         );
+
         server.start();
 
-        let mut request = make_request(&target, "msg-invalid");
-        request.envelope.metadata.descriptor.interaction = Interaction::Response;
+        let mut request = make_request(&server_id, Some(&server_instance), "msg-invalid");
+
+        request.event.envelope.metadata.descriptor.interaction = Interaction::Response;
 
         let response = handle_request(&server, request).unwrap();
 
         assert_eq!(response.status, Status::Failure);
         assert_eq!(
-            response.envelope.metadata.descriptor.interaction,
+            response.event.envelope.metadata.descriptor.interaction,
             Interaction::Response
         );
     }
 
     #[test]
     fn server_rejects_request_with_mismatched_target() {
+        let (server_id, server_instance) = server_ids();
+
         let mut server =
-            EngineServer::new(EngineId::new("server").unwrap()).with_pipeline(pipeline());
+            EngineServer::new(server_id, server_instance.clone()).with_pipeline(pipeline());
+
         server.register_handler(
             CapabilityId::new("test-cap").unwrap(),
             Arc::new(|_request| panic!("mismatched target reached handler")),
         );
+
         server.start();
 
         let target = EngineId::new("other-server").unwrap();
-        let request = make_request(&target, "msg-mismatched-target");
+
+        let request = make_request(&target, Some(&server_instance), "msg-mismatched-target");
 
         let result = handle_request(&server, request);
 
@@ -584,14 +709,43 @@ mod tests {
     }
 
     #[test]
-    fn server_returns_failure_when_handler_missing() {
+    fn server_rejects_request_with_mismatched_target_instance() {
+        let (server_id, server_instance) = server_ids();
+
         let mut server =
-            EngineServer::new(EngineId::new("server").unwrap()).with_pipeline(pipeline());
-        let target = EngineId::new("server").unwrap();
+            EngineServer::new(server_id.clone(), server_instance).with_pipeline(pipeline());
+
+        server.register_handler(
+            CapabilityId::new("test-cap").unwrap(),
+            Arc::new(|_request| panic!("mismatched target instance reached handler")),
+        );
 
         server.start();
 
-        let request = make_request(&target, "msg-1");
+        let wrong_instance = EngineInstanceId::new("server-instance-2").unwrap();
+
+        let request = make_request(&server_id, Some(&wrong_instance), "msg-mismatched-instance");
+
+        let result = handle_request(&server, request);
+
+        assert!(matches!(
+            result,
+            Err(TransportError::Peer(message))
+                if message == "request target instance does not match the server instance"
+        ));
+    }
+
+    #[test]
+    fn server_returns_failure_when_handler_missing() {
+        let (server_id, server_instance) = server_ids();
+
+        let mut server =
+            EngineServer::new(server_id.clone(), server_instance.clone()).with_pipeline(pipeline());
+
+        server.start();
+
+        let request = make_request(&server_id, Some(&server_instance), "msg-1");
+
         let response = handle_request(&server, request).unwrap();
 
         assert_eq!(response.status, Status::Failure);
@@ -604,25 +758,33 @@ mod tests {
         use crate::transport::InMemoryTransport;
 
         let transport = InMemoryTransport::new();
-        let server_id = EngineId::new("server").unwrap();
 
-        let mut server = EngineServer::new(server_id.clone()).with_pipeline(pipeline());
+        let server_id = EngineId::new("server").unwrap();
+        let server_instance = EngineInstanceId::new("server-instance-1").unwrap();
+
+        let mut server =
+            EngineServer::new(server_id.clone(), server_instance.clone()).with_pipeline(pipeline());
+
         server.register_handler(
             CapabilityId::new("test-cap").unwrap(),
-            Arc::new(|request| UniversalResponse::new(request.envelope, Status::Success)),
+            Arc::new(|request| UniversalResponse::new(request.event.envelope, Status::Success)),
         );
 
         server.start();
 
-        transport.register(server_id.clone(), move |request| {
-            handle_request(&server, request).unwrap()
+        let registered_server = server;
+
+        transport.register(server_id.clone(), server_instance.clone(), move |request| {
+            handle_request(&registered_server, request).unwrap()
         });
 
-        let client = UniversalClient::new(transport);
-        let request = make_request(&server_id, "msg-1");
-        let response = futures::executor::block_on(client.send(&server_id, request)).unwrap();
+        let client: UniversalClient<InMemoryTransport> = UniversalClient::new(transport);
+
+        let request: UniversalRequest = make_request(&server_id, Some(&server_instance), "msg-1");
+
+        let response = futures::executor::block_on(client.send(&server_instance, request)).unwrap();
 
         assert_eq!(response.status, Status::Success);
-        assert_eq!(response.envelope.message_id.as_str(), "msg-1");
+        assert_eq!(response.event.envelope.message_id.as_str(), "msg-1");
     }
 }

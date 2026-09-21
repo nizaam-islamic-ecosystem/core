@@ -160,7 +160,7 @@ fn error_system_failure_becomes_recorded_idempotent_failure() {
         )
         .unwrap();
 
-    let reference = error_event.reference.clone();
+    let reference = error_event.reference();
 
     let store = IdempotencyStateStore::new();
     let initial = record(identity.clone(), operation_id, None);
@@ -246,7 +246,7 @@ fn failed_duplicate_returns_the_established_failure() {
         )
         .unwrap();
 
-    let reference = error_event.reference;
+    let reference = error_event.reference();
 
     let store = IdempotencyStateStore::new();
 

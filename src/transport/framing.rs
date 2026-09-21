@@ -1,142 +1,423 @@
-//! Binary message framing protocol for Phase 7 transport layer.
+//! Binary message framing protocol for the Phase 7 transport layer.
 //!
-//! Defines the 20-byte binary header used for transporting logical messages
-//! between engines. The header consists of:
+//! The framing layer transports opaque payload bytes. It does not define the
+//! application payload format.
 //!
-//! - Version (1 byte)
+//! The checksum implementation requires the `xxh3` feature of the
+//! `xxhash-rust` crate.
 //!
-//! - Flags (1 byte)
+//! Current wire header: 48 bytes, big-endian/network byte order.
 //!
-//! - Payload Length (4 bytes, big-endian)
+//! ```text
+//! 0       1       2       4       8              16        20        24
+//! +-------+-------+-------+-------+---------------+---------+---------+
+//! |Version| Flags |Header |Payload| Transport     |Fragment |Cum. ACK |
+//! |       |       |Length |Length | Stream ID     | Index   | Index   |
+//! +-------+-------+-------+-------+---------------+---------+---------+
+//! 24                      32                      40                 48
+//! +-----------------------+-----------------------+------------------+
+//! | SACK Bitmap (8 bytes) | XXH3-64 (8 bytes)    | Reserved (8 bytes)|
+//! +-----------------------+-----------------------+------------------+
+//! ```
 //!
-//! - Transport Message ID (8 bytes)
+//! A frame is at most 20,000,000 bytes. With the current 48-byte header,
+//! the maximum payload in one frame is 19,999,952 bytes.
 //!
-//! - Fragment Index (4 bytes)
-//!
-//! This ensures that fragments can be reassembled correctly and that
-//! logical message boundaries are preserved across transport hops.
+//! A logical message may exceed that size. The transport fragments it into
+//! multiple frames using the same Transport Stream ID and monotonically
+//! increasing Fragment Index values starting at zero.
 
 use std::fmt;
 
-use crate::transport::stream::MAX_FRAME_LENGTH;
+/// Current transport framing protocol version.
+pub const FRAMING_VERSION: u8 = 1;
 
-/// Binary message header used in the transport layer.
-///
-/// Layout (big-endian):
-///   [0] Version (1 byte)
-///   [1] Flags (1 byte)
-///   [2-3] Reserved (2 bytes)
-///   [4] Payload Length (4 bytes)
-///   [8] Transport Message ID (8 bytes)
-///   [16] Fragment Index (4 bytes)
-#[derive(Debug)]
+/// Current fixed header length.
+pub const HEADER_LENGTH: usize = 48;
+
+/// Maximum complete frame size, in decimal bytes.
+pub const MAX_FRAME_LENGTH_BYTES: usize = 20_000_000;
+
+/// Maximum payload carried by one frame.
+pub const MAX_PAYLOAD_LENGTH: usize = MAX_FRAME_LENGTH_BYTES - HEADER_LENGTH;
+
+/// Bit 0: final frame of a Transport Stream.
+pub const FLAG_FINISH: u8 = 1 << 0;
+/// Bit 1: more fragments follow this frame.
+pub const FLAG_MORE: u8 = 1 << 1;
+/// Bit 2: frame carries acknowledgement information.
+pub const FLAG_ACK: u8 = 1 << 2;
+/// Bit 3: connection termination request.
+pub const FLAG_CONNECTION_FIN: u8 = 1 << 3;
+/// Bit 4: restart current transport connection/session.
+pub const FLAG_RESTART: u8 = 1 << 4;
+/// Bit 5: SACK bitmap is meaningful.
+pub const FLAG_SACK_PRESENT: u8 = 1 << 5;
+/// Bit 6: reserved for future protocol versions.
+pub const FLAG_RESERVED_6: u8 = 1 << 6;
+/// Bit 7: reserved for future protocol versions.
+pub const FLAG_RESERVED_7: u8 = 1 << 7;
+
+const KNOWN_FLAGS: u8 =
+    FLAG_FINISH | FLAG_MORE | FLAG_ACK | FLAG_CONNECTION_FIN | FLAG_RESTART | FLAG_SACK_PRESENT;
+
+/// Binary message header used by the transport framing protocol.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MessageHeader {
     version: u8,
     flags: u8,
-    reserved: [u8; 2],
+    header_length: u16,
     payload_length: u32,
-    message_id: [u8; 8],
+    transport_stream_id: u64,
     fragment_index: u32,
+    cumulative_ack_index: u32,
+    sack_bitmap: u64,
+    checksum: u64,
+    reserved: u64,
 }
 
 impl MessageHeader {
-    /// Constructs a header from the given fields.
-    ///
-    /// # Arguments
-    ///
-    /// * `version` - Protocol version (e.g., 1 for initial release)
-    /// * `flags` - Bitmask indicating special flags
-    /// * `payload_length` - Size of the payload in bytes
-    /// * `message_id` - Unique identifier for the logical message
-    /// * `fragment_index` - Position of this fragment within the message
-    ///
-    /// # Panics
-    ///
-    /// Panics if `payload_length` exceeds the maximum allowed frame size
-    /// (MAX_FRAME_LENGTH).
+    /// Creates a header. The checksum is initially zero and must be populated
+    /// with `with_checksum` after the complete frame bytes are known.
     pub fn new(
         version: u8,
         flags: u8,
         payload_length: u32,
-        message_id: [u8; 8],
+        transport_stream_id: u64,
         fragment_index: u32,
-    ) -> Self {
-        assert!(
-            usize::try_from(payload_length).unwrap() <= MAX_FRAME_LENGTH,
-            "payload_length exceeds MAX_FRAME_LENGTH"
-        );
+        cumulative_ack_index: u32,
+        sack_bitmap: u64,
+    ) -> Result<Self, String> {
+        if usize::try_from(payload_length).map_err(|_| "invalid payload length")?
+            > MAX_PAYLOAD_LENGTH
+        {
+            return Err(format!(
+                "payload_length exceeds maximum frame payload ({MAX_PAYLOAD_LENGTH})"
+            ));
+        }
 
-        Self {
+        validate_header_semantics(flags, payload_length as usize, sack_bitmap)?;
+
+        Ok(Self {
             version,
             flags,
-            reserved: [0, 0],
+            header_length: HEADER_LENGTH as u16,
             payload_length,
-            message_id,
+            transport_stream_id,
             fragment_index,
-        }
+            cumulative_ack_index,
+            sack_bitmap,
+            checksum: 0,
+            reserved: 0,
+        })
     }
 
-    /// Serializes the header to a 20-byte binary format.
-    ///
-    /// # Returns
-    ///
-    /// A `Vec<u8>` representing the binary header.
+    pub fn version(&self) -> u8 {
+        self.version
+    }
+    pub fn flags(&self) -> u8 {
+        self.flags
+    }
+    pub fn header_length(&self) -> u16 {
+        self.header_length
+    }
+    pub fn payload_length(&self) -> u32 {
+        self.payload_length
+    }
+    pub fn transport_stream_id(&self) -> u64 {
+        self.transport_stream_id
+    }
+    pub fn fragment_index(&self) -> u32 {
+        self.fragment_index
+    }
+    pub fn cumulative_ack_index(&self) -> u32 {
+        self.cumulative_ack_index
+    }
+    pub fn sack_bitmap(&self) -> u64 {
+        self.sack_bitmap
+    }
+    pub fn checksum(&self) -> u64 {
+        self.checksum
+    }
+
+    pub fn is_finish(&self) -> bool {
+        self.flags & FLAG_FINISH != 0
+    }
+    pub fn has_more(&self) -> bool {
+        self.flags & FLAG_MORE != 0
+    }
+    pub fn is_ack(&self) -> bool {
+        self.flags & FLAG_ACK != 0
+    }
+    pub fn is_connection_fin(&self) -> bool {
+        self.flags & FLAG_CONNECTION_FIN != 0
+    }
+    pub fn is_restart(&self) -> bool {
+        self.flags & FLAG_RESTART != 0
+    }
+
+    pub fn with_checksum(mut self, checksum: u64) -> Self {
+        self.checksum = checksum;
+        self
+    }
+
+    /// Serializes the complete fixed header.
     pub fn serialize(&self) -> Vec<u8> {
-        // Pack the header into a 20-byte binary format
-        let mut header_bytes = Vec::with_capacity(20);
-        header_bytes.push(self.version);
-        header_bytes.push(self.flags);
-        header_bytes.extend_from_slice(&self.reserved);
-        header_bytes.extend_from_slice(&self.payload_length.to_be_bytes());
-        header_bytes.extend_from_slice(&self.message_id);
-        header_bytes.extend_from_slice(&self.fragment_index.to_be_bytes());
-
-        header_bytes
+        let mut bytes = Vec::with_capacity(HEADER_LENGTH);
+        bytes.push(self.version);
+        bytes.push(self.flags);
+        bytes.extend_from_slice(&self.header_length.to_be_bytes());
+        bytes.extend_from_slice(&self.payload_length.to_be_bytes());
+        bytes.extend_from_slice(&self.transport_stream_id.to_be_bytes());
+        bytes.extend_from_slice(&self.fragment_index.to_be_bytes());
+        bytes.extend_from_slice(&self.cumulative_ack_index.to_be_bytes());
+        bytes.extend_from_slice(&self.sack_bitmap.to_be_bytes());
+        bytes.extend_from_slice(&self.checksum.to_be_bytes());
+        bytes.extend_from_slice(&self.reserved.to_be_bytes());
+        bytes
     }
 
-    /// Deserializes a 20-byte header from binary data.
-    ///
-    /// # Arguments
-    ///
-    /// * `data` - The binary header data (exactly 20 bytes)
-    ///
-    /// # Returns
-    ///
-    /// A `MessageHeader` or `Err` if the data is malformed.
+    /// Serializes the header with the checksum field zeroed.
+    pub fn serialize_for_checksum(&self) -> Vec<u8> {
+        let mut copy = self.clone();
+        copy.checksum = 0;
+        copy.serialize()
+    }
+
+    /// Parses a header using its Header Length field.
     pub fn deserialize(data: &[u8]) -> Result<Self, String> {
-        if data.len() != 20 {
-            return Err(format!("Expected 20-byte header, got {} bytes", data.len()));
+        if data.len() < 4 {
+            return Err("framing header is shorter than the 4-byte prefix".into());
+        }
+
+        let header_length = u16::from_be_bytes([data[2], data[3]]) as usize;
+        if header_length != HEADER_LENGTH {
+            return Err(format!(
+                "unsupported framing header length: {header_length}"
+            ));
+        }
+        if data.len() != header_length {
+            return Err(format!(
+                "expected {header_length}-byte header, got {} bytes",
+                data.len()
+            ));
         }
 
         let version = data[0];
         let flags = data[1];
-        let reserved = [data[2], data[3]];
-        let payload_length = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-        if usize::try_from(payload_length).unwrap() > MAX_FRAME_LENGTH {
+        let payload_length = u32::from_be_bytes(data[4..8].try_into().unwrap());
+        if payload_length as usize > MAX_PAYLOAD_LENGTH {
             return Err(format!(
-                "payload_length exceeds MAX_FRAME_LENGTH ({MAX_FRAME_LENGTH})"
+                "payload_length exceeds maximum frame payload ({MAX_PAYLOAD_LENGTH})"
             ));
         }
-        let message_id = data[8..16].try_into().map_err(|_| "Invalid message ID")?;
-        let fragment_index = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
 
-        Ok(MessageHeader {
+        let header = Self {
             version,
             flags,
-            reserved,
+            header_length: header_length as u16,
             payload_length,
-            message_id,
-            fragment_index,
-        })
+            transport_stream_id: u64::from_be_bytes(data[8..16].try_into().unwrap()),
+            fragment_index: u32::from_be_bytes(data[16..20].try_into().unwrap()),
+            cumulative_ack_index: u32::from_be_bytes(data[20..24].try_into().unwrap()),
+            sack_bitmap: u64::from_be_bytes(data[24..32].try_into().unwrap()),
+            checksum: u64::from_be_bytes(data[32..40].try_into().unwrap()),
+            reserved: u64::from_be_bytes(data[40..48].try_into().unwrap()),
+        };
+
+        if header.reserved != 0 {
+            return Err("reserved header bytes must be zero for framing version 1".into());
+        }
+        if version != FRAMING_VERSION {
+            return Err(format!("unsupported framing protocol version: {version}"));
+        }
+        validate_header_semantics(
+            header.flags,
+            header.payload_length as usize,
+            header.sack_bitmap,
+        )?;
+
+        Ok(header)
     }
+}
+
+/// Fragments one opaque logical payload into complete wire frames.
+///
+/// The caller supplies the Transport Stream ID so transport implementations
+/// can preserve a stream identity across all fragments.
+pub fn encode_message(transport_stream_id: u64, payload: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    let fragment_count = if payload.is_empty() {
+        1
+    } else {
+        payload.len().div_ceil(MAX_PAYLOAD_LENGTH)
+    };
+
+    let mut frames = Vec::with_capacity(fragment_count);
+    for fragment_index in 0..fragment_count {
+        let start = fragment_index * MAX_PAYLOAD_LENGTH;
+        let end = payload.len().min(start + MAX_PAYLOAD_LENGTH);
+        let fragment = &payload[start..end];
+        let flags = if fragment_index + 1 == fragment_count {
+            FLAG_FINISH
+        } else {
+            FLAG_MORE
+        };
+
+        let header = MessageHeader::new(
+            FRAMING_VERSION,
+            flags,
+            u32::try_from(fragment.len()).map_err(|_| "fragment payload is too large")?,
+            transport_stream_id,
+            u32::try_from(fragment_index).map_err(|_| "fragment index overflow")?,
+            NO_ACK_INDEX,
+            0,
+        )?;
+
+        frames.push(encode_frame(header, fragment)?);
+    }
+
+    Ok(frames)
+}
+
+/// Sentinel used when a data frame carries no cumulative acknowledgement.
+pub const NO_ACK_INDEX: u32 = u32::MAX;
+
+/// Validates flag combinations defined by framing version 1.
+pub fn validate_flags(flags: u8) -> Result<(), String> {
+    if flags & (FLAG_RESERVED_6 | FLAG_RESERVED_7) != 0 {
+        return Err("reserved flag bits are set".into());
+    }
+    if flags & FLAG_FINISH != 0 && flags & FLAG_MORE != 0 {
+        return Err("FINISH and MORE cannot both be set".into());
+    }
+    if flags & FLAG_ACK != 0 && flags & FLAG_CONNECTION_FIN != 0 {
+        return Err("ACK and CONNECTION_FIN cannot be combined".into());
+    }
+    if flags & FLAG_CONNECTION_FIN != 0 && flags & FLAG_MORE != 0 {
+        return Err("CONNECTION_FIN cannot be combined with MORE".into());
+    }
+    if flags & FLAG_RESTART != 0 && flags & FLAG_FINISH != 0 {
+        return Err("RESTART cannot be combined with FINISH".into());
+    }
+    if flags & !KNOWN_FLAGS != 0 {
+        return Err("unknown framing flag bits are set".into());
+    }
+    Ok(())
+}
+
+fn validate_header_semantics(
+    flags: u8,
+    payload_length: usize,
+    sack_bitmap: u64,
+) -> Result<(), String> {
+    validate_flags(flags)?;
+
+    if flags & FLAG_ACK != 0 {
+        if payload_length != 0 {
+            return Err("ACK frame must have a zero-length payload".into());
+        }
+        if flags & (FLAG_FINISH | FLAG_MORE | FLAG_CONNECTION_FIN | FLAG_RESTART) != 0 {
+            return Err("ACK frame contains incompatible flags".into());
+        }
+        if flags & FLAG_SACK_PRESENT == 0 && sack_bitmap != 0 {
+            return Err("SACK bitmap is set without SACK_PRESENT".into());
+        }
+    }
+
+    if flags & FLAG_SACK_PRESENT != 0 && flags & FLAG_ACK == 0 {
+        return Err("SACK_PRESENT requires ACK".into());
+    }
+
+    if flags & FLAG_CONNECTION_FIN != 0
+        && (payload_length != 0
+            || flags & (FLAG_ACK | FLAG_MORE | FLAG_FINISH | FLAG_RESTART | FLAG_SACK_PRESENT) != 0)
+    {
+        return Err("CONNECTION_FIN frame contains incompatible fields".into());
+    }
+
+    if flags & FLAG_RESTART != 0
+        && (payload_length != 0
+            || flags
+                & (FLAG_ACK | FLAG_MORE | FLAG_FINISH | FLAG_CONNECTION_FIN | FLAG_SACK_PRESENT)
+                != 0)
+    {
+        return Err("RESTART frame contains incompatible fields".into());
+    }
+    Ok(())
+}
+
+/// Computes the XXH3-64 checksum over a header with its checksum field zeroed
+/// followed by the opaque frame payload.
+///
+/// `xxhash-rust` is intentionally used only by the framing layer; checksum
+/// semantics do not become an application payload concern.
+pub fn checksum(header: &MessageHeader, payload: &[u8]) -> u64 {
+    let header_bytes = header.serialize_for_checksum();
+    let mut bytes = Vec::with_capacity(header_bytes.len() + payload.len());
+    bytes.extend_from_slice(&header_bytes);
+    bytes.extend_from_slice(payload);
+    xxhash_rust::xxh3::xxh3_64(&bytes)
+}
+
+/// Validates the checksum stored in a complete frame.
+pub fn verify_checksum(header: &MessageHeader, payload: &[u8]) -> bool {
+    checksum(header, payload) == header.checksum()
+}
+
+/// Builds one complete wire frame.
+pub fn encode_frame(mut header: MessageHeader, payload: &[u8]) -> Result<Vec<u8>, String> {
+    if payload.len() > MAX_PAYLOAD_LENGTH {
+        return Err(format!(
+            "payload exceeds maximum frame payload ({MAX_PAYLOAD_LENGTH})"
+        ));
+    }
+    if payload.len() != header.payload_length as usize {
+        return Err("payload length does not match header".into());
+    }
+
+    header.checksum = checksum(&header, payload);
+    let mut frame = header.serialize();
+    frame.extend_from_slice(payload);
+    Ok(frame)
+}
+
+/// Parses and validates one complete frame.
+pub fn decode_frame(frame: &[u8]) -> Result<(MessageHeader, Vec<u8>), String> {
+    if frame.len() < HEADER_LENGTH {
+        return Err("frame is shorter than the fixed header".into());
+    }
+
+    let header = MessageHeader::deserialize(&frame[..HEADER_LENGTH])?;
+    let expected = HEADER_LENGTH + header.payload_length as usize;
+    if frame.len() != expected {
+        return Err(format!(
+            "frame length does not match header payload length: expected {expected}, got {}",
+            frame.len()
+        ));
+    }
+
+    let payload = frame[HEADER_LENGTH..].to_vec();
+    if !verify_checksum(&header, &payload) {
+        return Err("frame checksum verification failed".into());
+    }
+
+    Ok((header, payload))
 }
 
 impl fmt::Display for MessageHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "MessageHeader {{ version={}, flags={}, payload_length={}, message_id={:?}, fragment_index={} }}",
-            self.version, self.flags, self.payload_length, self.message_id, self.fragment_index
+            "MessageHeader {{ version={}, flags={}, header_length={}, payload_length={}, transport_stream_id={}, fragment_index={}, cumulative_ack_index={}, sack_bitmap=0x{:016x}, checksum=0x{:016x} }}",
+            self.version,
+            self.flags,
+            self.header_length,
+            self.payload_length,
+            self.transport_stream_id,
+            self.fragment_index,
+            self.cumulative_ack_index,
+            self.sack_bitmap,
+            self.checksum
         )
     }
 }
@@ -146,106 +427,141 @@ mod tests {
     use super::*;
 
     #[test]
-    fn message_header_creates_with_correct_values() {
+    fn header_is_48_bytes_and_round_trips() {
         let header = MessageHeader::new(
-            1,                        // version
-            0b00000001,               // flags (final fragment set)
-            1024,                     // payload_length
-            [1, 2, 3, 4, 5, 6, 7, 8], // message_id
-            0,                        // fragment_index
-        );
+            FRAMING_VERSION,
+            FLAG_MORE,
+            1024,
+            0x0102_0304_0506_0708,
+            5,
+            NO_ACK_INDEX,
+            0,
+        )
+        .unwrap();
 
-        assert_eq!(header.version, 1);
-        assert_eq!(header.flags, 0b00000001);
-        assert_eq!(header.payload_length, 1024);
-        assert_eq!(header.message_id, [1, 2, 3, 4, 5, 6, 7, 8]);
-        assert_eq!(header.fragment_index, 0);
-    }
-
-    #[test]
-    fn message_header_serializes_to_20_bytes() {
-        let header = MessageHeader::new(1, 0, 100, [1, 2, 3, 4, 5, 6, 7, 8], 0);
         let bytes = header.serialize();
-        assert_eq!(bytes.len(), 20);
+        assert_eq!(bytes.len(), HEADER_LENGTH);
+
+        let decoded = MessageHeader::deserialize(&bytes).unwrap();
+        assert_eq!(decoded, header);
     }
 
     #[test]
-    fn message_header_serialize_deserialize_roundtrip() {
-        let original = MessageHeader::new(2, 15, 2048, [10, 20, 30, 40, 50, 60, 70, 80], 5);
-        let serialized = original.serialize();
-        let deserialized = MessageHeader::deserialize(&serialized).unwrap();
-
-        assert_eq!(deserialized.version, original.version);
-        assert_eq!(deserialized.flags, original.flags);
-        assert_eq!(deserialized.payload_length, original.payload_length);
-        assert_eq!(deserialized.message_id, original.message_id);
-        assert_eq!(deserialized.fragment_index, original.fragment_index);
-    }
-
-    #[test]
-    fn message_header_deserialize_rejects_wrong_length() {
-        let result = MessageHeader::deserialize(&[0u8; 19]);
-        assert!(result.is_err());
-
-        let result = MessageHeader::deserialize(&[0u8; 21]);
-        assert!(result.is_err());
-
-        let result = MessageHeader::deserialize(&[]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn message_header_uses_big_endian_encoding() {
+    fn header_uses_big_endian_encoding() {
         let header = MessageHeader::new(
-            0x01,       // version at byte 0
-            0x02,       // flags at byte 1
-            0x00100000, // payload_length 65536 at bytes 4-7 (big endian: 00 10 00 00)
-            [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
-            0x00000005, // fragment_index at bytes 16-19 (big endian: 00 00 00 05)
-        );
+            FRAMING_VERSION,
+            FLAG_FINISH,
+            0x0010_0000,
+            0x0102_0304_0506_0708,
+            0x0000_0005,
+            NO_ACK_INDEX,
+            0,
+        )
+        .unwrap();
+
         let bytes = header.serialize();
 
-        // Verify big-endian encoding
-        assert_eq!(bytes[0], 0x01); // version
-        assert_eq!(bytes[1], 0x02); // flags
-        assert_eq!(bytes[2], 0x00); // reserved byte 1
-        assert_eq!(bytes[3], 0x00); // reserved byte 2
-        assert_eq!(bytes[4], 0x00); // payload_length high byte
-        assert_eq!(bytes[5], 0x10); // payload_length mid-high byte
-        assert_eq!(bytes[6], 0x00); // payload_length mid-low byte
-        assert_eq!(bytes[7], 0x00); // payload_length low byte
-        assert_eq!(bytes[16], 0x00); // fragment_index high byte
-        assert_eq!(bytes[19], 0x05); // fragment_index low byte
+        assert_eq!(bytes[0], FRAMING_VERSION);
+        assert_eq!(bytes[1], FLAG_FINISH);
+        assert_eq!(&bytes[2..4], &(HEADER_LENGTH as u16).to_be_bytes());
+        assert_eq!(&bytes[4..8], &0x0010_0000u32.to_be_bytes());
+        assert_eq!(&bytes[8..16], &0x0102_0304_0506_0708u64.to_be_bytes());
+        assert_eq!(&bytes[16..20], &5u32.to_be_bytes());
     }
 
     #[test]
-    #[should_panic(expected = "payload_length exceeds MAX_FRAME_LENGTH")]
-    fn message_header_constructor_rejects_oversized_payload() {
-        MessageHeader::new(
-            1,
+    fn message_fragmentation_does_not_reject_large_logical_messages() {
+        let payload = vec![0x5a; MAX_PAYLOAD_LENGTH + 17];
+        let frames = encode_message(42, &payload).unwrap();
+
+        assert_eq!(frames.len(), 2);
+
+        let (first, first_payload) = decode_frame(&frames[0]).unwrap();
+        let (last, last_payload) = decode_frame(&frames[1]).unwrap();
+
+        assert_eq!(first.transport_stream_id(), 42);
+        assert_eq!(last.transport_stream_id(), 42);
+        assert_eq!(first.fragment_index(), 0);
+        assert_eq!(last.fragment_index(), 1);
+        assert!(first.has_more());
+        assert!(!first.is_finish());
+        assert!(!last.has_more());
+        assert!(last.is_finish());
+        assert_eq!(first_payload.len(), MAX_PAYLOAD_LENGTH);
+        assert_eq!(last_payload.len(), 17);
+    }
+
+    #[test]
+    fn checksum_detects_payload_corruption() {
+        let payload = b"transport payload";
+        let header = MessageHeader::new(
+            FRAMING_VERSION,
+            FLAG_FINISH,
+            payload.len() as u32,
+            7,
             0,
-            u32::try_from(MAX_FRAME_LENGTH).unwrap() + 1,
-            [0; 8],
+            NO_ACK_INDEX,
             0,
+        )
+        .unwrap();
+
+        let mut frame = encode_frame(header, payload).unwrap();
+        frame[HEADER_LENGTH] ^= 0x01;
+
+        assert!(decode_frame(&frame).is_err());
+    }
+
+    #[test]
+    fn ack_frame_has_zero_payload_and_sack_semantics() {
+        let header = MessageHeader::new(
+            FRAMING_VERSION,
+            FLAG_ACK | FLAG_SACK_PRESENT,
+            0,
+            9,
+            0,
+            3,
+            0b101,
+        )
+        .unwrap();
+
+        let frame = encode_frame(header.clone(), &[]).unwrap();
+        let (decoded, payload) = decode_frame(&frame).unwrap();
+
+        assert!(decoded.is_ack());
+        assert_eq!(decoded.cumulative_ack_index(), 3);
+        assert_eq!(decoded.sack_bitmap(), 0b101);
+        assert!(payload.is_empty());
+    }
+
+    #[test]
+    fn invalid_flag_combinations_are_rejected() {
+        assert!(
+            MessageHeader::new(
+                FRAMING_VERSION,
+                FLAG_FINISH | FLAG_MORE,
+                0,
+                1,
+                0,
+                NO_ACK_INDEX,
+                0,
+            )
+            .is_err()
+        );
+
+        assert!(
+            MessageHeader::new(FRAMING_VERSION, FLAG_SACK_PRESENT, 0, 1, 0, NO_ACK_INDEX, 1,)
+                .is_err()
         );
     }
 
     #[test]
-    fn message_header_deserialize_rejects_oversized_payload() {
-        let mut bytes = vec![0u8; 20];
-        bytes[4..8].copy_from_slice(&(u32::try_from(MAX_FRAME_LENGTH).unwrap() + 1).to_be_bytes());
+    fn reserved_header_bytes_must_be_zero() {
+        let header =
+            MessageHeader::new(FRAMING_VERSION, FLAG_FINISH, 0, 1, 0, NO_ACK_INDEX, 0).unwrap();
 
-        let result = MessageHeader::deserialize(&bytes);
-        assert!(result.is_err());
-    }
+        let mut bytes = header.serialize();
+        bytes[40] = 1;
 
-    #[test]
-    fn message_header_display_formats_correctly() {
-        let header = MessageHeader::new(1, 1, 1024, [1, 2, 3, 4, 5, 6, 7, 8], 2);
-        let formatted = format!("{}", header);
-        assert!(formatted.contains("version=1"));
-        assert!(formatted.contains("flags=1"));
-        assert!(formatted.contains("payload_length=1024"));
-        assert!(formatted.contains("fragment_index=2"));
+        assert!(MessageHeader::deserialize(&bytes).is_err());
     }
 }

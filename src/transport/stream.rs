@@ -1,30 +1,33 @@
 //! Stream abstractions for transport byte transfer.
 //!
-//! ByteSink and ByteSource are the primitive I/O traits used by transport
-//! connections. They operate on raw bytes. `MessageStream` adds message
-//! framing around those raw bytes, while `RawPayloadCodec` handles payload
-//! encoding/decoding.
+//! `ByteSink` and `ByteSource` are raw byte I/O primitives. `MessageStream`
+//! owns the Phase 7 message framing, fragmentation, checksum verification,
+//! and logical-message reassembly. Payload bytes remain opaque to transport.
 
 use crate::contracts::descriptor::{PayloadCodec, RawPayloadCodec};
+use crate::transport::framing::{
+    self, FLAG_ACK, FLAG_CONNECTION_FIN, FLAG_FINISH, FLAG_MORE, FLAG_RESTART, FLAG_SACK_PRESENT,
+    FRAMING_VERSION, HEADER_LENGTH, MAX_FRAME_LENGTH_BYTES, MAX_PAYLOAD_LENGTH, MessageHeader,
+};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{
-    Mutex,
-    atomic::{AtomicBool, Ordering},
+    Mutex, OnceLock,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
-/// Maximum permitted frame length before the payload buffer is allocated.
-/// Frames claiming a larger length are rejected to avoid unbounded memory use.
-pub const MAX_FRAME_LENGTH: usize = 16 * 1024 * 1024;
+/// Maximum complete wire-frame length, in decimal bytes.
+pub const MAX_FRAME_LENGTH: usize = MAX_FRAME_LENGTH_BYTES;
+
+/// A value used in `Cumulative ACK Index` when no fragment has yet been
+/// cumulatively acknowledged.
+pub const NO_CUMULATIVE_ACK: u32 = u32::MAX;
 
 /// Errors that can occur during stream operations.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StreamError {
-    /// The stream is closed.
     Closed,
-    /// Encoding failed.
     Encode(String),
-    /// Decoding failed.
     Decode(String),
-    /// The stream encountered an I/O error.
     Io(String),
 }
 
@@ -32,9 +35,9 @@ impl core::fmt::Display for StreamError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             StreamError::Closed => write!(f, "stream is closed"),
-            StreamError::Encode(msg) => write!(f, "encode error: {}", msg),
-            StreamError::Decode(msg) => write!(f, "decode error: {}", msg),
-            StreamError::Io(msg) => write!(f, "I/O error: {}", msg),
+            StreamError::Encode(msg) => write!(f, "encode error: {msg}"),
+            StreamError::Decode(msg) => write!(f, "decode error: {msg}"),
+            StreamError::Io(msg) => write!(f, "I/O error: {msg}"),
         }
     }
 }
@@ -47,36 +50,27 @@ impl From<std::io::Error> for StreamError {
     }
 }
 
-/// A sink for writing bytes to a transport channel.
+/// A sink for writing raw bytes to a transport channel.
 pub trait ByteSink: Send + Sync {
-    /// Writes raw bytes to the channel.
     fn write(&self, buf: &[u8]) -> Result<(), StreamError>;
-
-    /// Flushes any buffered writes.
     fn flush(&self) -> Result<(), StreamError>;
-
-    /// Closes the sink for further writes.
     fn close(&self) -> Result<(), StreamError>;
 }
 
-/// A source for reading bytes from a transport channel.
 /// Shared receive state owned by a `ByteSource`.
-///
-/// The state lives for exactly as long as the source owns it. Every
-/// `MessageStream` wrapper created from that source therefore shares the same
-/// receive lock and terminal protocol state.
 #[derive(Debug)]
 pub struct ByteSourceState {
     recv_lock: Mutex<()>,
     unusable: AtomicBool,
+    reassembly: Mutex<ReassemblyState>,
 }
 
 impl ByteSourceState {
-    /// Creates fresh shared state for a byte source.
     pub fn new() -> Self {
         Self {
             recv_lock: Mutex::new(()),
             unusable: AtomicBool::new(false),
+            reassembly: Mutex::new(ReassemblyState::default()),
         }
     }
 }
@@ -87,27 +81,101 @@ impl Default for ByteSourceState {
     }
 }
 
+/// A source for reading raw bytes from a transport channel.
 pub trait ByteSource: Send + Sync {
-    /// Reads bytes from the channel into the provided buffer.
-    /// Returns the number of bytes read, or None if the channel is closed.
     fn read(&self, buf: &mut [u8]) -> Result<Option<usize>, StreamError>;
 
-    /// Returns the source-owned shared state used by `MessageStream`.
-    ///
-    /// Implementations that proxy another `ByteSource` must return the
-    /// underlying source's state so wrapper recreation and proxying cannot
-    /// bypass terminal stream state or receive serialization.
+    /// Returns source-owned state shared by every `MessageStream` wrapper.
     fn stream_state(&self) -> &ByteSourceState;
 }
 
-/// A framed message stream using `RawPayloadCodec` for payload encoding.
+#[derive(Default, Debug)]
+struct ReassemblyState {
+    streams: HashMap<u64, IncomingStream>,
+}
+
+#[derive(Debug)]
+struct IncomingStream {
+    fragments: BTreeMap<u32, Vec<u8>>,
+    final_index: Option<u32>,
+    cumulative_ack_index: u32,
+}
+
+impl IncomingStream {
+    fn new() -> Self {
+        Self {
+            fragments: BTreeMap::new(),
+            final_index: None,
+            cumulative_ack_index: NO_CUMULATIVE_ACK,
+        }
+    }
+
+    fn insert(
+        &mut self,
+        header: &MessageHeader,
+        payload: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, StreamError> {
+        let index = header.fragment_index();
+
+        if self.fragments.contains_key(&index) {
+            return Err(StreamError::Decode(format!(
+                "duplicate fragment index {index} for transport stream {}",
+                header.transport_stream_id()
+            )));
+        }
+
+        if header.is_finish()
+            && self
+                .final_index
+                .replace(index)
+                .is_some_and(|old| old != index)
+        {
+            return Err(StreamError::Decode(
+                "multiple conflicting final fragments received".into(),
+            ));
+        }
+
+        self.fragments.insert(index, payload);
+
+        let mut next = match self.cumulative_ack_index {
+            NO_CUMULATIVE_ACK => 0,
+            value => value.saturating_add(1),
+        };
+
+        while self.fragments.contains_key(&next) {
+            self.cumulative_ack_index = next;
+            next = next.saturating_add(1);
+            if next == u32::MAX {
+                break;
+            }
+        }
+
+        let Some(final_index) = self.final_index else {
+            return Ok(None);
+        };
+
+        if self.cumulative_ack_index != final_index {
+            return Ok(None);
+        }
+
+        let mut message = Vec::new();
+        for index in 0..=final_index {
+            let fragment = self.fragments.remove(&index).ok_or_else(|| {
+                StreamError::Decode("final fragment observed with missing fragment".into())
+            })?;
+            message.extend_from_slice(&fragment);
+        }
+
+        Ok(Some(message))
+    }
+}
+
+/// A framed transport message stream.
 ///
-/// `MessageStream` wraps a raw `ByteSink`/`ByteSource` pair and owns the
-/// message framing. Each message is encoded as a 4-byte big-endian payload
-/// length followed by the encoded payload bytes.
-///
-/// Multiple `MessageStream` wrappers over the same `ByteSource` share receive
-/// serialization and terminal protocol state.
+/// A call to `send` represents one logical message. Messages larger than the
+/// per-frame payload limit are fragmented rather than rejected. `recv` emits a
+/// logical message only after all fragments through its FINISH fragment have
+/// arrived.
 pub struct MessageStream<'a> {
     sink: &'a dyn ByteSink,
     source: &'a dyn ByteSource,
@@ -116,7 +184,6 @@ pub struct MessageStream<'a> {
 }
 
 impl<'a> MessageStream<'a> {
-    /// Creates a new `MessageStream` wrapping the provided sink and source.
     pub fn new(sink: &'a dyn ByteSink, source: &'a dyn ByteSource) -> Self {
         Self {
             sink,
@@ -126,31 +193,89 @@ impl<'a> MessageStream<'a> {
         }
     }
 
-    /// Sends a single framed message.
+    /// Sends one logical message, fragmenting it into frames as necessary.
     pub fn send(&self, message: &[u8]) -> Result<(), StreamError> {
         let encoded = self
             .codec
             .encode(message)
             .map_err(|e| StreamError::Encode(e.to_string()))?;
 
-        if encoded.len() > MAX_FRAME_LENGTH {
-            return Err(StreamError::Encode(
-                "framed message exceeds the maximum length".into(),
-            ));
+        let stream_id = next_transport_stream_id();
+        let fragment_count = if encoded.is_empty() {
+            1
+        } else {
+            encoded.len().div_ceil(MAX_PAYLOAD_LENGTH)
+        };
+
+        for fragment_index in 0..fragment_count {
+            let start = fragment_index * MAX_PAYLOAD_LENGTH;
+            let end = encoded.len().min(start + MAX_PAYLOAD_LENGTH);
+            let payload = &encoded[start..end];
+            let is_final = fragment_index + 1 == fragment_count;
+
+            let flags = if is_final { FLAG_FINISH } else { FLAG_MORE };
+            let header = MessageHeader::new(
+                FRAMING_VERSION,
+                flags,
+                u32::try_from(payload.len())
+                    .map_err(|_| StreamError::Encode("frame payload is too large".into()))?,
+                stream_id,
+                u32::try_from(fragment_index)
+                    .map_err(|_| StreamError::Encode("fragment index overflow".into()))?,
+                NO_CUMULATIVE_ACK,
+                0,
+            )
+            .map_err(StreamError::Encode)?;
+
+            let frame = framing::encode_frame(header, payload).map_err(StreamError::Encode)?;
+            if frame.len() > MAX_FRAME_LENGTH {
+                return Err(StreamError::Encode(
+                    "encoded frame exceeds MAX_FRAME_LENGTH".into(),
+                ));
+            }
+
+            self.sink.write(&frame)?;
         }
 
-        let len = u32::try_from(encoded.len())
-            .map_err(|_| StreamError::Encode("message is too large to frame".into()))?;
-
-        let mut framed = Vec::with_capacity(4 + encoded.len());
-        framed.extend_from_slice(&len.to_be_bytes());
-        framed.extend_from_slice(&encoded);
-
-        self.sink.write(&framed)?;
         self.sink.flush()
     }
 
-    /// Receives a single framed message.
+    /// Sends an acknowledgement frame for a transport stream.
+    ///
+    /// `cumulative_ack_index` is the highest contiguous fragment received.
+    /// `sack_bitmap` uses bit 0 for the fragment immediately after that index.
+    pub fn send_ack(
+        &self,
+        transport_stream_id: u64,
+        cumulative_ack_index: u32,
+        sack_bitmap: u64,
+    ) -> Result<(), StreamError> {
+        let mut flags = FLAG_ACK;
+        if sack_bitmap != 0 {
+            flags |= FLAG_SACK_PRESENT;
+        }
+
+        let header = MessageHeader::new(
+            FRAMING_VERSION,
+            flags,
+            0,
+            transport_stream_id,
+            0,
+            cumulative_ack_index,
+            sack_bitmap,
+        )
+        .map_err(StreamError::Encode)?;
+
+        let frame = framing::encode_frame(header, &[]).map_err(StreamError::Encode)?;
+        self.sink.write(&frame)?;
+        self.sink.flush()
+    }
+
+    /// Receives one complete logical message.
+    ///
+    /// ACK frames are transport control frames and are consumed here rather
+    /// than exposed as application payloads. Connection FIN and RESTART are
+    /// likewise handled as transport state and are not application messages.
     pub fn recv(&self) -> Result<Option<Vec<u8>>, StreamError> {
         let _guard = self
             .source_state
@@ -160,43 +285,136 @@ impl<'a> MessageStream<'a> {
 
         if self.source_state.unusable.load(Ordering::Acquire) {
             return Err(StreamError::Decode(
-                "stream is unusable after an oversized frame".into(),
+                "stream is unusable after a framing protocol violation".into(),
             ));
         }
-        // Read the complete 4-byte, big-endian length prefix. A ByteSource
-        // may legally return fewer bytes than requested, so do not assume
-        // that one read fills the prefix.
-        let mut len_buf = [0u8; 4];
-        if !self.read_exact(&mut len_buf)? {
-            return Ok(None);
-        }
-        let len = u32::from_be_bytes(len_buf) as usize;
 
-        if len > MAX_FRAME_LENGTH {
-            // Do not drain peer-controlled bytes here. A ByteSource may block,
-            // so draining an oversized frame could wait indefinitely if the
-            // peer stops sending. Mark this stream unusable instead.
-            self.source_state.unusable.store(true, Ordering::Release);
+        loop {
+            let frame = self.read_frame()?;
+            let Some(frame) = frame else {
+                if self.has_incomplete_streams()? {
+                    self.source_state.unusable.store(true, Ordering::Release);
+                    return Err(StreamError::Decode(
+                        "stream closed before all fragmented messages were completed".into(),
+                    ));
+                }
+                return Ok(None);
+            };
 
-            return Err(StreamError::Decode(
-                "framed message exceeds the maximum length".into(),
-            ));
-        }
-        // Read the complete encoded payload.
-        let mut payload_buf = vec![0u8; len];
-        if len > 0 && !self.read_exact(&mut payload_buf)? {
-            return Err(StreamError::Closed);
-        }
+            let (header, payload) = framing::decode_frame(&frame).map_err(StreamError::Decode)?;
 
-        let payload = self
-            .codec
-            .decode(&payload_buf)
-            .map_err(|e: crate::contracts::EncodingError| StreamError::Decode(e.to_string()))?;
-        Ok(Some(payload))
+            if header.flags() & FLAG_RESTART != 0 {
+                self.source_state.unusable.store(true, Ordering::Release);
+                return Err(StreamError::Decode(
+                    "transport restart requested; current stream is unusable".into(),
+                ));
+            }
+
+            if header.flags() & FLAG_CONNECTION_FIN != 0 {
+                if self.has_incomplete_streams()? {
+                    self.source_state.unusable.store(true, Ordering::Release);
+                    return Err(StreamError::Decode(
+                        "CONNECTION_FIN received while a transport stream is incomplete".into(),
+                    ));
+                }
+                return Ok(None);
+            }
+
+            if header.is_ack() {
+                if !payload.is_empty() {
+                    return Err(StreamError::Decode(
+                        "ACK frame must have a zero-length payload".into(),
+                    ));
+                }
+                continue;
+            }
+
+            if header.flags() & FLAG_MORE == 0 && !header.is_finish() {
+                return Err(StreamError::Decode(
+                    "data frame must carry FINISH or MORE".into(),
+                ));
+            }
+
+            let completed = {
+                let mut state = self
+                    .source_state
+                    .reassembly
+                    .lock()
+                    .map_err(|_| StreamError::Io("reassembly lock is poisoned".into()))?;
+
+                let stream = state
+                    .streams
+                    .entry(header.transport_stream_id())
+                    .or_insert_with(IncomingStream::new);
+
+                stream.insert(&header, payload)?
+            };
+
+            if let Some(message) = completed {
+                self.source_state
+                    .reassembly
+                    .lock()
+                    .map_err(|_| StreamError::Io("reassembly lock is poisoned".into()))?
+                    .streams
+                    .remove(&header.transport_stream_id());
+
+                let decoded =
+                    self.codec
+                        .decode(&message)
+                        .map_err(|e: crate::contracts::EncodingError| {
+                            StreamError::Decode(e.to_string())
+                        })?;
+
+                return Ok(Some(decoded));
+            }
+        }
     }
 
-    /// Reads exactly `buf.len()` bytes, returning `false` only when the stream
-    /// closes before any bytes for this read are available.
+    fn read_frame(&self) -> Result<Option<Vec<u8>>, StreamError> {
+        let mut fixed_header = [0u8; HEADER_LENGTH];
+        if !self.read_exact(&mut fixed_header)? {
+            return Ok(None);
+        }
+
+        let header = match MessageHeader::deserialize(&fixed_header) {
+            Ok(header) => header,
+            Err(error) => {
+                self.source_state.unusable.store(true, Ordering::Release);
+                return Err(StreamError::Decode(error));
+            }
+        };
+        let payload_len = header.payload_length() as usize;
+        if payload_len > MAX_PAYLOAD_LENGTH {
+            self.source_state.unusable.store(true, Ordering::Release);
+            return Err(StreamError::Decode(
+                "frame payload exceeds the configured maximum".into(),
+            ));
+        }
+
+        let mut frame = Vec::with_capacity(HEADER_LENGTH + payload_len);
+        frame.extend_from_slice(&fixed_header);
+
+        if payload_len > 0 {
+            let mut payload = vec![0u8; payload_len];
+            if !self.read_exact(&mut payload)? {
+                self.source_state.unusable.store(true, Ordering::Release);
+                return Err(StreamError::Closed);
+            }
+            frame.extend_from_slice(&payload);
+        }
+
+        Ok(Some(frame))
+    }
+
+    fn has_incomplete_streams(&self) -> Result<bool, StreamError> {
+        let state = self
+            .source_state
+            .reassembly
+            .lock()
+            .map_err(|_| StreamError::Io("reassembly lock is poisoned".into()))?;
+        Ok(!state.streams.is_empty())
+    }
+
     fn read_exact(&self, buf: &mut [u8]) -> Result<bool, StreamError> {
         let mut offset = 0;
         while offset < buf.len() {
@@ -208,6 +426,17 @@ impl<'a> MessageStream<'a> {
             }
         }
         Ok(true)
+    }
+}
+
+fn next_transport_stream_id() -> u64 {
+    static NEXT_ID: OnceLock<AtomicU64> = OnceLock::new();
+    let counter = NEXT_ID.get_or_init(|| AtomicU64::new(1));
+    let id = counter.fetch_add(1, Ordering::Relaxed);
+    if id == 0 {
+        counter.fetch_add(1, Ordering::Relaxed)
+    } else {
+        id
     }
 }
 
@@ -335,15 +564,19 @@ mod tests {
         {
             let stream = MessageStream::new(&*sink_arc, &*source_arc);
 
-            let oversized_len = MAX_FRAME_LENGTH + 1;
-            sink_arc
-                .write(&(oversized_len as u32).to_be_bytes())
-                .unwrap();
+            let mut invalid_header = vec![0u8; HEADER_LENGTH];
+            invalid_header[0] = FRAMING_VERSION;
+            invalid_header[2..4].copy_from_slice(&(HEADER_LENGTH as u16).to_be_bytes());
+            invalid_header[4..8]
+                .copy_from_slice(&(u32::try_from(MAX_PAYLOAD_LENGTH + 1).unwrap()).to_be_bytes());
+            sink_arc.write(&invalid_header).unwrap();
 
             let error = stream.recv().unwrap_err();
             assert_eq!(
                 error,
-                StreamError::Decode("framed message exceeds the maximum length".into())
+                StreamError::Decode(format!(
+                    "payload_length exceeds maximum frame payload ({MAX_PAYLOAD_LENGTH})"
+                ))
             );
         }
 
@@ -353,7 +586,7 @@ mod tests {
         let error = recreated.recv().unwrap_err();
         assert_eq!(
             error,
-            StreamError::Decode("stream is unusable after an oversized frame".into())
+            StreamError::Decode("stream is unusable after a framing protocol violation".into())
         );
     }
 
@@ -412,16 +645,19 @@ mod tests {
 
         {
             let stream = MessageStream::new(&*sink_arc, &*source_arc);
-            let oversized_len = MAX_FRAME_LENGTH + 1;
-
-            sink_arc
-                .write(&(oversized_len as u32).to_be_bytes())
-                .unwrap();
+            let mut invalid_header = vec![0u8; HEADER_LENGTH];
+            invalid_header[0] = FRAMING_VERSION;
+            invalid_header[2..4].copy_from_slice(&(HEADER_LENGTH as u16).to_be_bytes());
+            invalid_header[4..8]
+                .copy_from_slice(&(u32::try_from(MAX_PAYLOAD_LENGTH + 1).unwrap()).to_be_bytes());
+            sink_arc.write(&invalid_header).unwrap();
 
             let error = stream.recv().unwrap_err();
             assert_eq!(
                 error,
-                StreamError::Decode("framed message exceeds the maximum length".into())
+                StreamError::Decode(format!(
+                    "payload_length exceeds maximum frame payload ({MAX_PAYLOAD_LENGTH})"
+                ))
             );
         }
 
@@ -433,7 +669,7 @@ mod tests {
         let error = stream.recv().unwrap_err();
         assert_eq!(
             error,
-            StreamError::Decode("stream is unusable after an oversized frame".into())
+            StreamError::Decode("stream is unusable after a framing protocol violation".into())
         );
     }
 

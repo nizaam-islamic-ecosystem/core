@@ -118,7 +118,10 @@ fn configuration_snapshot() -> Arc<ConfigurationSnapshot> {
 }
 
 fn serving_runtime() -> EngineRuntime {
-    let runtime = EngineRuntime::new();
+    let runtime = EngineRuntime::new(
+        nizaam_core::identity::EngineId::new(ENGINE).unwrap(),
+        nizaam_core::identity::EngineInstanceId::new("runtime-test-instance").unwrap(),
+    );
 
     for state in [
         LifecycleState::Starting,
@@ -137,9 +140,21 @@ fn serving_runtime() -> EngineRuntime {
 
 fn invocation_from_request(request: &UniversalRequest) -> CapabilityInvocation {
     CapabilityInvocation::new(
-        request.envelope.metadata.descriptor.capability_id.clone(),
-        request.envelope.metadata.descriptor.contract_id.clone(),
-        request.envelope.payload.bytes().to_vec(),
+        request
+            .event
+            .envelope
+            .metadata
+            .descriptor
+            .capability_id
+            .clone(),
+        request
+            .event
+            .envelope
+            .metadata
+            .descriptor
+            .contract_id
+            .clone(),
+        request.event.envelope.payload.bytes().to_vec(),
     )
 }
 
@@ -201,7 +216,7 @@ fn serving_runtime_can_execute_a_validated_universal_request() {
 
     // Runtime execution context is associated with the trusted operation
     // context carried by the universal request.
-    let base_context = EngineContext::new(request.envelope.operation_context.clone());
+    let base_context = EngineContext::new(request.event.envelope.operation_context.clone());
 
     let attempt = Attempt::new(
         operation.operation.id.clone(),
@@ -294,7 +309,7 @@ fn runtime_dispatch_uses_request_capability_for_handler_selection() {
         operation_context("runtime-routing-op", "runtime-routing-corr"),
     );
 
-    let context = EngineContext::new(request.envelope.operation_context.clone()).for_attempt(
+    let context = EngineContext::new(request.event.envelope.operation_context.clone()).for_attempt(
         nizaam_core::identity::NodeId::new("runtime-routing-node").unwrap(),
         nizaam_core::identity::AttemptId::new("runtime-routing-attempt").unwrap(),
     );
@@ -696,6 +711,7 @@ fn runtime_shutdown_closes_event_publisher_owned_by_runtime() {
         .publish(
             Event::new(
                 nizaam_core::identity::EventId::new("runtime-owned-before-shutdown").unwrap(),
+                nizaam_core::events::EventName::new("runtime.event").unwrap(),
                 "runtime.event",
                 Scope::new("runtime:test").unwrap(),
             )
@@ -709,6 +725,7 @@ fn runtime_shutdown_closes_event_publisher_owned_by_runtime() {
         publisher.publish(
             Event::new(
                 nizaam_core::identity::EventId::new("runtime-owned-during-draining").unwrap(),
+                nizaam_core::events::EventName::new("runtime.event").unwrap(),
                 "runtime.event",
                 Scope::new("runtime:test").unwrap(),
             )
@@ -724,6 +741,7 @@ fn runtime_shutdown_closes_event_publisher_owned_by_runtime() {
         publisher.publish(
             Event::new(
                 nizaam_core::identity::EventId::new("runtime-owned-after-shutdown").unwrap(),
+                nizaam_core::events::EventName::new("runtime.event").unwrap(),
                 "runtime.event",
                 Scope::new("runtime:test").unwrap(),
             )
@@ -738,6 +756,7 @@ fn runtime_shutdown_closes_event_publisher_owned_by_runtime() {
 fn runtime_shutdown_cancels_runtime_owned_event_subscription() {
     let runtime = serving_runtime();
     let subscription = EventSubscription::new(
+        nizaam_core::events::EventName::new("runtime.event").unwrap(),
         "runtime.event",
         Scope::new("runtime:test").unwrap(),
         |_event: &Event| {},
@@ -764,6 +783,7 @@ fn runtime_shutdown_cancels_runtime_owned_event_delivery() {
 
     let subscription = Arc::new(
         EventSubscription::new(
+            nizaam_core::events::EventName::new("runtime.event").unwrap(),
             "runtime.event",
             Scope::new("runtime:test").unwrap(),
             move |_event: &Event| {
@@ -796,6 +816,7 @@ fn runtime_shutdown_cancels_runtime_owned_event_delivery() {
             .enqueue(Arc::new(
                 Event::new(
                     nizaam_core::identity::EventId::new("runtime-delivery-event").unwrap(),
+                    nizaam_core::events::EventName::new("runtime.event").unwrap(),
                     "runtime.event",
                     Scope::new("runtime:test").unwrap(),
                 )
@@ -843,22 +864,28 @@ fn dispatched_capability_outcome_can_become_a_structurally_valid_universal_respo
 
     validate_request(&request).unwrap();
 
-    let context = EngineContext::new(request.envelope.operation_context.clone()).for_attempt(
+    let context = EngineContext::new(request.event.envelope.operation_context.clone()).for_attempt(
         nizaam_core::identity::NodeId::new("runtime-response-node").unwrap(),
         nizaam_core::identity::AttemptId::new("runtime-response-attempt").unwrap(),
     );
 
     let invocation = CapabilityInvocation::new(
         capability_id,
-        request.envelope.metadata.descriptor.contract_id.clone(),
-        request.envelope.payload.bytes().to_vec(),
+        request
+            .event
+            .envelope
+            .metadata
+            .descriptor
+            .contract_id
+            .clone(),
+        request.event.envelope.payload.bytes().to_vec(),
     );
 
     let outcome = dispatch(&registry, &context, &invocation)
         .into_outcome()
         .expect("capability must produce an outcome");
 
-    let mut envelope = request.envelope;
+    let mut envelope = request.event.envelope;
     envelope.metadata.descriptor.interaction = Interaction::Response;
     envelope.payload = EncodedPayload::new(
         envelope.metadata.descriptor.payload.clone(),
@@ -869,7 +896,7 @@ fn dispatched_capability_outcome_can_become_a_structurally_valid_universal_respo
 
     assert!(response.has_response_interaction());
     assert_eq!(response.status, Status::Success);
-    assert_eq!(response.envelope.payload.bytes(), b"runtime response");
+    assert_eq!(response.event.envelope.payload.bytes(), b"runtime response");
 
     runtime.shutdown().unwrap();
 }
@@ -1279,7 +1306,7 @@ impl Authorizer for RecordingAuthorizer {
 }
 
 fn response_for_request(request: &UniversalRequest, payload: &[u8]) -> UniversalResponse {
-    let mut envelope = request.envelope.clone();
+    let mut envelope = request.event.envelope.clone();
 
     envelope.metadata.descriptor.interaction = Interaction::Response;
     envelope.payload = EncodedPayload::new(
@@ -1332,7 +1359,7 @@ fn runtime_request_pipeline_authenticates_authorizes_and_dispatches() {
         },
     );
 
-    let initial_context = EngineContext::new(request.envelope.operation_context.clone())
+    let initial_context = EngineContext::new(request.event.envelope.operation_context.clone())
         .with_security(SecurityContext::new(
             service_principal("initial-caller-placeholder"),
             Some(calling_service.clone()),
@@ -1391,7 +1418,7 @@ fn runtime_request_pipeline_authenticates_authorizes_and_dispatches() {
     let response = result.expect("authenticated and authorized request must dispatch");
 
     assert_eq!(response.status, Status::Success);
-    assert_eq!(response.envelope.payload.bytes(), b"secure response");
+    assert_eq!(response.event.envelope.payload.bytes(), b"secure response");
     assert!(*authorization_observed.lock().unwrap());
     assert!(*handler_observed.lock().unwrap());
 
@@ -1424,10 +1451,11 @@ fn runtime_request_pipeline_rejects_authentication_failure_before_dispatch() {
         },
     );
 
-    let mut context = EngineContext::new(request.envelope.operation_context.clone()).for_attempt(
-        nizaam_core::identity::NodeId::new("runtime-security-node").unwrap(),
-        nizaam_core::identity::AttemptId::new("runtime-security-attempt").unwrap(),
-    );
+    let mut context = EngineContext::new(request.event.envelope.operation_context.clone())
+        .for_attempt(
+            nizaam_core::identity::NodeId::new("runtime-security-node").unwrap(),
+            nizaam_core::identity::AttemptId::new("runtime-security-attempt").unwrap(),
+        );
 
     let mut request = request;
 
@@ -1484,10 +1512,11 @@ fn runtime_request_pipeline_fails_on_authentication_subsystem_failure_before_dis
         },
     );
 
-    let mut context = EngineContext::new(request.envelope.operation_context.clone()).for_attempt(
-        nizaam_core::identity::NodeId::new("runtime-security-node").unwrap(),
-        nizaam_core::identity::AttemptId::new("runtime-security-attempt").unwrap(),
-    );
+    let mut context = EngineContext::new(request.event.envelope.operation_context.clone())
+        .for_attempt(
+            nizaam_core::identity::NodeId::new("runtime-security-node").unwrap(),
+            nizaam_core::identity::AttemptId::new("runtime-security-attempt").unwrap(),
+        );
 
     let mut request = request;
 
@@ -1546,10 +1575,11 @@ fn runtime_request_pipeline_rejects_authorization_deny_before_dispatch() {
         },
     );
 
-    let mut context = EngineContext::new(request.envelope.operation_context.clone()).for_attempt(
-        nizaam_core::identity::NodeId::new("runtime-security-node").unwrap(),
-        nizaam_core::identity::AttemptId::new("runtime-security-attempt").unwrap(),
-    );
+    let mut context = EngineContext::new(request.event.envelope.operation_context.clone())
+        .for_attempt(
+            nizaam_core::identity::NodeId::new("runtime-security-node").unwrap(),
+            nizaam_core::identity::AttemptId::new("runtime-security-attempt").unwrap(),
+        );
 
     let mut request = request;
 
@@ -1616,10 +1646,11 @@ fn runtime_request_pipeline_fails_on_authorization_subsystem_failure_before_disp
         },
     );
 
-    let mut context = EngineContext::new(request.envelope.operation_context.clone()).for_attempt(
-        nizaam_core::identity::NodeId::new("runtime-security-node").unwrap(),
-        nizaam_core::identity::AttemptId::new("runtime-security-attempt").unwrap(),
-    );
+    let mut context = EngineContext::new(request.event.envelope.operation_context.clone())
+        .for_attempt(
+            nizaam_core::identity::NodeId::new("runtime-security-node").unwrap(),
+            nizaam_core::identity::AttemptId::new("runtime-security-attempt").unwrap(),
+        );
 
     let mut request = request;
 

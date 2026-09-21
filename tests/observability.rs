@@ -12,7 +12,8 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use nizaam_core::error::{ErrorClass, ErrorCode, ErrorDefinition, ErrorOwner, Severity};
-use nizaam_core::identity::{CorrelationId, OperationId};
+use nizaam_core::events::EventName;
+use nizaam_core::identity::{CorrelationId, EventId, OperationId};
 use nizaam_core::logging::{
     LogContext, LogEvent, LogEventType, LogLevel, LogScope, LogSink, LogSource, LoggingSystem,
 };
@@ -48,7 +49,8 @@ impl LogSink for ChannelSink {
 
 fn global_event(context: OperationContext, event_id: &str) -> LogEvent {
     LogEvent::new(
-        nizaam_core::identity::MessageId::new(event_id).unwrap(),
+        EventId::new(event_id).unwrap(),
+        EventName::new("observability.event").unwrap(),
         LogLevel::Info,
         LogSource::Core,
         LogScope::Global,
@@ -131,8 +133,7 @@ fn observability_logger_publishes_through_the_existing_logging_system() {
     let event = receiver
         .recv_timeout(Duration::from_secs(5))
         .expect("logging event should be delivered within five seconds");
-    assert_eq!(event.event_id.as_str(), "observability-event");
-    assert_eq!(event.event_type, LogEventType::Diagnostic);
+    assert_eq!(event.event_type(), "diagnostic");
 
     system.shutdown().unwrap();
 }

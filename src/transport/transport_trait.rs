@@ -1,12 +1,13 @@
 //! The transport trait and error types for universal engine communication.
 //!
 //! Transport is the provider-neutral abstraction for sending and receiving
-//! byte-oriented messages between engines. Concrete transports (in-memory,
-//! gRPC, HTTP, etc.) implement the `Transport` trait. Core supplies one
-//! in-memory reference implementation; all other transports live outside Core.
+//! byte-oriented messages between concrete engine instances. Concrete
+//! transports (in-memory, gRPC, HTTP, etc.) implement the `Transport` trait.
+//! Core supplies one in-memory reference implementation; all other
+//! transports live outside Core.
 
 use crate::contracts::{UniversalRequest, UniversalResponse};
-use crate::identity::EngineId;
+use crate::identity::EngineInstanceId;
 use core::pin::Pin;
 
 /// A boxed future returned by transport operations.
@@ -47,7 +48,7 @@ impl core::fmt::Display for TransportError {
             TransportError::Closed => write!(f, "connection closed by peer"),
             TransportError::Encode(msg) => write!(f, "encode error: {}", msg),
             TransportError::Decode(msg) => write!(f, "decode error: {}", msg),
-            TransportError::Cancelled => write!(f, "operation was cancelled"),
+            TransportError::Cancelled => write!(f, "operation cancelled"),
             TransportError::DeadlineExpired => write!(f, "operation deadline expired"),
             TransportError::Timeout => write!(f, "operation timed out"),
             TransportError::Peer(msg) => write!(f, "peer error: {}", msg),
@@ -62,22 +63,28 @@ pub type TransportResult<T> = Result<T, TransportError>;
 
 /// The transport trait for sending requests and receiving responses.
 ///
+/// Transport addresses concrete [`EngineInstanceId`] values rather than
+/// logical engine identities. This guarantees that a routing decision made
+/// by the Control Plane can be applied to the actual communication target.
+///
 /// Implementors handle the concrete wire protocol (in-memory channel,
 /// gRPC, HTTP, etc.). The trait is `Send + Sync` so it may be shared
 /// across concurrent client calls.
 pub trait Transport: Send + Sync {
-    /// Sends a universal request and receives a universal response.
+    /// Sends a universal request to one concrete engine instance and
+    /// receives a universal response.
     fn call(
         &self,
-        target: &EngineId,
+        target: &EngineInstanceId,
         request: UniversalRequest,
     ) -> BoxedFuture<UniversalResponse, TransportError>;
 
-    /// Returns true if the transport believes it is connected to the target.
-    fn is_connected(&self, target: &EngineId) -> bool;
+    /// Returns true if the transport believes it is connected to the
+    /// concrete target instance.
+    fn is_connected(&self, target: &EngineInstanceId) -> bool;
 
-    /// Returns the list of engine instances this transport is connected to.
-    fn connected_targets(&self) -> Vec<EngineId>;
+    /// Returns the concrete engine instances this transport is connected to.
+    fn connected_targets(&self) -> Vec<EngineInstanceId>;
 }
 
 #[cfg(test)]
@@ -103,10 +110,7 @@ mod tests {
             TransportError::Decode("bad response".into()).to_string(),
             "decode error: bad response"
         );
-        assert_eq!(
-            TransportError::Cancelled.to_string(),
-            "operation was cancelled"
-        );
+        assert_eq!(TransportError::Cancelled.to_string(), "operation cancelled");
         assert_eq!(
             TransportError::DeadlineExpired.to_string(),
             "operation deadline expired"

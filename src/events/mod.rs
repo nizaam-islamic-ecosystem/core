@@ -41,7 +41,7 @@ mod subscriber;
 // Stable semantic Event API
 // -----------------------------------------------------------------------------
 
-pub use event::{Event, EventContext, EventCreationError};
+pub use event::{Event, EventContext, EventCreationError, EventName, InvalidEventName};
 pub use scope::{InvalidScope, Scope};
 pub use subscriber::{
     EventSubscriber, EventSubscription, SubscriptionCreationError, SubscriptionLifecycleError,
@@ -66,7 +66,7 @@ pub use publisher::{
 mod tests {
     use super::{
         delivery::{DeliveryConfig, DeliveryDispatcher, DeliveryOutcome},
-        event::{Event, EventContext},
+        event::{Event, EventContext, EventName},
         lifecycle::{EventLifecycle, EventLifecycleState},
         publisher::{EventPublisher, PublisherError, PublisherLifecycleState},
         scope::Scope,
@@ -82,7 +82,13 @@ mod tests {
     }
 
     fn event() -> Event {
-        Event::new(EventId::new("event-1").unwrap(), "test.event", scope()).unwrap()
+        Event::new(
+            EventId::new("event-1").unwrap(),
+            EventName::new("test.event").unwrap(),
+            "test.event",
+            scope(),
+        )
+        .unwrap()
     }
 
     fn event_lifecycle() -> Arc<EventLifecycle> {
@@ -99,9 +105,14 @@ mod tests {
         let scope = scope();
         let owner = CancellationToken::new();
 
-        let subscription =
-            EventSubscription::new("test.event", scope.clone(), |_event: &Event| {}, &owner)
-                .unwrap();
+        let subscription = EventSubscription::new(
+            EventName::new("test.event").unwrap(),
+            "test.event",
+            scope.clone(),
+            |_event: &Event| {},
+            &owner,
+        )
+        .unwrap();
 
         assert_eq!(event.event_id().as_str(), "event-1");
         assert_eq!(scope.as_str(), "engine:test");
@@ -130,8 +141,14 @@ mod tests {
 
         publisher.activate().unwrap();
 
-        let subscription =
-            EventSubscription::new("test.event", scope(), |_event: &Event| {}, &owner).unwrap();
+        let subscription = EventSubscription::new(
+            EventName::new("test.event").unwrap(),
+            "test.event",
+            scope(),
+            |_event: &Event| {},
+            &owner,
+        )
+        .unwrap();
 
         let registered = publisher.subscribe(subscription).unwrap();
 
@@ -153,6 +170,7 @@ mod tests {
 
         let subscription = Arc::new(
             EventSubscription::new(
+                EventName::new("test.event").unwrap(),
                 "test.event",
                 scope(),
                 move |event: &Event| {
@@ -209,6 +227,7 @@ mod tests {
         let context = EventContext::empty().with_operation_context(operation_context.clone());
         let event = Event::new_with_context(
             EventId::new("event-context-2").unwrap(),
+            EventName::new("test.event").unwrap(),
             "test.event",
             scope(),
             context,
@@ -257,12 +276,17 @@ mod tests {
         );
         let security_context = SecurityContext::new(subscriber_principal, None);
 
-        let subscription =
-            EventSubscription::new("test.event", scope(), |_event: &Event| {}, &owner)
-                .unwrap()
-                .with_security_context(security_context)
-                .with_authorizer(Arc::new(AllowAuthorizer))
-                .requiring_capability(crate::identity::CapabilityId::new("events.read").unwrap());
+        let subscription = EventSubscription::new(
+            EventName::new("test.event").unwrap(),
+            "test.event",
+            scope(),
+            |_event: &Event| {},
+            &owner,
+        )
+        .unwrap()
+        .with_security_context(security_context)
+        .with_authorizer(Arc::new(AllowAuthorizer))
+        .requiring_capability(crate::identity::CapabilityId::new("events.read").unwrap());
 
         let registered = publisher.subscribe(subscription).unwrap();
 

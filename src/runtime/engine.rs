@@ -6,7 +6,11 @@ use super::{
     concurrency::ConcurrencyConfig,
     lifecycle::{Lifecycle, LifecycleState},
 };
-use crate::{error::InvalidTransition, events::EventLifecycle};
+use crate::{
+    error::InvalidTransition,
+    events::EventLifecycle,
+    identity::{EngineId, EngineInstanceId},
+};
 
 /// Minimal lifecycle owner for an engine instance.
 ///
@@ -16,6 +20,8 @@ use crate::{error::InvalidTransition, events::EventLifecycle};
 /// runtime layers and are intentionally not introduced here.
 #[derive(Debug)]
 pub struct EngineRuntime {
+    engine_id: EngineId,
+    instance_id: EngineInstanceId,
     lifecycle: Mutex<Lifecycle>,
     shutdown: CancellationToken,
     background: BackgroundTasks,
@@ -32,18 +38,43 @@ enum ShutdownState {
     Complete,
 }
 
-impl Default for EngineRuntime {
-    fn default() -> Self {
-        Self::new()
+/// Indicates that a normal request cannot be admitted by the runtime's
+/// current lifecycle state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestAdmissionError {
+    /// Normal request admission is allowed only while the runtime is serving.
+    NotServing(LifecycleState),
+}
+
+impl std::fmt::Display for RequestAdmissionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotServing(state) => {
+                write!(
+                    formatter,
+                    "runtime is not accepting requests in {state:?} state"
+                )
+            }
+        }
     }
 }
 
+impl std::error::Error for RequestAdmissionError {}
+
 impl EngineRuntime {
-    /// Creates a new runtime in the `Created` lifecycle state.
-    pub fn new() -> Self {
+    /// Creates a new runtime for a concrete engine instance in the `Created`
+    /// lifecycle state.
+    ///
+    /// The logical engine identity and concrete runtime identity are established
+    /// at runtime construction and remain immutable for the lifetime of the
+    /// runtime. Later registration and Control Plane communication layers use
+    /// these identities as the authoritative source for engine participation.
+    pub fn new(engine_id: EngineId, instance_id: EngineInstanceId) -> Self {
         let shutdown = CancellationToken::new();
 
         Self {
+            engine_id,
+            instance_id,
             lifecycle: Mutex::new(Lifecycle::new()),
             background: BackgroundTasks::new(shutdown.clone()),
             event_lifecycle: Arc::new(EventLifecycle::new()),
@@ -57,10 +88,16 @@ impl EngineRuntime {
     ///
     /// The existing [`Self::new`] constructor remains unchanged for callers
     /// that do not need bounded runtime-task admission.
-    pub fn with_concurrency(config: ConcurrencyConfig) -> Self {
+    pub fn with_concurrency(
+        engine_id: EngineId,
+        instance_id: EngineInstanceId,
+        config: ConcurrencyConfig,
+    ) -> Self {
         let shutdown = CancellationToken::new();
 
         Self {
+            engine_id,
+            instance_id,
             lifecycle: Mutex::new(Lifecycle::new()),
             background: BackgroundTasks::with_concurrency(shutdown.clone(), config),
             event_lifecycle: Arc::new(EventLifecycle::new()),
@@ -70,12 +107,40 @@ impl EngineRuntime {
         }
     }
 
+    /// Returns the logical engine identifier owned by this runtime.
+    pub fn engine_id(&self) -> &EngineId {
+        &self.engine_id
+    }
+
+    /// Returns the concrete engine instance identifier owned by this runtime.
+    pub fn instance_id(&self) -> &EngineInstanceId {
+        &self.instance_id
+    }
+
     /// Returns the current lifecycle state.
     pub fn state(&self) -> LifecycleState {
         self.lifecycle
             .lock()
             .expect("lifecycle lock poisoned")
             .state()
+    }
+
+    /// Admits one normal request according to the authoritative runtime lifecycle.
+    ///
+    /// Only `Serving` admits new normal requests. Requests rejected here must
+    /// not proceed to validation, capability resolution, or handler dispatch.
+    ///
+    /// The admission check is intentionally separate from request execution:
+    /// once a caller has successfully passed this boundary, later transition
+    /// to `Draining` does not retroactively reject that already-admitted work.
+    pub fn admit_request(&self) -> Result<(), RequestAdmissionError> {
+        let state = self.state();
+
+        if state == LifecycleState::Serving {
+            Ok(())
+        } else {
+            Err(RequestAdmissionError::NotServing(state))
+        }
     }
 
     /// Transitions the runtime lifecycle to `next`.
@@ -252,6 +317,7 @@ impl Drop for EngineRuntime {
 mod tests {
     use super::EngineRuntime;
     use crate::error::InvalidTransition;
+    use crate::identity::{EngineId, EngineInstanceId};
     use crate::runtime::concurrency::ConcurrencyConfig;
     use crate::runtime::lifecycle::LifecycleState;
     use std::sync::{Arc, Mutex};
@@ -259,7 +325,10 @@ mod tests {
     use std::time::Duration;
 
     fn serving_runtime() -> EngineRuntime {
-        let runtime = EngineRuntime::new();
+        let runtime = EngineRuntime::new(
+            EngineId::new("test-engine").unwrap(),
+            EngineInstanceId::new("test-engine-01").unwrap(),
+        );
 
         runtime.transition(LifecycleState::Starting).unwrap();
         runtime.transition(LifecycleState::Configuring).unwrap();
@@ -270,6 +339,58 @@ mod tests {
         runtime.transition(LifecycleState::Serving).unwrap();
 
         runtime
+    }
+
+    #[test]
+    fn engine_runtime_keeps_logical_and_concrete_identity() {
+        let engine_id = EngineId::new("quran").unwrap();
+        let instance_id = EngineInstanceId::new("quran-02").unwrap();
+
+        let runtime = EngineRuntime::new(engine_id.clone(), instance_id.clone());
+
+        assert_eq!(runtime.engine_id(), &engine_id);
+        assert_eq!(runtime.instance_id(), &instance_id);
+        assert_eq!(runtime.state(), LifecycleState::Created);
+    }
+
+    #[test]
+    fn runtime_admits_requests_only_while_serving() {
+        let runtime = EngineRuntime::new(
+            EngineId::new("test-engine").unwrap(),
+            EngineInstanceId::new("test-engine-01").unwrap(),
+        );
+
+        assert_eq!(
+            runtime.admit_request(),
+            Err(super::RequestAdmissionError::NotServing(
+                LifecycleState::Created,
+            ))
+        );
+
+        runtime.transition(LifecycleState::Starting).unwrap();
+        runtime.transition(LifecycleState::Configuring).unwrap();
+        runtime.transition(LifecycleState::Dependencies).unwrap();
+        runtime.transition(LifecycleState::Capabilities).unwrap();
+        runtime.transition(LifecycleState::Registering).unwrap();
+        runtime.transition(LifecycleState::Ready).unwrap();
+
+        assert_eq!(
+            runtime.admit_request(),
+            Err(super::RequestAdmissionError::NotServing(
+                LifecycleState::Ready,
+            ))
+        );
+
+        runtime.transition(LifecycleState::Serving).unwrap();
+        assert_eq!(runtime.admit_request(), Ok(()));
+
+        runtime.transition(LifecycleState::Draining).unwrap();
+        assert_eq!(
+            runtime.admit_request(),
+            Err(super::RequestAdmissionError::NotServing(
+                LifecycleState::Draining,
+            ))
+        );
     }
 
     #[test]
@@ -284,7 +405,10 @@ mod tests {
 
     #[test]
     fn event_lifecycle_starts_open_with_runtime() {
-        let runtime = EngineRuntime::new();
+        let runtime = EngineRuntime::new(
+            EngineId::new("test-engine").unwrap(),
+            EngineInstanceId::new("test-engine-01").unwrap(),
+        );
 
         assert_eq!(
             runtime.event_lifecycle().state(),
@@ -326,7 +450,11 @@ mod tests {
 
     #[test]
     fn configured_runtime_preserves_lifecycle_and_shutdown_behavior() {
-        let runtime = EngineRuntime::with_concurrency(ConcurrencyConfig::new(1, 1).unwrap());
+        let runtime = EngineRuntime::with_concurrency(
+            EngineId::new("test-engine").unwrap(),
+            EngineInstanceId::new("test-engine-01").unwrap(),
+            ConcurrencyConfig::new(1, 1).unwrap(),
+        );
 
         assert_eq!(runtime.state(), LifecycleState::Created);
         assert!(!runtime.shutdown_token().is_cancelled());
@@ -350,7 +478,10 @@ mod tests {
         let stopped_by_task = Arc::clone(&stopped);
 
         {
-            let runtime = EngineRuntime::new();
+            let runtime = EngineRuntime::new(
+                EngineId::new("test-engine").unwrap(),
+                EngineInstanceId::new("test-engine-01").unwrap(),
+            );
 
             runtime
                 .background_tasks()
@@ -567,7 +698,10 @@ mod tests {
 
     #[test]
     fn shutdown_from_created_rejects_invalid_draining_transition() {
-        let runtime = EngineRuntime::new();
+        let runtime = EngineRuntime::new(
+            EngineId::new("test-engine").unwrap(),
+            EngineInstanceId::new("test-engine-01").unwrap(),
+        );
 
         let result = runtime.shutdown();
 
@@ -578,7 +712,10 @@ mod tests {
 
     #[test]
     fn shutdown_from_ready_rejects_invalid_draining_transition() {
-        let runtime = EngineRuntime::new();
+        let runtime = EngineRuntime::new(
+            EngineId::new("test-engine").unwrap(),
+            EngineInstanceId::new("test-engine-01").unwrap(),
+        );
 
         runtime.transition(LifecycleState::Starting).unwrap();
         runtime.transition(LifecycleState::Configuring).unwrap();

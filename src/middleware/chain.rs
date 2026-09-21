@@ -279,7 +279,7 @@ mod tests {
             _context: &mut EngineContext,
             request: &mut UniversalRequest,
         ) -> MiddlewareResult {
-            request.envelope.message_id = MessageId::new("mutated-request").unwrap();
+            request.event.envelope.message_id = MessageId::new("mutated-request").unwrap();
 
             MiddlewareResult::Continue
         }
@@ -741,7 +741,10 @@ mod tests {
         let mut context = context();
 
         let result = chain.execute(&mut context, &mut request, |_context, request| {
-            assert_eq!(request.envelope.message_id.as_str(), "mutated-request");
+            assert_eq!(
+                request.event.envelope.message_id.as_str(),
+                "mutated-request"
+            );
 
             Ok::<_, &'static str>(response())
         });

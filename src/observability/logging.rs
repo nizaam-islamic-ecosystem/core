@@ -1,4 +1,5 @@
 //! Observability integration with the existing Core Logging System.
+
 //!
 //! Phase 11 does not define a second logging implementation. This module
 //! provides a small observability-facing adapter over the established
@@ -54,7 +55,8 @@ mod tests {
     use std::sync::{Arc, mpsc};
 
     use super::*;
-    use crate::identity::{CorrelationId, MessageId, OperationId};
+    use crate::events::EventName;
+    use crate::identity::{CorrelationId, EventId, OperationId};
     use crate::logging::{LogContext, LogEventType, LogLevel, LogSink, LoggingSystem};
     use crate::operation::{Operation, OperationContext};
 
@@ -75,7 +77,8 @@ mod tests {
 
     fn global_event(event_id: &str) -> LogEvent {
         LogEvent::new(
-            MessageId::new(event_id).unwrap(),
+            EventId::new(event_id).unwrap(),
+            EventName::new("observability.event").unwrap(),
             LogLevel::Info,
             LogSource::Core,
             LogScope::Global,
@@ -94,12 +97,11 @@ mod tests {
         system.subscribe(Arc::new(ChannelSink(sender)));
         let instance = system.instance(LogScope::Global, LogSource::Core);
         let logger = ObservabilityLogger::new(&instance);
+        let event = global_event("event-1");
+        let event_id = event.event_id().clone();
 
-        assert_eq!(
-            logger.emit(global_event("event-1")).unwrap(),
-            DispatchOutcome::Queued
-        );
-        assert_eq!(receiver.recv().unwrap().event_id.as_str(), "event-1");
+        assert_eq!(logger.emit(event).unwrap(), DispatchOutcome::Queued);
+        assert_eq!(receiver.recv().unwrap().event_id(), &event_id);
 
         system.shutdown().unwrap();
     }
@@ -121,8 +123,10 @@ mod tests {
         let system = LoggingSystem::new(1).unwrap();
         let instance = system.instance(LogScope::Global, LogSource::Core);
         let logger = ObservabilityLogger::new(&instance);
+
         let event = LogEvent::new(
-            MessageId::new("event-2").unwrap(),
+            EventId::new("event-2").unwrap(),
+            EventName::new("observability.event").unwrap(),
             LogLevel::Info,
             LogSource::Core,
             LogScope::Global,
@@ -149,6 +153,7 @@ mod tests {
         let system = LoggingSystem::new(1).unwrap();
         let instance = system.instance(LogScope::Global, LogSource::Core);
         let logger = ObservabilityLogger::new(&instance);
+
         system.shutdown().unwrap();
 
         assert_eq!(

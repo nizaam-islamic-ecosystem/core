@@ -1,11 +1,11 @@
 //! Phase 7 boundary for universal client connection mechanism.
 //!
 //! A client connection represents an outgoing connection from a client
-//! to a server engine. It handles the transport-level details of
-//! establishing and maintaining a connection.
+//! to a concrete server engine instance. It handles the transport-level
+//! details of establishing and maintaining a connection.
 
 use crate::contracts::{UniversalRequest, UniversalResponse};
-use crate::identity::EngineId;
+use crate::identity::{EngineId, EngineInstanceId};
 use crate::transport::{BoxedFuture, TransportError};
 
 /// The lifecycle state of a client connection.
@@ -28,12 +28,18 @@ impl ClientConnectionState {
     }
 }
 
-/// A client connection to a peer engine.
+/// A client connection to a concrete engine instance.
 ///
-/// A client connection is an outgoing connection from a client to a server.
+/// A client connection is an outgoing connection from a client to a
+/// particular server instance. Both the logical engine identity and the
+/// concrete instance identity are exposed so callers cannot lose the
+/// distinction between an engine and one of its runtime instances.
 pub trait ClientConnection: Send + Sync {
-    /// Returns the engine id of the peer at the other end of this connection.
-    fn peer(&self) -> &EngineId;
+    /// Returns the logical engine ID of the peer at the other end.
+    fn peer_engine(&self) -> &EngineId;
+
+    /// Returns the concrete engine instance ID of the peer at the other end.
+    fn peer_instance(&self) -> &EngineInstanceId;
 
     /// Returns the current state of this connection.
     fn state(&self) -> ClientConnectionState;
@@ -47,8 +53,12 @@ pub trait ClientConnection: Send + Sync {
 
 /// A factory for creating client connections.
 pub trait ClientConnectionFactory: Send + Sync {
-    /// Creates a new client connection to the specified target.
-    fn connect(&self, target: &EngineId) -> BoxedFuture<Box<dyn ClientConnection>, TransportError>;
+    /// Creates a new client connection to the specified concrete engine
+    /// instance.
+    fn connect(
+        &self,
+        target: &EngineInstanceId,
+    ) -> BoxedFuture<Box<dyn ClientConnection>, TransportError>;
 }
 
 #[cfg(test)]

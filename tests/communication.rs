@@ -58,7 +58,7 @@ const FRAMING_VERSION: u8 = 1;
 const FINAL_FRAGMENT_FLAG: u8 = 0b0000_0001;
 
 /// The fixed transport header length defined by the framing protocol.
-const HEADER_LENGTH: usize = 20;
+const HEADER_LENGTH: usize = 48;
 
 /// The offset of the flags byte inside the transport header.
 const FLAGS_OFFSET: usize = 1;
@@ -78,6 +78,11 @@ fn descriptor_for(capability: &str, interaction: Interaction) -> ContractDescrip
     )
 }
 
+/// Returns the deterministic concrete instance used by these integration tests.
+fn instance_for(engine: &EngineId) -> EngineInstanceId {
+    EngineInstanceId::new(format!("{}-instance", engine.as_str())).unwrap()
+}
+
 /// Builds a universal request addressed to `target` from a fixed caller engine.
 fn request_for(
     target: &EngineId,
@@ -85,7 +90,8 @@ fn request_for(
     capability: &str,
     payload: &[u8],
 ) -> UniversalRequest {
-    let participants = Participants::new(EngineId::new("caller-engine").unwrap(), target.clone());
+    let participants = Participants::new(EngineId::new("caller-engine").unwrap(), target.clone())
+        .with_target_instance(instance_for(target));
     let operation_context = OperationContext::new(Operation::new(
         OperationId::new("op-1").unwrap(),
         CorrelationId::new("corr-1").unwrap(),
@@ -117,7 +123,8 @@ fn request_for_attempt(
     payload: &[u8],
     identity: AttemptRequestIdentity<'_>,
 ) -> UniversalRequest {
-    let participants = Participants::new(EngineId::new("caller-engine").unwrap(), target.clone());
+    let participants = Participants::new(EngineId::new("caller-engine").unwrap(), target.clone())
+        .with_target_instance(instance_for(target));
     let operation_context = OperationContext::new(Operation::new(
         OperationId::new(identity.operation_id).unwrap(),
         CorrelationId::new(identity.correlation_id).unwrap(),
@@ -162,7 +169,7 @@ fn request_with(
 /// declares the response interaction, and reverses the participants so the
 /// answering engine becomes the sender.
 fn response_for(request: UniversalRequest, status: Status, payload: Vec<u8>) -> UniversalResponse {
-    let envelope = request.envelope;
+    let envelope = request.event.envelope;
     let request_descriptor = envelope.metadata.descriptor;
     let payload_descriptor = request_descriptor.payload.clone();
 
@@ -252,7 +259,7 @@ fn integration_pipeline() -> ExecutionPipeline {
 /// A handler that echoes the request payload back with the given status.
 fn echo_handler(status: Status) -> RequestHandler {
     Arc::new(move |request: UniversalRequest| {
-        let payload = request.envelope.payload.bytes().to_vec();
+        let payload = request.event.envelope.payload.bytes().to_vec();
         response_for(request, status, payload)
     })
 }
@@ -272,7 +279,8 @@ fn serving_engine(
     capability: &str,
     handler: RequestHandler,
 ) -> Arc<Mutex<EngineServer>> {
-    let mut server = EngineServer::new(engine.clone()).with_pipeline(integration_pipeline());
+    let mut server = EngineServer::new(engine.clone(), instance_for(engine))
+        .with_pipeline(integration_pipeline());
     server.register_handler(CapabilityId::new(capability).unwrap(), handler);
     server.start();
     Arc::new(Mutex::new(server))
@@ -281,7 +289,7 @@ fn serving_engine(
 /// Publishes an engine server behind `engine`'s address on the transport.
 fn expose(transport: &InMemoryTransport, engine: &EngineId, server: &Arc<Mutex<EngineServer>>) {
     let server = Arc::clone(server);
-    transport.register(engine.clone(), move |request| {
+    transport.register(engine.clone(), instance_for(engine), move |request| {
         let server = server.lock().expect("engine server lock");
         handle_request(&server, request).expect("transport level dispatch must succeed")
     });
@@ -293,7 +301,9 @@ fn call<T: Transport>(
     target: &EngineId,
     request: UniversalRequest,
 ) -> UniversalResponse {
-    futures::executor::block_on(client.send(target, request)).expect("transport call must succeed")
+    let target_instance = instance_for(target);
+    futures::executor::block_on(client.send(&target_instance, request))
+        .expect("transport call must succeed")
 }
 
 // ---------------------------------------------------------------------------
@@ -404,17 +414,19 @@ impl ByteSource for ChannelReader {
 
 /// A loopback `Connection` whose sink feeds its own source.
 struct LoopbackConnection {
-    peer: EngineId,
+    peer_engine: EngineId,
+    peer_instance: EngineInstanceId,
     state: ConnectionState,
     writer: ChannelWriter,
     reader: ChannelReader,
 }
 
 impl LoopbackConnection {
-    fn open(peer: EngineId, channel: &ByteChannel) -> Self {
+    fn open(peer_engine: EngineId, peer_instance: EngineInstanceId, channel: &ByteChannel) -> Self {
         let (writer, reader) = channel.split();
         Self {
-            peer,
+            peer_engine,
+            peer_instance,
             state: ConnectionState::Open,
             writer,
             reader,
@@ -423,8 +435,12 @@ impl LoopbackConnection {
 }
 
 impl Connection for LoopbackConnection {
-    fn peer(&self) -> &EngineId {
-        &self.peer
+    fn peer_engine(&self) -> &EngineId {
+        &self.peer_engine
+    }
+
+    fn peer_instance(&self) -> &EngineInstanceId {
+        &self.peer_instance
     }
 
     fn state(&self) -> ConnectionState {
@@ -452,14 +468,19 @@ impl Connection for LoopbackConnection {
 
 /// A `ClientConnection` that forwards calls to an in-memory transport.
 struct TransportClientConnection {
-    peer: EngineId,
+    peer_engine: EngineId,
+    peer_instance: EngineInstanceId,
     state: ClientConnectionState,
     transport: InMemoryTransport,
 }
 
 impl ClientConnection for TransportClientConnection {
-    fn peer(&self) -> &EngineId {
-        &self.peer
+    fn peer_engine(&self) -> &EngineId {
+        &self.peer_engine
+    }
+
+    fn peer_instance(&self) -> &EngineInstanceId {
+        &self.peer_instance
     }
 
     fn state(&self) -> ClientConnectionState {
@@ -472,7 +493,7 @@ impl ClientConnection for TransportClientConnection {
                 Err::<UniversalResponse, TransportError>(TransportError::Closed)
             });
         }
-        self.transport.call(&self.peer, request)
+        self.transport.call(&self.peer_instance, request)
     }
 
     fn close(&mut self) {
@@ -486,7 +507,10 @@ struct InMemoryConnectionFactory {
 }
 
 impl ClientConnectionFactory for InMemoryConnectionFactory {
-    fn connect(&self, target: &EngineId) -> BoxedFuture<Box<dyn ClientConnection>, TransportError> {
+    fn connect(
+        &self,
+        target: &EngineInstanceId,
+    ) -> BoxedFuture<Box<dyn ClientConnection>, TransportError> {
         let transport = self.transport.clone();
         let target = target.clone();
 
@@ -495,8 +519,12 @@ impl ClientConnectionFactory for InMemoryConnectionFactory {
                 return Err(TransportError::Disconnected);
             }
 
+            let peer_engine = transport
+                .registered_engine(&target)
+                .ok_or(TransportError::Disconnected)?;
             let connection: Box<dyn ClientConnection> = Box::new(TransportClientConnection {
-                peer: target,
+                peer_engine,
+                peer_instance: target,
                 state: ClientConnectionState::Open,
                 transport,
             });
@@ -531,13 +559,13 @@ fn client_request_reaches_engine_server_and_returns_universal_response() {
     );
     assert!(request.has_request_interaction());
 
-    let expected_context = request.envelope.operation_context.clone();
+    let expected_context = request.event.envelope.operation_context.clone();
     let response = call(&client, &engine, request);
 
     assert_eq!(response.status, Status::Success);
-    assert_eq!(response.envelope.message_id.as_str(), "msg-1");
-    assert_eq!(response.envelope.payload.bytes(), b"opaque request");
-    assert_eq!(response.envelope.operation_context, expected_context);
+    assert_eq!(response.event.envelope.message_id.as_str(), "msg-1");
+    assert_eq!(response.event.envelope.payload.bytes(), b"opaque request");
+    assert_eq!(response.event.envelope.operation_context, expected_context);
 }
 
 #[test]
@@ -556,16 +584,28 @@ fn response_declares_the_response_interaction_and_reversed_participants() {
 
     assert!(response.has_response_interaction());
     assert_eq!(
-        response.envelope.metadata.descriptor.interaction,
+        response.event.envelope.metadata.descriptor.interaction,
         Interaction::Response
     );
-    assert_eq!(response.envelope.metadata.participants.sender, engine);
+    assert_eq!(response.event.envelope.metadata.participants.sender, engine);
     assert_eq!(
-        response.envelope.metadata.participants.target.as_str(),
+        response
+            .event
+            .envelope
+            .metadata
+            .participants
+            .target
+            .as_str(),
         "caller-engine"
     );
     assert_eq!(
-        response.envelope.metadata.descriptor.capability_id.as_str(),
+        response
+            .event
+            .envelope
+            .metadata
+            .descriptor
+            .capability_id
+            .as_str(),
         CAPABILITY
     );
 }
@@ -579,7 +619,7 @@ fn operation_context_survives_the_transport_round_trip() {
     let observed_in_handler = Arc::clone(&observed);
     let handler: RequestHandler = Arc::new(move |request: UniversalRequest| {
         *observed_in_handler.lock().expect("observation lock") =
-            Some(request.envelope.operation_context.clone());
+            Some(request.event.envelope.operation_context.clone());
         response_for(request, Status::Success, b"ok".to_vec())
     });
 
@@ -601,7 +641,8 @@ fn operation_context_survives_the_transport_round_trip() {
         "msg-context",
         CAPABILITY,
         b"payload",
-        Participants::new(EngineId::new("caller-engine").unwrap(), engine.clone()),
+        Participants::new(EngineId::new("caller-engine").unwrap(), engine.clone())
+            .with_target_instance(instance_for(&engine)),
         operation_context.clone(),
     );
 
@@ -617,7 +658,7 @@ fn operation_context_survives_the_transport_round_trip() {
     // The transport encodes and decodes the request, so the context the engine
     // observes proves that identity, plan, parent, node, and attempt survive.
     assert_eq!(seen, operation_context);
-    assert_eq!(response.envelope.operation_context, operation_context);
+    assert_eq!(response.event.envelope.operation_context, operation_context);
 }
 
 #[test]
@@ -634,11 +675,11 @@ fn payload_descriptor_metadata_survives_the_transport_round_trip() {
         request_for(&engine, "msg-descriptor", CAPABILITY, b"payload"),
     );
 
-    let descriptor = response.envelope.payload.descriptor();
+    let descriptor = response.event.envelope.payload.descriptor();
     assert_eq!(descriptor.media_type(), MEDIA_TYPE);
     assert_eq!(descriptor.schema_version(), &Version::new(2, 1, 0));
     assert_eq!(
-        response.envelope.metadata.descriptor.version,
+        response.event.envelope.metadata.descriptor.version,
         Version::new(1, 4, 2)
     );
 }
@@ -652,7 +693,7 @@ fn engine_instance_identities_survive_the_transport_round_trip() {
     let observed_in_handler = Arc::clone(&observed);
     let handler: RequestHandler = Arc::new(move |request: UniversalRequest| {
         *observed_in_handler.lock().expect("observation lock") =
-            Some(request.envelope.metadata.participants.clone());
+            Some(request.event.envelope.metadata.participants.clone());
         response_for(request, Status::Success, b"ok".to_vec())
     });
 
@@ -661,7 +702,7 @@ fn engine_instance_identities_survive_the_transport_round_trip() {
 
     let participants = Participants::new(EngineId::new("caller-engine").unwrap(), engine.clone())
         .with_sender_instance(EngineInstanceId::new("caller-engine-7").unwrap())
-        .with_target_instance(EngineInstanceId::new("instance-engine-2").unwrap());
+        .with_target_instance(instance_for(&engine));
 
     let request = request_with(
         "msg-instance",
@@ -685,11 +726,21 @@ fn engine_instance_identities_survive_the_transport_round_trip() {
     assert_eq!(seen, participants);
     assert_eq!(response.status, Status::Success);
     assert_eq!(
-        response.envelope.metadata.participants.sender_instance,
+        response
+            .event
+            .envelope
+            .metadata
+            .participants
+            .sender_instance,
         participants.target_instance
     );
     assert_eq!(
-        response.envelope.metadata.participants.target_instance,
+        response
+            .event
+            .envelope
+            .metadata
+            .participants
+            .target_instance,
         participants.sender_instance
     );
 }
@@ -714,7 +765,7 @@ fn opaque_binary_payload_is_not_interpreted_or_altered() {
         request_for(&engine, "msg-binary", CAPABILITY, &payload),
     );
 
-    assert_eq!(response.envelope.payload.bytes(), payload.as_slice());
+    assert_eq!(response.event.envelope.payload.bytes(), payload.as_slice());
 }
 
 #[test]
@@ -748,8 +799,8 @@ fn large_logical_payload_round_trips_through_client_and_server() {
     );
 
     assert_eq!(response.status, Status::Success);
-    assert_eq!(response.envelope.payload.bytes().len(), payload.len());
-    assert_eq!(response.envelope.payload.bytes(), payload.as_slice());
+    assert_eq!(response.event.envelope.payload.bytes().len(), payload.len());
+    assert_eq!(response.event.envelope.payload.bytes(), payload.as_slice());
 }
 
 #[test]
@@ -776,10 +827,16 @@ fn client_routes_each_request_to_the_addressed_engine() {
         request_for(&beta, "msg-beta", CAPABILITY, b"ping"),
     );
 
-    assert_eq!(alpha_response.envelope.payload.bytes(), b"alpha-engine");
-    assert_eq!(beta_response.envelope.payload.bytes(), b"beta-engine");
-    assert_eq!(alpha_response.envelope.message_id.as_str(), "msg-alpha");
-    assert_eq!(beta_response.envelope.message_id.as_str(), "msg-beta");
+    assert_eq!(
+        alpha_response.event.envelope.payload.bytes(),
+        b"alpha-engine"
+    );
+    assert_eq!(beta_response.event.envelope.payload.bytes(), b"beta-engine");
+    assert_eq!(
+        alpha_response.event.envelope.message_id.as_str(),
+        "msg-alpha"
+    );
+    assert_eq!(beta_response.event.envelope.message_id.as_str(), "msg-beta");
 }
 
 #[test]
@@ -793,7 +850,7 @@ fn request_to_unregistered_engine_reports_a_retryable_disconnect() {
 
     let client = UniversalClient::new(transport);
     let result = futures::executor::block_on(client.send(
-        &unknown,
+        &instance_for(&unknown),
         request_for(&unknown, "msg-1", CAPABILITY, b"ping"),
     ));
 
@@ -826,15 +883,15 @@ fn client_reports_connection_state_per_engine() {
 
     let client = UniversalClient::new(transport);
 
-    assert!(client.is_connected(&alpha));
-    assert!(client.is_connected(&beta));
-    assert!(!client.is_connected(&absent));
+    assert!(client.is_connected(&instance_for(&alpha)));
+    assert!(client.is_connected(&instance_for(&beta)));
+    assert!(!client.is_connected(&instance_for(&absent)));
 
     let targets = client.connected_targets();
     assert_eq!(targets.len(), 2);
-    assert!(targets.contains(&alpha));
-    assert!(targets.contains(&beta));
-    assert!(!targets.contains(&absent));
+    assert!(targets.contains(&instance_for(&alpha)));
+    assert!(targets.contains(&instance_for(&beta)));
+    assert!(!targets.contains(&instance_for(&absent)));
 }
 
 #[test]
@@ -849,7 +906,7 @@ fn client_exposes_its_underlying_transport() {
     // The client must not hide the transport it was built on, so typed
     // capability clients can reuse it instead of opening their own stack.
     let registered = client.transport().registered_targets();
-    assert_eq!(registered, vec![engine.clone()]);
+    assert_eq!(registered, vec![instance_for(&engine)]);
     assert_eq!(registered, client.connected_targets());
 }
 
@@ -862,17 +919,21 @@ fn transport_is_usable_through_a_trait_object() {
 
     let abstract_transport: &dyn Transport = &transport;
 
-    assert!(abstract_transport.is_connected(&engine));
-    assert!(abstract_transport.connected_targets().contains(&engine));
+    assert!(abstract_transport.is_connected(&instance_for(&engine)));
+    assert!(
+        abstract_transport
+            .connected_targets()
+            .contains(&instance_for(&engine))
+    );
 
     let response = futures::executor::block_on(abstract_transport.call(
-        &engine,
+        &instance_for(&engine),
         request_for(&engine, "msg-dyn", CAPABILITY, b"through dyn"),
     ))
     .expect("the abstract transport must deliver the request");
 
     assert_eq!(response.status, Status::Success);
-    assert_eq!(response.envelope.payload.bytes(), b"through dyn");
+    assert_eq!(response.event.envelope.payload.bytes(), b"through dyn");
 }
 
 #[test]
@@ -880,7 +941,7 @@ fn engine_server_rejects_requests_before_it_starts() {
     let transport = InMemoryTransport::new();
     let engine = EngineId::new("unstarted-engine").unwrap();
 
-    let server = EngineServer::new(engine.clone());
+    let server = EngineServer::new(engine.clone(), instance_for(&engine));
     server.register_handler(
         CapabilityId::new(CAPABILITY).unwrap(),
         echo_handler(Status::Success),
@@ -900,7 +961,7 @@ fn engine_server_rejects_requests_before_it_starts() {
 
     assert_eq!(response.status, Status::Failure);
     // The rejection preserves the caller's message identity for correlation.
-    assert_eq!(response.envelope.message_id.as_str(), "msg-early");
+    assert_eq!(response.event.envelope.message_id.as_str(), "msg-early");
 }
 
 #[test]
@@ -967,7 +1028,13 @@ fn engine_server_reports_failure_for_an_unregistered_capability() {
 
     assert_eq!(response.status, Status::Failure);
     assert_eq!(
-        response.envelope.metadata.descriptor.capability_id.as_str(),
+        response
+            .event
+            .envelope
+            .metadata
+            .descriptor
+            .capability_id
+            .as_str(),
         "unbound-capability"
     );
 }
@@ -1010,7 +1077,7 @@ fn engine_level_failure_is_not_reported_as_a_transport_error() {
 
     let client = UniversalClient::new(transport);
     let result = futures::executor::block_on(client.send(
-        &engine,
+        &instance_for(&engine),
         request_for(&engine, "msg-fail", CAPABILITY, b"ping"),
     ));
 
@@ -1018,7 +1085,7 @@ fn engine_level_failure_is_not_reported_as_a_transport_error() {
     // message, so the transport must report success and carry the status.
     let response = result.expect("delivery must succeed even when the engine fails");
     assert_eq!(response.status, Status::Failure);
-    assert_eq!(response.envelope.payload.bytes(), b"ping");
+    assert_eq!(response.event.envelope.payload.bytes(), b"ping");
 }
 
 #[test]
@@ -1056,13 +1123,13 @@ fn concurrent_client_calls_stay_paired_with_their_engines() {
         for handle in handles {
             let (engine, message_id, response) = handle.join().expect("worker thread");
             assert_eq!(response.status, Status::Success);
-            assert_eq!(response.envelope.message_id.as_str(), message_id);
+            assert_eq!(response.event.envelope.message_id.as_str(), message_id);
             assert_eq!(
-                response.envelope.payload.bytes(),
+                response.event.envelope.payload.bytes(),
                 engine.as_str().as_bytes(),
                 "response for {message_id} came from the wrong engine"
             );
-            assert_eq!(response.envelope.metadata.participants.sender, engine);
+            assert_eq!(response.event.envelope.metadata.participants.sender, engine);
         }
     });
 }
@@ -1122,27 +1189,24 @@ fn framed_stream_round_trips_a_large_logical_message() {
 }
 
 #[test]
-fn framed_stream_rejects_a_logical_message_larger_than_the_frame_bound() {
+fn framed_stream_fragments_a_logical_message_larger_than_one_frame() {
     let channel = ByteChannel::new();
     let (writer, reader) = channel.split();
     let stream = MessageStream::new(&writer, &reader);
 
+    // A logical message may exceed one frame. MessageStream must fragment it
+    // into valid frames and reassemble the original opaque bytes on receive.
     let oversized = vec![0u8; MAX_FRAME_LENGTH + 1];
-    let error = stream
-        .send(&oversized)
-        .expect_err("a frame above the bound must be refused");
-
-    assert_eq!(
-        error,
-        StreamError::Encode("framed message exceeds the maximum length".into())
-    );
-
-    // Refusing the write must not leave a partial frame behind.
-    let within_bound = b"still usable".to_vec();
     stream
-        .send(&within_bound)
-        .expect("framed send must succeed");
-    assert_eq!(stream.recv().unwrap(), Some(within_bound));
+        .send(&oversized)
+        .expect("logical messages larger than one frame must be fragmented");
+
+    let received = stream
+        .recv()
+        .expect("fragmented receive must succeed")
+        .expect("a fragmented logical message must be available");
+
+    assert_eq!(received, oversized);
 }
 
 #[test]
@@ -1150,26 +1214,36 @@ fn framed_stream_marks_the_source_unusable_after_an_oversized_frame() {
     let channel = ByteChannel::new();
     let (writer, reader) = channel.split();
 
-    // A hostile or broken peer announces a frame larger than the bound.
-    let announced = u32::try_from(MAX_FRAME_LENGTH + 1).unwrap();
+    // MessageStream reads a complete 48-byte transport header first.
+    // MessageHeader::deserialize must reject a peer-announced payload that
+    // exceeds the per-frame payload limit and permanently invalidate the source.
+    let oversized_payload = u32::try_from(MAX_FRAME_LENGTH - HEADER_LENGTH + 1).unwrap();
+
+    let mut invalid_header = vec![0u8; HEADER_LENGTH];
+    invalid_header[0] = FRAMING_VERSION;
+    invalid_header[FLAGS_OFFSET] = FINAL_FRAGMENT_FLAG;
+    invalid_header[2..4].copy_from_slice(&(HEADER_LENGTH as u16).to_be_bytes());
+    invalid_header[4..8].copy_from_slice(&oversized_payload.to_be_bytes());
+
     writer
-        .write(&announced.to_be_bytes())
-        .expect("raw write must succeed");
+        .write(&invalid_header)
+        .expect("raw oversized frame header write must succeed");
 
     let first = MessageStream::new(&writer, &reader);
+
     assert_eq!(
         first
             .recv()
-            .expect_err("an oversized frame must be rejected"),
-        StreamError::Decode("framed message exceeds the maximum length".into())
+            .expect_err("an oversized frame payload must be rejected"),
+        StreamError::Decode(format!(
+            "payload_length exceeds maximum frame payload ({})",
+            MAX_FRAME_LENGTH - HEADER_LENGTH
+        ))
     );
 
-    // The rejection is terminal for that source, so a freshly built stream
-    // over the same source must not try to parse the rejected bytes.
-    let second = MessageStream::new(&writer, &reader);
     assert_eq!(
-        second.recv().expect_err("the source must stay unusable"),
-        StreamError::Decode("stream is unusable after an oversized frame".into())
+        first.recv().expect_err("the source must stay unusable"),
+        StreamError::Decode("stream is unusable after a framing protocol violation".into())
     );
 }
 
@@ -1193,9 +1267,10 @@ fn framed_stream_reports_end_of_stream_when_the_peer_closes() {
 fn connection_exposes_framed_duplex_streams_to_consumers() {
     let channel = ByteChannel::new();
     let peer = EngineId::new("peer-engine").unwrap();
-    let connection = LoopbackConnection::open(peer.clone(), &channel);
+    let connection = LoopbackConnection::open(peer.clone(), instance_for(&peer), &channel);
 
-    assert_eq!(connection.peer(), &peer);
+    assert_eq!(connection.peer_engine(), &peer);
+    assert_eq!(connection.peer_instance(), &instance_for(&peer));
     assert_eq!(connection.state(), ConnectionState::Open);
     assert!(connection.state().is_open());
 
@@ -1209,7 +1284,11 @@ fn connection_exposes_framed_duplex_streams_to_consumers() {
 #[test]
 fn closing_a_connection_stops_further_writes() {
     let channel = ByteChannel::new();
-    let mut connection = LoopbackConnection::open(EngineId::new("peer-engine").unwrap(), &channel);
+    let mut connection = LoopbackConnection::open(
+        EngineId::new("peer-engine").unwrap(),
+        EngineInstanceId::new("peer-engine-instance").unwrap(),
+        &channel,
+    );
 
     {
         let stream = MessageStream::new(connection.sink(), connection.source());
@@ -1239,19 +1318,29 @@ fn closing_a_connection_stops_further_writes() {
 #[test]
 fn message_header_round_trips_through_its_binary_layout() {
     let message_id = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22, 0x33];
-    let original = MessageHeader::new(2, FINAL_FRAGMENT_FLAG, 65_536, message_id, 7);
+    let stream_id = u64::from_be_bytes(message_id);
+    let original = MessageHeader::new(
+        FRAMING_VERSION,
+        FINAL_FRAGMENT_FLAG,
+        65_536,
+        stream_id,
+        7,
+        u32::MAX,
+        0,
+    )
+    .expect("valid message header");
 
     let bytes = original.serialize();
     assert_eq!(bytes.len(), HEADER_LENGTH);
 
     // Big-endian, transport focused fields at their documented offsets.
-    assert_eq!(bytes[0], 2);
+    assert_eq!(bytes[0], FRAMING_VERSION);
     assert_eq!(bytes[FLAGS_OFFSET], FINAL_FRAGMENT_FLAG);
     assert_eq!(&bytes[4..8], 65_536u32.to_be_bytes());
     assert_eq!(&bytes[8..16], message_id);
     assert_eq!(&bytes[16..20], 7u32.to_be_bytes());
 
-    let parsed = MessageHeader::deserialize(&bytes).expect("a 20 byte header must parse");
+    let parsed = MessageHeader::deserialize(&bytes).expect("a 48 byte header must parse");
     assert_eq!(parsed.serialize(), bytes);
     assert_eq!(parsed.to_string(), original.to_string());
 }
@@ -1261,16 +1350,41 @@ fn message_header_deserialization_rejects_wrong_sized_input() {
     assert!(MessageHeader::deserialize(&[]).is_err());
     assert!(MessageHeader::deserialize(&[0u8; HEADER_LENGTH - 1]).is_err());
     assert!(MessageHeader::deserialize(&[0u8; HEADER_LENGTH + 1]).is_err());
-    assert!(MessageHeader::deserialize(&[0u8; HEADER_LENGTH]).is_ok());
+    let valid = MessageHeader::new(
+        FRAMING_VERSION,
+        FINAL_FRAGMENT_FLAG,
+        0,
+        0x0102_0304_0506_0708,
+        0,
+        u32::MAX,
+        0,
+    )
+    .expect("valid zero-payload header")
+    .serialize();
+    assert!(MessageHeader::deserialize(&valid).is_ok());
 }
 
 #[test]
 fn message_header_encodes_fragment_metadata_independently() {
     let message_id = [1u8; 8];
-    let first = MessageHeader::new(FRAMING_VERSION, 0, 512, message_id, 0).serialize();
-    let second = MessageHeader::new(FRAMING_VERSION, 0, 512, message_id, 1).serialize();
-    let last =
-        MessageHeader::new(FRAMING_VERSION, FINAL_FRAGMENT_FLAG, 512, message_id, 1).serialize();
+    let stream_id = u64::from_be_bytes(message_id);
+    let first = MessageHeader::new(FRAMING_VERSION, 0, 512, stream_id, 0, u32::MAX, 0)
+        .expect("valid first header")
+        .serialize();
+    let second = MessageHeader::new(FRAMING_VERSION, 0, 512, stream_id, 1, u32::MAX, 0)
+        .expect("valid second header")
+        .serialize();
+    let last = MessageHeader::new(
+        FRAMING_VERSION,
+        FINAL_FRAGMENT_FLAG,
+        512,
+        stream_id,
+        1,
+        u32::MAX,
+        0,
+    )
+    .expect("valid final header")
+    .serialize();
 
     // Fragment index is the only difference between two ordinary fragments.
     assert_ne!(first, second);
@@ -1289,7 +1403,16 @@ fn message_header_encodes_fragment_metadata_independently() {
 
 #[test]
 fn message_header_renders_its_transport_metadata() {
-    let header = MessageHeader::new(FRAMING_VERSION, FINAL_FRAGMENT_FLAG, 1024, [9u8; 8], 3);
+    let header = MessageHeader::new(
+        FRAMING_VERSION,
+        FINAL_FRAGMENT_FLAG,
+        1024,
+        u64::from_be_bytes([9u8; 8]),
+        3,
+        u32::MAX,
+        0,
+    )
+    .expect("valid header");
     let rendered = header.to_string();
 
     assert!(rendered.contains("version=1"), "{rendered}");
@@ -1321,9 +1444,12 @@ fn fragmented_logical_message_travels_as_separate_transport_frames() {
             FRAMING_VERSION,
             flags,
             u32::try_from(fragment.len()).unwrap(),
-            message_id,
+            u64::from_be_bytes(message_id),
             u32::try_from(index).unwrap(),
-        );
+            u32::MAX,
+            0,
+        )
+        .expect("valid fragment header");
 
         let mut frame = header.serialize();
         assert_eq!(frame.len(), HEADER_LENGTH);
@@ -1358,9 +1484,12 @@ fn fragmented_logical_message_travels_as_separate_transport_frames() {
             FRAMING_VERSION,
             flags,
             u32::try_from(body.len()).unwrap(),
-            message_id,
+            u64::from_be_bytes(message_id),
             received,
+            u32::MAX,
+            0,
         )
+        .expect("valid reconstructed header")
         .serialize();
         assert_eq!(header_bytes, expected_header.as_slice());
 
@@ -1395,7 +1524,7 @@ fn retry_attempts_survive_client_server_transport_round_trip() {
         observed_in_handler
             .lock()
             .expect("observation lock")
-            .push(request.envelope.operation_context.clone());
+            .push(request.event.envelope.operation_context.clone());
         response_for(request, Status::Success, b"ok".to_vec())
     });
 
@@ -1429,8 +1558,8 @@ fn retry_attempts_survive_client_server_transport_round_trip() {
         },
     );
 
-    let expected_first = first.envelope.operation_context.clone();
-    let expected_second = second.envelope.operation_context.clone();
+    let expected_first = first.event.envelope.operation_context.clone();
+    let expected_second = second.event.envelope.operation_context.clone();
 
     let first_response = call(&client, &engine, first);
     let second_response = call(&client, &engine, second);
@@ -1493,7 +1622,10 @@ fn retry_attempts_can_cross_transport_after_an_initial_failure() {
     );
 
     assert_eq!(first.status, Status::Failure);
-    assert_eq!(first.envelope.payload.bytes(), b"first attempt failed");
+    assert_eq!(
+        first.event.envelope.payload.bytes(),
+        b"first attempt failed"
+    );
 
     let second = call(
         &client,
@@ -1513,16 +1645,22 @@ fn retry_attempts_can_cross_transport_after_an_initial_failure() {
     );
 
     assert_eq!(second.status, Status::Success);
-    assert_eq!(second.envelope.payload.bytes(), b"second attempt succeeded");
     assert_eq!(
-        first.envelope.operation_context.operation.id,
-        second.envelope.operation_context.operation.id
+        second.event.envelope.payload.bytes(),
+        b"second attempt succeeded"
+    );
+    assert_eq!(
+        first.event.envelope.operation_context.operation.id,
+        second.event.envelope.operation_context.operation.id
     );
     assert_ne!(
-        first.envelope.operation_context.attempt_id,
-        second.envelope.operation_context.attempt_id
+        first.event.envelope.operation_context.attempt_id,
+        second.event.envelope.operation_context.attempt_id
     );
-    assert_ne!(first.envelope.message_id, second.envelope.message_id);
+    assert_ne!(
+        first.event.envelope.message_id,
+        second.event.envelope.message_id
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
@@ -1533,7 +1671,7 @@ fn retryable_disconnect_can_be_followed_by_a_new_attempt() {
     let client = UniversalClient::new(transport.clone());
 
     let first_result = futures::executor::block_on(client.send(
-        &engine,
+        &instance_for(&engine),
         request_for_attempt(
             &engine,
             "late-message-1",
@@ -1573,13 +1711,22 @@ fn retryable_disconnect_can_be_followed_by_a_new_attempt() {
     );
 
     assert_eq!(second.status, Status::Success);
-    assert_eq!(second.envelope.payload.bytes(), b"retry after disconnect");
     assert_eq!(
-        second.envelope.operation_context.operation.id.as_str(),
+        second.event.envelope.payload.bytes(),
+        b"retry after disconnect"
+    );
+    assert_eq!(
+        second
+            .event
+            .envelope
+            .operation_context
+            .operation
+            .id
+            .as_str(),
         "late-retry-op"
     );
     assert_eq!(
-        second.envelope.operation_context.attempt_id,
+        second.event.envelope.operation_context.attempt_id,
         Some(AttemptId::new("late-retry-attempt-2").unwrap())
     );
 }
@@ -1599,10 +1746,11 @@ fn connection_factory_opens_client_connections_to_registered_engines() {
         transport: transport.clone(),
     };
 
-    let connection = futures::executor::block_on(factory.connect(&engine))
+    let connection = futures::executor::block_on(factory.connect(&instance_for(&engine)))
         .expect("connecting to a registered engine must succeed");
 
-    assert_eq!(connection.peer(), &engine);
+    assert_eq!(connection.peer_engine(), &engine);
+    assert_eq!(connection.peer_instance(), &instance_for(&engine));
     assert_eq!(connection.state(), ClientConnectionState::Open);
     assert!(connection.state().is_open());
 
@@ -1615,7 +1763,10 @@ fn connection_factory_opens_client_connections_to_registered_engines() {
     .expect("an open connection must deliver the request");
 
     assert_eq!(response.status, Status::Success);
-    assert_eq!(response.envelope.payload.bytes(), b"through connection");
+    assert_eq!(
+        response.event.envelope.payload.bytes(),
+        b"through connection"
+    );
 }
 
 #[test]
@@ -1623,8 +1774,9 @@ fn connection_factory_refuses_unregistered_engines() {
     let transport = InMemoryTransport::new();
     let factory = InMemoryConnectionFactory { transport };
 
-    let result =
-        futures::executor::block_on(factory.connect(&EngineId::new("absent-engine").unwrap()));
+    let result = futures::executor::block_on(
+        factory.connect(&EngineInstanceId::new("absent-engine-instance").unwrap()),
+    );
 
     match result {
         Err(error) => {
@@ -1648,7 +1800,7 @@ fn client_connection_preserves_attempt_lineage_across_sequential_calls() {
         observed_in_handler
             .lock()
             .expect("observation lock")
-            .push(request.envelope.operation_context.clone());
+            .push(request.event.envelope.operation_context.clone());
         response_for(request, Status::Success, b"connection-ok".to_vec())
     });
 
@@ -1659,7 +1811,7 @@ fn client_connection_preserves_attempt_lineage_across_sequential_calls() {
         transport: transport.clone(),
     };
 
-    let connection = futures::executor::block_on(factory.connect(&engine))
+    let connection = futures::executor::block_on(factory.connect(&instance_for(&engine)))
         .expect("connecting to a registered engine must succeed");
 
     let first = request_for_attempt(
@@ -1687,8 +1839,8 @@ fn client_connection_preserves_attempt_lineage_across_sequential_calls() {
         },
     );
 
-    let first_context = first.envelope.operation_context.clone();
-    let second_context = second.envelope.operation_context.clone();
+    let first_context = first.event.envelope.operation_context.clone();
+    let second_context = second.event.envelope.operation_context.clone();
 
     let first_response = futures::executor::block_on(connection.call(first))
         .expect("the first connection call must succeed");
@@ -1715,7 +1867,7 @@ fn closed_client_connection_refuses_further_calls() {
     expose(&transport, &engine, &server);
 
     let factory = InMemoryConnectionFactory { transport };
-    let mut connection = futures::executor::block_on(factory.connect(&engine))
+    let mut connection = futures::executor::block_on(factory.connect(&instance_for(&engine)))
         .expect("connecting to a registered engine must succeed");
 
     connection.close();

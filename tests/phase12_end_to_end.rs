@@ -83,7 +83,11 @@ fn trusted_context() -> EngineContext {
 }
 
 fn serving_runtime() -> EngineRuntime {
-    let runtime = EngineRuntime::with_concurrency(ConcurrencyConfig::new(1, 1).unwrap());
+    let runtime = EngineRuntime::with_concurrency(
+        nizaam_core::identity::EngineId::new("phase12-runtime-engine").unwrap(),
+        nizaam_core::identity::EngineInstanceId::new("phase12-runtime-instance").unwrap(),
+        ConcurrencyConfig::new(1, 1).unwrap(),
+    );
 
     for state in [
         LifecycleState::Starting,
@@ -212,11 +216,22 @@ fn logical_stream_message_remains_independent_from_transport_fragmentation() {
     assert_eq!(message.item(), &item);
 
     let message_id = [1, 2, 3, 4, 5, 6, 7, 8];
-    let first_frame = MessageHeader::new(1, 0, 7, message_id, 0).serialize();
-    let second_frame = MessageHeader::new(1, 1, 6, message_id, 1).serialize();
+    let stream_id = u64::from_be_bytes(message_id);
+    let first_frame = MessageHeader::new(1, 0, 7, stream_id, 0, u32::MAX, 0)
+        .unwrap()
+        .serialize();
+    let second_frame = MessageHeader::new(1, 1, 6, stream_id, 1, u32::MAX, 0)
+        .unwrap()
+        .serialize();
 
-    assert_eq!(first_frame.len(), 20);
-    assert_eq!(second_frame.len(), 20);
+    assert_eq!(
+        first_frame.len(),
+        nizaam_core::transport::framing::HEADER_LENGTH
+    );
+    assert_eq!(
+        second_frame.len(),
+        nizaam_core::transport::framing::HEADER_LENGTH
+    );
 
     let first = MessageHeader::deserialize(&first_frame).unwrap();
     let second = MessageHeader::deserialize(&second_frame).unwrap();

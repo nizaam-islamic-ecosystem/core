@@ -22,10 +22,12 @@ use nizaam_core::contracts::{
     ContractDescriptor, ContractMetadata, EncodedPayload, Interaction, MessageEnvelope,
     Participants, PayloadDescriptor, UniversalRequest, UniversalResponse, Version,
 };
+use nizaam_core::events::EventName;
 use nizaam_core::health::{
     CapabilityHealthReport, DependencyId, DependencyReport, DependencyRequirement, HealthReport,
     HealthStatus, LivenessReport, ReadinessReport,
 };
+use nizaam_core::identity::EventId;
 use nizaam_core::identity::{
     CapabilityId, ContractId, CorrelationId, EngineId, MessageId, OperationId,
 };
@@ -133,7 +135,10 @@ fn response() -> UniversalResponse {
 }
 
 fn serving_runtime() -> EngineRuntime {
-    let runtime = EngineRuntime::new();
+    let runtime = EngineRuntime::new(
+        EngineId::new("phase11-runtime-engine").unwrap(),
+        nizaam_core::identity::EngineInstanceId::new("phase11-runtime-instance").unwrap(),
+    );
 
     for state in [
         LifecycleState::Starting,
@@ -189,7 +194,8 @@ impl LogSink for ChannelSink {
 
 fn global_log_event(context: OperationContext) -> LogEvent {
     LogEvent::new(
-        MessageId::new("phase11.log").unwrap(),
+        EventId::new("phase11.log").unwrap(),
+        EventName::new("phase11.log").unwrap(),
         LogLevel::Info,
         LogSource::Core,
         LogScope::Global,

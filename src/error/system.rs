@@ -1,4 +1,4 @@
-use super::{ErrorCatalog, ErrorContext, ErrorEvent, ErrorReference, GlobalError, ValidationError};
+use super::{ErrorCatalog, ErrorContext, ErrorEvent, GlobalError, ValidationError};
 
 /// Failure while registering or reporting an error.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -51,9 +51,7 @@ impl ErrorSystemInstance {
             ValidationError::UnregisteredDefinition,
         ))?;
         let error = GlobalError::from_definition(definition, context, None);
-        let reference = ErrorReference::new(code.as_str().to_owned())
-            .expect("validated error codes produce valid references");
-        Ok(ErrorEvent { reference, error })
+        Ok(ErrorEvent::new(error))
     }
 
     pub fn report_error(&self, error: GlobalError) -> Result<ErrorEvent, ReportError> {
@@ -86,9 +84,7 @@ impl ErrorSystemInstance {
                 ValidationError::EmptyDiagnosticField,
             ));
         }
-        let reference = ErrorReference::new(definition.code.as_str().to_owned())
-            .expect("validated error codes produce valid references");
-        Ok(ErrorEvent { reference, error })
+        Ok(ErrorEvent::new(error))
     }
 }
 
@@ -97,180 +93,207 @@ mod tests {
     use super::*;
     use crate::contracts::Version;
     use crate::error::{
-        DiagnosticDetail, ErrorClass, ErrorCode, ErrorDefinition, ErrorOwner, Severity,
+        CatalogError, DiagnosticDetail, ErrorClass, ErrorCode, ErrorDefinition, ErrorOwner,
+        ErrorReference, Severity,
     };
-    use crate::identity::{CorrelationId, OperationId};
-    use crate::operation::Operation;
-    use crate::operation::OperationContext;
+    use crate::identity::{CapabilityId, CorrelationId, EngineId, OperationId};
+    use crate::operation::{Operation, OperationContext};
     use crate::status::Retryability;
 
     fn operation_context() -> OperationContext {
         OperationContext::new(Operation::new(
-            OperationId::new("test-op").unwrap(),
-            CorrelationId::new("test-corr").unwrap(),
+            OperationId::new("error-level-2-operation").unwrap(),
+            CorrelationId::new("error-level-2-correlation").unwrap(),
         ))
     }
 
-    #[test]
-    fn error_system_new_creates_empty_system() {
-        let system = ErrorSystem::new();
-        assert!(system.catalog().is_empty());
+    fn definition(
+        code: &str,
+        class: ErrorClass,
+        severity: Severity,
+        retryability: Retryability,
+    ) -> ErrorDefinition {
+        ErrorDefinition::new(
+            ErrorCode::new(code).unwrap(),
+            ErrorOwner::new("CORE").unwrap(),
+            Version::new(1, 0, 0),
+            class,
+            severity,
+            "Core error",
+            retryability,
+        )
+        .unwrap()
     }
 
     #[test]
-    fn error_system_register_adds_definition() {
+    fn level_2_error_system_composes_registration_reporting_and_error_event() {
         let mut system = ErrorSystem::new();
-        let def = ErrorDefinition::new(
-            ErrorCode::new("CORE.TEST.002").unwrap(),
-            ErrorOwner::new("CORE").unwrap(),
-            Version::new(1, 0, 0),
+        let definition = definition(
+            "CORE.RUNTIME.001",
+            ErrorClass::Execution,
+            Severity::Error,
+            Retryability::Retryable,
+        );
+
+        system.register(definition.clone()).unwrap();
+
+        let instance = system.instance();
+        let context = ErrorContext::new(operation_context())
+            .from_engine(EngineId::new("quran-engine").unwrap())
+            .for_capability(CapabilityId::new("quran.read").unwrap());
+
+        let event = instance.report(&definition.code, context.clone()).unwrap();
+
+        assert_eq!(event.reference().as_str(), "CORE.RUNTIME.001");
+        assert_eq!(event.error.code, definition.code);
+        assert_eq!(event.error.owner, definition.owner);
+        assert_eq!(event.error.version, definition.version);
+        assert_eq!(event.error.class, definition.class);
+        assert_eq!(event.error.severity, definition.severity);
+        assert_eq!(event.error.retryability, definition.retryability);
+        assert_eq!(event.error.message, definition.default_message());
+        assert_eq!(event.error.context, context);
+        assert_eq!(event.event_name().as_str(), "error.occurred");
+        assert_eq!(event.event_type(), "error");
+        assert_eq!(event.event_scope(), "engine:quran-engine");
+        assert!(event.message_id().as_str().starts_with("error-message-"));
+        assert!(event.error.details().is_empty());
+        assert!(event.error.cause.is_none());
+    }
+
+    #[test]
+    fn level_2_registered_definitions_are_isolated_from_unknown_codes() {
+        let mut system = ErrorSystem::new();
+        let registered = definition(
+            "CORE.CONTRACT.001",
             ErrorClass::Contract,
             Severity::Warning,
-            "Warning message",
-            Retryability::Retryable,
-        )
-        .unwrap();
-        system.register(def.clone()).unwrap();
-        assert!(system.catalog().get(&def.code).is_some());
-        let retrieved = system.catalog().get(&def.code).unwrap();
-        assert_eq!(retrieved.owner, def.owner);
-        assert_eq!(retrieved.severity, def.severity);
-    }
-
-    #[test]
-    fn error_system_instance_reports_errors() {
-        let mut system = ErrorSystem::new();
-        let def = ErrorDefinition::new(
-            ErrorCode::new("CORE.TEST.003").unwrap(),
-            ErrorOwner::new("CORE").unwrap(),
-            Version::new(1, 0, 0),
-            ErrorClass::Contract,
-            Severity::Error,
-            "Test error",
-            Retryability::Retryable,
-        )
-        .unwrap();
-        system.register(def.clone()).unwrap();
-        let instance = system.instance();
-        let event = instance.report(&def.code, ErrorContext::new(operation_context()));
-        assert!(event.is_ok());
-        let event = event.unwrap();
-        assert_eq!(event.error.code.as_str(), "CORE.TEST.003");
-    }
-
-    #[test]
-    fn error_system_instance_rejects_unregistered_code() {
-        let system = ErrorSystem::new();
-        let instance = system.instance();
-        let unknown_code = ErrorCode::new("CORE.UNKNOWN.999").unwrap();
-        let event = instance.report(&unknown_code, ErrorContext::new(operation_context()));
-        assert!(event.is_err());
-    }
-
-    #[test]
-    fn error_system_instance_clone_is_independent() {
-        let mut system = ErrorSystem::new();
-        let def = ErrorDefinition::new(
-            ErrorCode::new("CORE.TEST.004").unwrap(),
-            ErrorOwner::new("CORE").unwrap(),
-            Version::new(1, 0, 0),
-            ErrorClass::Contract,
-            Severity::Error,
-            "Clone test",
-            Retryability::Retryable,
-        )
-        .unwrap();
-        system.register(def).unwrap();
-
-        let instance1 = system.instance();
-        let instance2 = system.instance();
-
-        assert!(
-            instance1
-                .catalog
-                .get(&ErrorCode::new("CORE.TEST.004").unwrap())
-                .is_some()
-        );
-        assert!(
-            instance2
-                .catalog
-                .get(&ErrorCode::new("CORE.TEST.004").unwrap())
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn error_system_report_error_rejects_metadata_mismatch() {
-        let mut system = ErrorSystem::new();
-        let def = ErrorDefinition::new(
-            ErrorCode::new("CORE.TEST.005").unwrap(),
-            ErrorOwner::new("CORE").unwrap(),
-            Version::new(1, 0, 0),
-            ErrorClass::Contract,
-            Severity::Error,
-            "Original message",
             Retryability::NonRetryable,
-        )
-        .unwrap();
-        system.register(def.clone()).unwrap();
-        let instance = system.instance();
+        );
+        system.register(registered.clone()).unwrap();
 
-        let mut error = instance
-            .report(&def.code, ErrorContext::new(operation_context()))
+        let instance = system.instance();
+        let unknown = ErrorCode::new("CORE.CONTRACT.999").unwrap();
+
+        assert!(
+            instance
+                .report(&registered.code, ErrorContext::new(operation_context()))
+                .is_ok()
+        );
+
+        assert_eq!(
+            instance.report(&unknown, ErrorContext::new(operation_context())),
+            Err(ReportError::Validation(
+                ValidationError::UnregisteredDefinition
+            ))
+        );
+    }
+
+    #[test]
+    fn level_2_error_occurrence_enrichment_survives_report_validation() {
+        let mut system = ErrorSystem::new();
+        let definition = definition(
+            "CORE.CAPABILITY.001",
+            ErrorClass::Capability,
+            Severity::Error,
+            Retryability::Retryable,
+        );
+        system.register(definition.clone()).unwrap();
+
+        let instance = system.instance();
+        let base = instance
+            .report(&definition.code, ErrorContext::new(operation_context()))
             .unwrap()
             .error;
+
+        let cause = ErrorReference::new("CORE.DEPENDENCY.001").unwrap();
+        let enriched = base
+            .with_message("capability dependency failed")
+            .with_detail(DiagnosticDetail::new("dependency", "quran-db").unwrap())
+            .caused_by(cause.clone());
+
+        let event = instance.report_error(enriched).unwrap();
+
+        assert_eq!(event.reference().as_str(), definition.code.as_str());
+        assert_eq!(event.error.message, "capability dependency failed");
+        assert_eq!(
+            event.error.details(),
+            &[DiagnosticDetail {
+                key: "dependency".to_owned(),
+                value: "quran-db".to_owned(),
+            }]
+        );
+        assert_eq!(event.error.cause, Some(cause));
+    }
+
+    #[test]
+    fn level_2_report_error_rejects_occurrences_that_drift_from_catalog_metadata() {
+        let mut system = ErrorSystem::new();
+        let definition = definition(
+            "CORE.AUTHORIZATION.001",
+            ErrorClass::Authorization,
+            Severity::Error,
+            Retryability::NonRetryable,
+        );
+        system.register(definition.clone()).unwrap();
+
+        let instance = system.instance();
+        let mut error = instance
+            .report(&definition.code, ErrorContext::new(operation_context()))
+            .unwrap()
+            .error;
+
         error.severity = Severity::Critical;
-        let result = instance.report_error(error);
-        assert!(result.is_err());
+
+        assert_eq!(
+            instance.report_error(error),
+            Err(ReportError::Validation(
+                ValidationError::DefinitionMetadataMismatch
+            ))
+        );
     }
 
     #[test]
-    fn error_system_report_error_with_details() {
+    fn level_2_catalog_boundary_rejects_duplicate_definition_registration() {
         let mut system = ErrorSystem::new();
-        let def = ErrorDefinition::new(
-            ErrorCode::new("CORE.TEST.006").unwrap(),
-            ErrorOwner::new("CORE").unwrap(),
-            Version::new(1, 0, 0),
-            ErrorClass::Contract,
+        let definition = definition(
+            "CORE.TRANSPORT.001",
+            ErrorClass::Transport,
             Severity::Error,
-            "Error with details",
             Retryability::Retryable,
-        )
-        .unwrap();
-        system.register(def.clone()).unwrap();
-        let instance = system.instance();
+        );
 
-        let error = instance
-            .report(&def.code, ErrorContext::new(operation_context()))
-            .unwrap()
-            .error;
-        let error_with_detail = error.with_detail(DiagnosticDetail::new("key", "value").unwrap());
-        let result = instance.report_error(error_with_detail);
-        assert!(result.is_ok());
+        system.register(definition.clone()).unwrap();
+
+        assert_eq!(
+            system.register(definition),
+            Err(ReportError::Catalog(CatalogError::DuplicateCode(
+                ErrorCode::new("CORE.TRANSPORT.001").unwrap()
+            )))
+        );
     }
 
     #[test]
-    fn error_system_report_error_rejects_empty_message() {
-        let mut system = ErrorSystem::new();
-        let def = ErrorDefinition::new(
-            ErrorCode::new("CORE.TEST.007").unwrap(),
-            ErrorOwner::new("CORE").unwrap(),
-            Version::new(1, 0, 0),
-            ErrorClass::Contract,
-            Severity::Error,
-            "Original message",
-            Retryability::Retryable,
-        )
-        .unwrap();
-        system.register(def.clone()).unwrap();
-        let instance = system.instance();
+    fn level_2_error_context_preserves_operation_and_engine_information() {
+        let context = ErrorContext::new(operation_context())
+            .from_engine(EngineId::new("hadith-engine").unwrap())
+            .for_capability(CapabilityId::new("hadith.search").unwrap());
 
-        let mut error = instance
-            .report(&def.code, ErrorContext::new(operation_context()))
-            .unwrap()
-            .error;
-        error = error.with_message("");
-        let result = instance.report_error(error);
-        assert!(result.is_err());
+        assert_eq!(
+            context.operation.operation.correlation_id.as_str(),
+            "error-level-2-correlation"
+        );
+        assert_eq!(
+            context.operation.operation.id.as_str(),
+            "error-level-2-operation"
+        );
+        assert_eq!(
+            context.engine_id.as_ref().unwrap().as_str(),
+            "hadith-engine"
+        );
+        assert_eq!(
+            context.capability_id.as_ref().unwrap().as_str(),
+            "hadith.search"
+        );
     }
 }

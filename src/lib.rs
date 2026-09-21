@@ -25,7 +25,6 @@ pub mod observability;
 pub mod provenance;
 pub mod retry;
 pub mod runtime;
-pub mod sdk;
 pub mod security;
 pub mod server;
 pub mod streaming;

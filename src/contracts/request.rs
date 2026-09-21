@@ -1,19 +1,60 @@
+use crate::contracts::UniversalEvent;
 use crate::contracts::descriptor::Interaction;
 use crate::contracts::envelope::MessageEnvelope;
+use crate::identity::EventId;
 
-/// A universal request envelope carrying an opaque capability payload.
+/// A universal logical message carrying Request interaction semantics.
+///
+/// The common occurrence boundary is owned by `UniversalEvent`; request-specific
+/// behavior remains on this wrapper.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UniversalRequest {
-    pub envelope: MessageEnvelope,
+    pub event: UniversalEvent,
 }
 
 impl UniversalRequest {
+    /// Creates a Request wrapper and constructs its universal occurrence
+    /// internally. Callers do not construct `UniversalEvent` themselves.
     pub fn new(envelope: MessageEnvelope) -> Self {
-        Self { envelope }
+        let event = UniversalEvent::new(envelope, "universal.request", "request", "global")
+            .expect("request occurrence metadata is static and valid");
+
+        Self { event }
     }
 
+    /// Returns the Request occurrence identity.
+    pub fn event_id(&self) -> &EventId {
+        self.event.event_id()
+    }
+
+    /// Returns the logical message identity carried by the universal occurrence.
+    pub fn message_id(&self) -> &crate::identity::MessageId {
+        self.event.message_id()
+    }
+
+    /// Returns the common universal occurrence boundary.
+    pub fn universal_event(&self) -> &UniversalEvent {
+        &self.event
+    }
+
+    /// Returns the canonical name of the request event.
+    pub fn event_name(&self) -> &crate::events::EventName {
+        self.event.event_name()
+    }
+
+    /// Returns the request event type.
+    pub fn event_type(&self) -> &str {
+        self.event.event_type()
+    }
+
+    /// Returns the request event scope.
+    pub fn event_scope(&self) -> &str {
+        self.event.scope()
+    }
+
+    /// Returns whether this logical message declares Request interaction semantics.
     pub fn has_request_interaction(&self) -> bool {
-        self.envelope.metadata.descriptor.interaction == Interaction::Request
+        self.event.envelope.metadata.descriptor.interaction == Interaction::Request
     }
 }
 
@@ -60,7 +101,10 @@ mod tests {
     #[test]
     fn request_has_request_interaction() {
         let req = UniversalRequest::new(make_envelope(Interaction::Request));
+
         assert!(req.has_request_interaction());
+        assert!(!req.event_id().as_str().is_empty());
+        assert_eq!(req.universal_event().event_type(), "request");
     }
 
     #[test]
@@ -73,10 +117,27 @@ mod tests {
     }
 
     #[test]
-    fn request_preserves_envelope() {
+    fn request_preserves_envelope_and_universal_event() {
         let env = make_envelope(Interaction::Request);
         let env_id = env.message_id.as_str().to_string();
+
         let req = UniversalRequest::new(env);
-        assert_eq!(req.envelope.message_id.as_str(), env_id);
+
+        assert_eq!(req.event.envelope.message_id.as_str(), env_id);
+        assert_eq!(req.message_id().as_str(), "msg-1");
+        assert!(!req.event_id().as_str().is_empty());
+        assert_eq!(req.event_name().as_str(), "universal.request");
+        assert_eq!(req.event_type(), "request");
+        assert_eq!(req.event_scope(), "global");
+    }
+
+    #[test]
+    fn request_serialization_preserves_universal_event() {
+        let req = UniversalRequest::new(make_envelope(Interaction::Request));
+
+        let encoded = serde_json::to_string(&req).unwrap();
+        let decoded: UniversalRequest = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, req);
     }
 }

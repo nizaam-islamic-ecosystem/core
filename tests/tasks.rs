@@ -291,7 +291,10 @@ fn independent_tasks_can_run_in_parallel_using_local_counters() {
 
 #[test]
 fn runtime_shutdown_cancels_and_waits_for_runtime_owned_background_work() {
-    let runtime = EngineRuntime::new();
+    let runtime = EngineRuntime::new(
+        nizaam_core::identity::EngineId::new("tasks-runtime-engine").unwrap(),
+        nizaam_core::identity::EngineInstanceId::new("tasks-runtime-instance").unwrap(),
+    );
 
     for state in [
         nizaam_core::runtime::LifecycleState::Starting,

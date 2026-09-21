@@ -132,8 +132,7 @@ impl ErrorEvent {
             .map(|engine| format!("engine:{}", engine.as_str()))
             .unwrap_or_else(|| "global".to_owned());
 
-        let event = UniversalEvent::new(envelope, "error.occurred", "error", scope)
-            .expect("internal ErrorEvent construction must produce a valid universal Event");
+        let event = UniversalEvent::from_parts(envelope, event_id, "error.occurred", "error", scope).expect("internal ErrorEvent construction must produce a valid universal Event");
 
         Self { event, error }
     }

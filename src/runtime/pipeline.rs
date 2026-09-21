@@ -1,7 +1,10 @@
 use super::{EngineContext, check_context};
 
 use crate::{
-    contracts::{UniversalRequest, UniversalResponse},
+    contracts::{
+        UniversalRequest, UniversalResponse,
+        validation::{self, ValidationError},
+    },
     middleware::chain::{MiddlewareChain, MiddlewareChainError},
 };
 
@@ -19,6 +22,7 @@ pub enum PipelineConfigurationError {
 #[derive(Debug, PartialEq)]
 pub enum RequestPipelineError<E> {
     Context(PipelineError),
+    Validation(ValidationError),
     Configuration(PipelineConfigurationError),
     Middleware(MiddlewareChainError<E>),
 }
@@ -100,6 +104,8 @@ impl ExecutionPipeline {
     {
         self.run(context).map_err(RequestPipelineError::Context)?;
 
+        validation::validate_request(request).map_err(RequestPipelineError::Validation)?;
+
         if self.middleware.is_empty() {
             return Err(RequestPipelineError::Configuration(
                 PipelineConfigurationError::MandatoryMiddlewareNotConfigured,
@@ -128,6 +134,7 @@ mod tests {
             },
             envelope::MessageEnvelope,
             metadata::{ContractMetadata, Participants},
+            validation::ValidationError,
         },
         identity::{CapabilityId, ContractId, CorrelationId, EngineId, MessageId, OperationId},
         middleware::{
@@ -508,6 +515,35 @@ mod tests {
             ))
         );
         assert!(!downstream_called);
+    }
+
+    #[test]
+    fn request_pipeline_rejects_structurally_invalid_request_before_middleware() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+
+        let pipeline = ExecutionPipeline::new().with_middleware(RecordingMiddleware {
+            events: Arc::clone(&events),
+        });
+
+        let mut context = context();
+        let mut request = request();
+        request.event.envelope.metadata.descriptor.interaction = Interaction::Response;
+
+        let mut downstream_called = false;
+
+        let result = pipeline.run_request(&mut context, &mut request, |_context, _request| {
+            downstream_called = true;
+            Ok::<_, &'static str>(response())
+        });
+
+        assert_eq!(
+            result,
+            Err(RequestPipelineError::Validation(
+                ValidationError::InteractionMismatch,
+            ))
+        );
+        assert!(!downstream_called);
+        assert!(events.lock().unwrap().is_empty());
     }
 
     #[test]

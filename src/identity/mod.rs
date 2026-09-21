@@ -1,6 +1,32 @@
 //! Distinct, validated identifiers used across Nizaam Core contracts.
 
 use core::fmt;
+use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+static ID_GENERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn generate_identity_value(type_name: &str) -> String {
+    let counter = ID_GENERATION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+
+    let mut hasher = Sha256::new();
+    hasher.update(type_name.as_bytes());
+    hasher.update(timestamp.to_le_bytes());
+    hasher.update(counter.to_le_bytes());
+
+    let digest = hasher.finalize();
+    let digest_hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    format!("{}-{}", type_name, digest_hex)
+}
 
 /// Error returned when a Core identity is empty or consists only of whitespace.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,6 +47,15 @@ macro_rules! identity {
         pub struct $name(String);
 
         impl $name {
+            /// Creates an automatically generated identity value.
+            ///
+            /// `EngineId` and `EngineInstanceId` also expose `generate()`;
+            /// their explicit constructors remain available as well.
+            pub fn generate() -> Self {
+                let value = $crate::identity::generate_identity_value(stringify!($name));
+                Self(value)
+            }
+
             pub fn new(value: impl Into<String>) -> Result<Self, $crate::identity::InvalidIdentity> {
                 let value = value.into();
                 if value.trim().is_empty() {
@@ -213,6 +248,19 @@ mod tests {
         assert_eq!(id.to_string(), "event-123");
         assert!(EventId::new("").is_err());
         assert!(EventId::new("   ").is_err());
+    }
+
+    #[test]
+    fn automatically_generated_identity_values_are_non_empty_and_distinct() {
+        let first = EventId::generate();
+        let second = EventId::generate();
+        let message = MessageId::generate();
+
+        assert!(!first.as_str().is_empty());
+        assert!(!second.as_str().is_empty());
+        assert!(!message.as_str().is_empty());
+        assert_ne!(first, second);
+        assert_ne!(first.as_str(), message.as_str());
     }
 
     // -------------------------------------------------------------------------

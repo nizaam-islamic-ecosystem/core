@@ -22,9 +22,12 @@ pub use crate::operation::{CancellationToken, Deadline};
 
 pub use background::{BackgroundTasks, BoundedSpawnError, SpawnError};
 pub use concurrency::{ConcurrencyConfig, ConcurrencyError, ConcurrencyState, TaskScope};
-pub use engine::EngineRuntime;
+pub use engine::{EngineRuntime, RequestAdmissionError};
 pub use lifecycle::{Lifecycle, LifecycleState};
-pub use pipeline::{ExecutionPipeline, PipelineError, PipelineStage};
+pub use pipeline::{
+    ExecutionPipeline, PipelineConfigurationError, PipelineError, PipelineStage,
+    RequestPipelineError,
+};
 pub use task::{
     Task, TaskCriticality, TaskId, TaskLifecycle, TaskLifecycleError, TaskLifecycleState, TaskOwner,
 };
@@ -198,7 +201,7 @@ mod tests {
         },
         contracts::Version,
         error::{ErrorClass, ErrorCode, ErrorOwner, Severity},
-        identity::{AttemptId, CorrelationId, NodeId, OperationId},
+        identity::{AttemptId, CorrelationId, EngineId, EngineInstanceId, NodeId, OperationId},
         operation::{Operation, OperationContext},
         security::{PrincipalId, PrincipalIdentity, PrincipalType},
         status::Retryability,
@@ -535,6 +538,24 @@ mod tests {
     }
 
     #[test]
+    fn runtime_admission_and_request_pipeline_errors_are_exported() {
+        let admission_error = RequestAdmissionError::NotServing(LifecycleState::Ready);
+        assert_eq!(
+            admission_error,
+            RequestAdmissionError::NotServing(LifecycleState::Ready)
+        );
+
+        let validation_error = PipelineConfigurationError::MandatoryMiddlewareNotConfigured;
+        assert_eq!(
+            validation_error,
+            PipelineConfigurationError::MandatoryMiddlewareNotConfigured
+        );
+
+        let _request_pipeline_error: Option<RequestPipelineError<&'static str>> = None;
+        assert!(matches!(PipelineError::Cancelled, PipelineError::Cancelled));
+    }
+
+    #[test]
     fn phase12_runtime_exports_are_available() {
         let config = ConcurrencyConfig::new(2, 4).unwrap();
         let mut concurrency = ConcurrencyState::new();
@@ -548,7 +569,13 @@ mod tests {
         assert_eq!(task.criticality(), TaskCriticality::Required);
         assert_eq!(task.owner(), &TaskOwner::engine());
 
-        let runtime = EngineRuntime::with_concurrency(config);
+        let runtime = EngineRuntime::with_concurrency(
+            EngineId::new("test-engine").unwrap(),
+            EngineInstanceId::new("test-engine-01").unwrap(),
+            config,
+        );
+        assert_eq!(runtime.engine_id().as_str(), "test-engine");
+        assert_eq!(runtime.instance_id().as_str(), "test-engine-01");
         assert_eq!(runtime.state(), LifecycleState::Created);
 
         let _ = TaskLifecycle::new();

@@ -37,7 +37,10 @@ fn healthy_capability(id: &str) -> CapabilityHealthReport {
 }
 
 fn serving_runtime() -> EngineRuntime {
-    let runtime = EngineRuntime::new();
+    let runtime = EngineRuntime::new(
+        EngineId::new("phase11-health-engine").unwrap(),
+        nizaam_core::identity::EngineInstanceId::new("phase11-health-instance").unwrap(),
+    );
 
     for state in [
         LifecycleState::Starting,
@@ -325,7 +328,10 @@ fn health_aggregation_is_deterministic_for_identical_observations() {
 
 #[test]
 fn health_observation_does_not_start_runtime_work() {
-    let runtime = EngineRuntime::new();
+    let runtime = EngineRuntime::new(
+        EngineId::new("phase11-health-engine").unwrap(),
+        nizaam_core::identity::EngineInstanceId::new("phase11-health-instance").unwrap(),
+    );
     let before = runtime.state();
 
     let _report = report_for(

@@ -34,7 +34,7 @@ use std::sync::{
 };
 
 use crate::{
-    events::{Event, Scope},
+    events::{Event, EventName, Scope},
     identity::CapabilityId,
     operation::CancellationToken,
     security::{AuthorizationDecision, AuthorizationRequest, Authorizer, SecurityContext},
@@ -175,6 +175,7 @@ const CLOSED: u8 = 3;
 /// existing Core security abstractions; authorization execution remains
 /// provider-neutral.
 pub struct EventSubscription {
+    event_name: EventName,
     event_type: Box<str>,
     scope: Scope,
     subscriber: Arc<dyn EventSubscriber>,
@@ -189,6 +190,7 @@ impl fmt::Debug for EventSubscription {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("EventSubscription")
+            .field("event_name", &self.event_name)
             .field("event_type", &self.event_type)
             .field("scope", &self.scope)
             .field("lifecycle", &self.state())
@@ -210,6 +212,7 @@ impl EventSubscription {
     /// Cancelling the owner therefore cancels the subscription, while
     /// cancelling the subscription does not cancel the owner.
     pub fn new(
+        event_name: EventName,
         event_type: impl Into<String>,
         scope: Scope,
         subscriber: impl EventSubscriber,
@@ -222,6 +225,7 @@ impl EventSubscription {
         }
 
         Ok(Self {
+            event_name,
             event_type: event_type.into_boxed_str(),
             scope,
             subscriber: Arc::new(subscriber),
@@ -231,6 +235,11 @@ impl EventSubscription {
             authorizer: None,
             authorization_capability: None,
         })
+    }
+
+    /// Returns the event name selected by this subscription.
+    pub fn event_name(&self) -> &EventName {
+        &self.event_name
     }
 
     /// Returns the event type selected by this subscription.
@@ -393,14 +402,16 @@ impl EventSubscription {
         self.transition_to(SubscriptionLifecycleState::Closed)
     }
 
-    /// Returns whether this subscription accepts the supplied generic event
-    /// metadata.
+    /// Returns whether this subscription accepts the supplied event metadata.
     ///
-    /// Matching is intentionally restricted to event type and scope. Security
-    /// authorization, payload interpretation, and delivery admission are
-    /// handled by their respective Core subsystems.
-    pub fn matches(&self, event_type: &str, scope: &Scope) -> bool {
-        self.is_active() && self.event_type.as_ref() == event_type && &self.scope == scope
+    /// A subscription matches only when the event name, event type, and scope
+    /// all match. Security authorization, payload interpretation, and delivery
+    /// admission are handled by their respective Core subsystems.
+    pub fn matches(&self, event_name: &EventName, event_type: &str, scope: &Scope) -> bool {
+        self.is_active()
+            && self.event_name == *event_name
+            && self.event_type.as_ref() == event_type
+            && &self.scope == scope
     }
 
     fn atomic_state(&self) -> SubscriptionLifecycleState {
@@ -469,7 +480,14 @@ mod tests {
     fn subscription() -> EventSubscription {
         let owner = CancellationToken::new();
 
-        EventSubscription::new("operation.completed", scope(), |_event: &Event| {}, &owner).unwrap()
+        EventSubscription::new(
+            EventName::new("operation.completed").unwrap(),
+            "operation.completed",
+            scope(),
+            |_event: &Event| {},
+            &owner,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -477,6 +495,7 @@ mod tests {
         let subscription = subscription();
 
         assert_eq!(subscription.state(), SubscriptionLifecycleState::Created);
+        assert_eq!(subscription.event_name().as_str(), "operation.completed");
         assert_eq!(subscription.event_type(), "operation.completed");
         assert_eq!(subscription.scope().as_str(), "engine:test");
     }
@@ -486,18 +505,32 @@ mod tests {
         let owner = CancellationToken::new();
 
         assert_eq!(
-            EventSubscription::new("", scope(), |_event: &Event| {}, &owner).unwrap_err(),
+            EventSubscription::new(
+                EventName::new("operation.completed").unwrap(),
+                "",
+                scope(),
+                |_event: &Event| {},
+                &owner,
+            )
+            .unwrap_err(),
             SubscriptionCreationError::EmptyEventType
         );
 
         assert_eq!(
-            EventSubscription::new("   ", scope(), |_event: &Event| {}, &owner).unwrap_err(),
+            EventSubscription::new(
+                EventName::new("operation.completed").unwrap(),
+                "   ",
+                scope(),
+                |_event: &Event| {},
+                &owner,
+            )
+            .unwrap_err(),
             SubscriptionCreationError::EmptyEventType
         );
     }
 
     #[test]
-    fn matching_requires_event_type_and_scope() {
+    fn matching_requires_event_name_event_type_and_scope() {
         let subscription = subscription();
 
         subscription.activate().unwrap();
@@ -505,9 +538,13 @@ mod tests {
         let matching_scope = Scope::new("engine:test").unwrap();
         let different_scope = Scope::new("engine:other").unwrap();
 
-        assert!(subscription.matches("operation.completed", &matching_scope));
-        assert!(!subscription.matches("operation.failed", &matching_scope));
-        assert!(!subscription.matches("operation.completed", &different_scope));
+        let matching_name = EventName::new("operation.completed").unwrap();
+        let different_name = EventName::new("operation.failed").unwrap();
+
+        assert!(subscription.matches(&matching_name, "operation.completed", &matching_scope,));
+        assert!(!subscription.matches(&different_name, "operation.completed", &matching_scope,));
+        assert!(!subscription.matches(&matching_name, "operation.failed", &matching_scope,));
+        assert!(!subscription.matches(&matching_name, "operation.completed", &different_scope,));
     }
 
     #[test]
@@ -515,7 +552,8 @@ mod tests {
         let subscription = subscription();
         let matching_scope = Scope::new("engine:test").unwrap();
 
-        assert!(!subscription.matches("operation.completed", &matching_scope));
+        let event_name = EventName::new("operation.completed").unwrap();
+        assert!(!subscription.matches(&event_name, "operation.completed", &matching_scope));
     }
 
     #[test]
@@ -599,9 +637,14 @@ mod tests {
     fn owner_cancellation_propagates_to_subscription() {
         let owner = CancellationToken::new();
 
-        let subscription =
-            EventSubscription::new("operation.completed", scope(), |_event: &Event| {}, &owner)
-                .unwrap();
+        let subscription = EventSubscription::new(
+            EventName::new("operation.completed").unwrap(),
+            "operation.completed",
+            scope(),
+            |_event: &Event| {},
+            &owner,
+        )
+        .unwrap();
 
         subscription.activate().unwrap();
         owner.cancel();
@@ -615,9 +658,14 @@ mod tests {
     fn subscription_cancellation_does_not_cancel_owner() {
         let owner = CancellationToken::new();
 
-        let subscription =
-            EventSubscription::new("operation.completed", scope(), |_event: &Event| {}, &owner)
-                .unwrap();
+        let subscription = EventSubscription::new(
+            EventName::new("operation.completed").unwrap(),
+            "operation.completed",
+            scope(),
+            |_event: &Event| {},
+            &owner,
+        )
+        .unwrap();
 
         subscription.activate().unwrap();
         subscription.cancel().unwrap();
@@ -630,13 +678,23 @@ mod tests {
     fn sibling_subscriptions_have_independent_cancellation() {
         let owner = CancellationToken::new();
 
-        let first =
-            EventSubscription::new("operation.completed", scope(), |_event: &Event| {}, &owner)
-                .unwrap();
+        let first = EventSubscription::new(
+            EventName::new("operation.completed").unwrap(),
+            "operation.completed",
+            scope(),
+            |_event: &Event| {},
+            &owner,
+        )
+        .unwrap();
 
-        let second =
-            EventSubscription::new("operation.completed", scope(), |_event: &Event| {}, &owner)
-                .unwrap();
+        let second = EventSubscription::new(
+            EventName::new("operation.completed").unwrap(),
+            "operation.completed",
+            scope(),
+            |_event: &Event| {},
+            &owner,
+        )
+        .unwrap();
 
         first.activate().unwrap();
         second.activate().unwrap();
@@ -657,7 +715,13 @@ mod tests {
             received_clone.fetch_add(1, Ordering::SeqCst);
         };
 
-        let event = Event::new(EventId::new("event-1").unwrap(), "test.event", scope()).unwrap();
+        let event = Event::new(
+            EventId::new("event-1").unwrap(),
+            EventName::new("test.event").unwrap(),
+            "test.event",
+            scope(),
+        )
+        .unwrap();
 
         subscriber.handle(&event);
 
@@ -670,6 +734,7 @@ mod tests {
         let received_clone = Arc::clone(&received);
 
         let subscription = EventSubscription::new(
+            EventName::new("operation.completed").unwrap(),
             "operation.completed",
             scope(),
             move |_event: &Event| {
@@ -680,7 +745,13 @@ mod tests {
         .unwrap();
 
         let handler = subscription.subscriber();
-        let event = Event::new(EventId::new("event-2").unwrap(), "test.event", scope()).unwrap();
+        let event = Event::new(
+            EventId::new("event-2").unwrap(),
+            EventName::new("test.event").unwrap(),
+            "test.event",
+            scope(),
+        )
+        .unwrap();
 
         handler.handle(&event);
         handler.handle(&event);

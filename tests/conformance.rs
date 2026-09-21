@@ -12,9 +12,15 @@ use nizaam_core::contracts::{
     ContractDescriptor, ContractMetadata, EncodedPayload, Interaction, MessageEnvelope,
     Participants, PayloadDescriptor, UniversalEvent, UniversalRequest, UniversalResponse,
 };
-use nizaam_core::events::{
-    Event, EventContext, EventLifecycle, EventPublisher, EventSubscription, Scope,
+use nizaam_core::control_plane::{
+    CapabilityRequirement, ControlPlane, DestinationEligibilityInput, DestinationRequest,
+    EngineObservation, EngineRegistration, EngineRegistry, Observations, ResolutionInput,
+    ResolvedCapability, ResolvedContract, ResolvedRouting, RoutingStrategy, eligible_destinations,
 };
+use nizaam_core::events::{
+    Event, EventContext, EventLifecycle, EventName, EventPublisher, EventSubscription, Scope,
+};
+use nizaam_core::health::{HealthReport, LivenessReport, ReadinessReport};
 use nizaam_core::identity::{
     AttemptId, CapabilityId, ContractId, CorrelationId, EngineId, EventId, MessageId, NodeId,
     OperationId,
@@ -25,11 +31,13 @@ use nizaam_core::prelude::{Status, Version};
 use nizaam_core::retry::{Attempt, AttemptLifecycleState};
 use nizaam_core::runtime::pipeline::RequestPipelineError;
 use nizaam_core::runtime::{EngineContext, ExecutionPipeline};
+use nizaam_core::runtime::{EngineRuntime, LifecycleState, RequestAdmissionError};
 use nizaam_core::security::{
     AuthenticationError, AuthenticationRequest, Authenticator, AuthorizationDecision,
     AuthorizationError, AuthorizationRequest, Authorizer, CredentialExtractor, PrincipalId,
     PrincipalIdentity, PrincipalType, SecurityContext, SecurityMiddleware,
 };
+use nizaam_core::transport::{InMemoryTransport, TransportError};
 
 fn principal(principal_type: PrincipalType, id: &str) -> PrincipalIdentity {
     PrincipalIdentity::new(principal_type, PrincipalId::new(id).unwrap())
@@ -125,7 +133,7 @@ fn request(
 }
 
 fn response(request: &UniversalRequest, payload: &[u8]) -> UniversalResponse {
-    let mut envelope = request.envelope.clone();
+    let mut envelope = request.event.envelope.clone();
     envelope.metadata.descriptor.interaction = Interaction::Response;
     envelope.payload = EncodedPayload::new(
         envelope.metadata.descriptor.payload.clone(),
@@ -232,6 +240,7 @@ impl CredentialExtractor for CredentialByOperation {
     fn extract(&self, _context: &EngineContext, request: &UniversalRequest) -> Option<Vec<u8>> {
         Some(
             request
+                .event
                 .envelope
                 .operation_context
                 .operation
@@ -278,6 +287,134 @@ impl Authorizer for InspectingAuthorizer {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 15 cross-boundary helpers
+// ---------------------------------------------------------------------------
+
+const PHASE15_CAPABILITY: &str = "conformance.phase15";
+const PHASE15_CONTRACT: &str = "conformance.phase15.contract";
+
+fn phase15_resolved_contract() -> ResolvedContract {
+    ResolvedContract::new(ContractId::new(PHASE15_CONTRACT).unwrap(), "1.0.0")
+}
+
+fn phase15_resolved_capability() -> ResolvedCapability {
+    ResolvedCapability::new(CapabilityId::new(PHASE15_CAPABILITY).unwrap())
+}
+
+fn phase15_resolution(
+    operation_id: &str,
+    destination: &str,
+) -> nizaam_core::control_plane::Resolution {
+    ControlPlane::new().resolve(ResolutionInput::new(
+        OperationId::new(operation_id).unwrap(),
+        phase15_resolved_contract(),
+        phase15_resolved_capability(),
+        ResolvedRouting::new(
+            nizaam_core::identity::EngineInstanceId::new(destination).unwrap(),
+            RoutingStrategy::Deterministic,
+        ),
+    ))
+}
+
+fn phase15_attempt(operation_id: &str, attempt_id: &str, number: u32) -> Attempt {
+    Attempt::new(
+        OperationId::new(operation_id).unwrap(),
+        AttemptId::new(attempt_id).unwrap(),
+        number,
+    )
+    .unwrap()
+}
+
+fn request_with_target_instance(
+    message_id: &str,
+    capability: &str,
+    payload: &[u8],
+    operation_context: OperationContext,
+    target_instance: nizaam_core::identity::EngineInstanceId,
+) -> UniversalRequest {
+    let mut request = request_with_context(message_id, capability, payload, operation_context);
+
+    request.event.envelope.metadata.participants = request
+        .event
+        .envelope
+        .metadata
+        .participants
+        .clone()
+        .with_target_instance(target_instance);
+
+    request
+}
+
+fn phase15_registration(engine: &str, instance: &str) -> EngineRegistration {
+    let engine_id = EngineId::new(engine).unwrap();
+    let instance_id = nizaam_core::identity::EngineInstanceId::new(instance).unwrap();
+    let capability_id = CapabilityId::new(PHASE15_CAPABILITY).unwrap();
+
+    let definition = nizaam_core::capability::CapabilityDefinition::new(
+        capability_id,
+        engine_id.clone(),
+        "Phase 15 conformance capability",
+    )
+    .unwrap();
+
+    let descriptor = ContractDescriptor::new(
+        ContractId::new(PHASE15_CONTRACT).unwrap(),
+        CapabilityId::new(PHASE15_CAPABILITY).unwrap(),
+        Version::new(1, 0, 0),
+        Interaction::Request,
+        PayloadDescriptor::new("application/octet-stream", Version::new(1, 0, 0)).unwrap(),
+    );
+
+    EngineRegistration::new(engine_id, instance_id)
+        .with_capability(definition)
+        .unwrap()
+        .with_contract(descriptor)
+        .with_runtime_metadata(
+            nizaam_core::control_plane::RuntimeRegistrationMetadata::new()
+                .with_lifecycle(LifecycleState::Serving)
+                .with_readiness(ReadinessReport::from_lifecycle(LifecycleState::Serving)),
+        )
+}
+
+fn phase15_healthy_observation(engine: &str, instance: &str) -> EngineObservation {
+    let engine_id = EngineId::new(engine).unwrap();
+    let instance_id = nizaam_core::identity::EngineInstanceId::new(instance).unwrap();
+
+    let health = HealthReport::new(
+        engine_id.clone(),
+        LifecycleState::Serving,
+        LivenessReport::healthy(),
+        ReadinessReport::from_lifecycle(LifecycleState::Serving),
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+
+    EngineObservation::new(engine_id, instance_id, health).unwrap()
+}
+
+fn serving_runtime(engine: &str, instance: &str) -> EngineRuntime {
+    let runtime = EngineRuntime::new(
+        EngineId::new(engine).unwrap(),
+        nizaam_core::identity::EngineInstanceId::new(instance).unwrap(),
+    );
+
+    for state in [
+        LifecycleState::Starting,
+        LifecycleState::Configuring,
+        LifecycleState::Dependencies,
+        LifecycleState::Capabilities,
+        LifecycleState::Registering,
+        LifecycleState::Ready,
+        LifecycleState::Serving,
+    ] {
+        runtime.transition(state).unwrap();
+    }
+
+    runtime
+}
+
+// ---------------------------------------------------------------------------
 // Phase 14 Event architectural conformance
 // ---------------------------------------------------------------------------
 
@@ -291,6 +428,7 @@ fn event_envelope_with_context(
         b"opaque event payload",
         operation_context,
     )
+    .event
     .envelope;
 
     envelope.metadata.descriptor.interaction = Interaction::Event;
@@ -299,7 +437,6 @@ fn event_envelope_with_context(
 
 #[test]
 fn event_and_message_identity_must_remain_distinct_at_the_contract_boundary() {
-    let event_id = EventId::new("conformance-event-1").unwrap();
     let envelope = event_envelope_with_context(
         "conformance-event-message-1",
         operation_context("conformance-event-operation"),
@@ -307,14 +444,14 @@ fn event_and_message_identity_must_remain_distinct_at_the_contract_boundary() {
 
     let event = UniversalEvent::new(
         envelope,
-        event_id.clone(),
+        "operation.completed",
         "operation.completed",
         "engine:test",
     )
     .unwrap();
 
     assert!(event.has_event_interaction());
-    assert_eq!(event.event_id(), &event_id);
+    assert!(!event.event_id().as_str().is_empty());
     assert_eq!(event.message_id().as_str(), "conformance-event-message-1");
     assert_ne!(event.event_id().as_str(), event.message_id().as_str());
 }
@@ -328,7 +465,7 @@ fn event_semantic_metadata_must_remain_distinct_from_request_capability_metadata
 
     let event = UniversalEvent::new(
         envelope,
-        EventId::new("conformance-event-2").unwrap(),
+        "operation.completed",
         "operation.completed",
         "engine:test",
     )
@@ -363,6 +500,7 @@ fn event_context_must_reuse_core_operation_and_security_context() {
 
     let event = Event::new_with_context(
         EventId::new("conformance-event-context-1").unwrap(),
+        EventName::new("operation.completed").unwrap(),
         "operation.completed",
         Scope::new("engine:test").unwrap(),
         event_context,
@@ -420,6 +558,7 @@ fn event_subscription_authorization_must_use_existing_core_security_context_and_
     let observed_calls = Arc::new(Mutex::new(0usize));
 
     let subscription = EventSubscription::new(
+        EventName::new("operation.completed").unwrap(),
         "operation.completed",
         Scope::new("engine:test").unwrap(),
         |_event: &Event| {},
@@ -456,6 +595,7 @@ fn event_publication_and_request_pipeline_must_remain_independent() {
 
     let event_calls_for_handler = Arc::clone(&event_calls);
     let subscription = EventSubscription::new(
+        EventName::new("operation.completed").unwrap(),
         "operation.completed",
         Scope::new("engine:test").unwrap(),
         move |_event: &Event| {
@@ -471,6 +611,7 @@ fn event_publication_and_request_pipeline_must_remain_independent() {
         .publish(
             Event::new(
                 EventId::new("conformance-independent-event").unwrap(),
+                EventName::new("operation.completed").unwrap(),
                 "operation.completed",
                 Scope::new("engine:test").unwrap(),
             )
@@ -662,7 +803,7 @@ fn core_authorization_must_not_require_domain_payload_interpretation() {
     let result: Result<UniversalResponse, RequestPipelineError<()>> =
         pipeline.run_request(&mut context, &mut request, |_context, request| {
             assert_eq!(
-                request.envelope.payload.bytes(),
+                request.event.envelope.payload.bytes(),
                 original_payload.as_slice()
             );
             Ok(response(request, b"response"))
@@ -674,7 +815,7 @@ fn core_authorization_must_not_require_domain_payload_interpretation() {
         vec![expected_capability],
     );
     assert_eq!(
-        request.envelope.payload.bytes(),
+        request.event.envelope.payload.bytes(),
         original_payload.as_slice(),
     );
 }
@@ -787,11 +928,17 @@ fn concurrent_requests_must_isolate_security_context() {
                     assert_eq!(security.principal(), &expected_principal);
                     assert_eq!(
                         context.operation().operation.id.as_str(),
-                        request.envelope.operation_context.operation.id.as_str(),
+                        request
+                            .event
+                            .envelope
+                            .operation_context
+                            .operation
+                            .id
+                            .as_str(),
                     );
                     assert_eq!(
                         context.operation().attempt_id,
-                        request.envelope.operation_context.attempt_id,
+                        request.event.envelope.operation_context.attempt_id,
                     );
                     observed.lock().unwrap().push(expected_principal.clone());
 
@@ -866,11 +1013,11 @@ fn retry_attempt_identity_survives_the_security_pipeline() {
                 assert_eq!(security.calling_service(), Some(&calling_service_expected),);
                 assert_eq!(
                     context.operation().operation.id,
-                    request.envelope.operation_context.operation.id,
+                    request.event.envelope.operation_context.operation.id,
                 );
                 assert_eq!(
                     context.operation().attempt_id,
-                    request.envelope.operation_context.attempt_id,
+                    request.event.envelope.operation_context.attempt_id,
                 );
 
                 observed_downstream
@@ -1122,5 +1269,397 @@ fn authorization_keeps_capability_identity_stable_across_attempts() {
     assert_eq!(
         *observed_capabilities.lock().unwrap(),
         vec![expected_capability.clone(), expected_capability],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 15 Control Plane architectural conformance
+// ---------------------------------------------------------------------------
+
+#[test]
+fn control_plane_resolution_and_routing_must_not_execute_capability() {
+    let calls = Arc::new(Mutex::new(0usize));
+    let calls_for_handler = Arc::clone(&calls);
+
+    let transport = InMemoryTransport::new();
+    let instance = nizaam_core::identity::EngineInstanceId::new("phase15-instance-01").unwrap();
+
+    transport.register(
+        EngineId::new("phase15-engine").unwrap(),
+        instance.clone(),
+        move |_request| {
+            *calls_for_handler.lock().unwrap() += 1;
+            panic!("routing must not execute the capability or invoke transport");
+        },
+    );
+
+    let operation_id = "phase15-no-execution-operation";
+    let attempt = phase15_attempt(operation_id, "phase15-no-execution-attempt", 1);
+    let resolution = phase15_resolution(operation_id, instance.as_str());
+
+    let decision = ControlPlane::new()
+        .route_resolved(&resolution, &attempt)
+        .unwrap();
+
+    assert_eq!(decision.destination(), &instance);
+    assert_eq!(decision.operation_id().as_str(), operation_id);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        0,
+        "Control Plane routing must stop at the routing-decision boundary",
+    );
+
+    drop(transport);
+}
+
+#[test]
+fn routing_to_communication_must_preserve_concrete_instance_identity() {
+    let first_calls = Arc::new(Mutex::new(0usize));
+    let second_calls = Arc::new(Mutex::new(0usize));
+
+    let first_calls_for_handler = Arc::clone(&first_calls);
+    let second_calls_for_handler = Arc::clone(&second_calls);
+
+    let transport = InMemoryTransport::new();
+    let engine = EngineId::new("phase15-engine").unwrap();
+    let first = nizaam_core::identity::EngineInstanceId::new("phase15-instance-01").unwrap();
+    let second = nizaam_core::identity::EngineInstanceId::new("phase15-instance-02").unwrap();
+
+    transport.register(engine.clone(), first.clone(), move |request| {
+        *first_calls_for_handler.lock().unwrap() += 1;
+        response(&request, b"first")
+    });
+    transport.register(engine.clone(), second.clone(), move |request| {
+        *second_calls_for_handler.lock().unwrap() += 1;
+        response(&request, b"second")
+    });
+
+    let communication = nizaam_core::control_plane::ControlPlaneCommunication::new(transport);
+
+    let operation = OperationId::new("phase15-concrete-target-operation").unwrap();
+    let attempt = phase15_attempt(operation.as_str(), "phase15-concrete-target-attempt", 1);
+    let resolution = phase15_resolution(operation.as_str(), second.as_str());
+    let decision = ControlPlane::new()
+        .route_resolved(&resolution, &attempt)
+        .unwrap();
+
+    let request = request_with_target_instance(
+        "phase15-concrete-target-message",
+        PHASE15_CAPABILITY,
+        b"payload",
+        operation_context_for_attempt(
+            operation.as_str(),
+            "phase15-concrete-target-node",
+            "phase15-concrete-target-attempt",
+        ),
+        second.clone(),
+    );
+
+    let result =
+        futures::executor::block_on(communication.send_to_engine(decision.destination(), request))
+            .unwrap();
+
+    assert_eq!(decision.destination(), &second);
+    assert_eq!(result.event.envelope.payload.bytes(), b"second");
+    assert_eq!(*first_calls.lock().unwrap(), 0);
+    assert_eq!(*second_calls.lock().unwrap(), 1);
+}
+
+#[test]
+fn communication_must_reject_mismatched_request_target() {
+    let transport = InMemoryTransport::new();
+    let engine = EngineId::new("phase15-engine").unwrap();
+    let transport_target =
+        nizaam_core::identity::EngineInstanceId::new("phase15-instance-02").unwrap();
+    let request_target =
+        nizaam_core::identity::EngineInstanceId::new("phase15-instance-01").unwrap();
+
+    transport.register(engine, transport_target.clone(), |_request| {
+        panic!("mismatched request target must not reach transport")
+    });
+
+    let communication = nizaam_core::control_plane::ControlPlaneCommunication::new(transport);
+
+    let request = request_with_target_instance(
+        "phase15-mismatched-target-message",
+        PHASE15_CAPABILITY,
+        b"payload",
+        operation_context("phase15-mismatched-target-operation"),
+        request_target,
+    );
+
+    let result =
+        futures::executor::block_on(communication.send_to_engine(&transport_target, request));
+
+    assert_eq!(
+        result,
+        Err(TransportError::Peer(
+            "request target instance does not match the client target".into(),
+        )),
+    );
+}
+
+#[test]
+fn stale_control_plane_decision_must_not_override_runtime_admission() {
+    let runtime = serving_runtime("phase15-runtime-engine", "phase15-runtime-instance");
+    let operation = "phase15-stale-decision-operation";
+
+    let resolution = phase15_resolution(operation, runtime.instance_id().as_str());
+    let attempt = phase15_attempt(operation, "phase15-stale-decision-attempt", 1);
+    let decision = ControlPlane::new()
+        .route_resolved(&resolution, &attempt)
+        .unwrap();
+
+    assert_eq!(runtime.admit_request(), Ok(()));
+
+    runtime.transition(LifecycleState::Draining).unwrap();
+
+    assert_eq!(
+        runtime.admit_request(),
+        Err(RequestAdmissionError::NotServing(LifecycleState::Draining)),
+    );
+
+    // The already-issued routing decision remains immutable. It does not
+    // mutate runtime lifecycle state and cannot turn a draining runtime back
+    // into a serving runtime.
+    assert_eq!(decision.destination(), runtime.instance_id());
+    assert_eq!(runtime.state(), LifecycleState::Draining);
+}
+
+#[test]
+fn security_success_must_be_required_before_routed_execution() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let authenticated_principal = user_principal("phase15-security-user");
+
+    let pipeline = ExecutionPipeline::new().with_middleware(SecurityMiddleware::new(
+        RecordingAuthenticator {
+            events: Arc::clone(&events),
+            principal: authenticated_principal,
+        },
+        RecordingAuthorizer {
+            events: Arc::clone(&events),
+        },
+        StaticCredentialExtractor {
+            credentials: Some(b"phase15-security-credentials".to_vec()),
+        },
+    ));
+
+    let transport = InMemoryTransport::new();
+    let engine = EngineId::new("phase15-security-engine").unwrap();
+    let instance =
+        nizaam_core::identity::EngineInstanceId::new("phase15-security-instance").unwrap();
+
+    let events_for_transport = Arc::clone(&events);
+    transport.register(engine, instance.clone(), move |request| {
+        events_for_transport.lock().unwrap().push("communicate");
+        response(&request, b"executed")
+    });
+
+    let communication = nizaam_core::control_plane::ControlPlaneCommunication::new(transport);
+
+    let operation = "phase15-security-routing-operation";
+    let attempt_id = "phase15-security-routing-attempt";
+    let (mut context, operation_context) =
+        context_for_attempt(operation, "phase15-security-node", attempt_id);
+    let mut request = request_with_target_instance(
+        "phase15-security-routing-message",
+        PHASE15_CAPABILITY,
+        b"payload",
+        operation_context,
+        instance.clone(),
+    );
+
+    let communication_ref = &communication;
+    let events_for_pipeline = Arc::clone(&events);
+
+    let result: Result<UniversalResponse, RequestPipelineError<()>> =
+        pipeline.run_request(&mut context, &mut request, move |_context, request| {
+            events_for_pipeline.lock().unwrap().push("route");
+
+            let resolution = phase15_resolution(operation, instance.as_str());
+            let attempt = phase15_attempt(operation, attempt_id, 1);
+            let decision = ControlPlane::new()
+                .route_resolved(&resolution, &attempt)
+                .expect("security-approved request must have a valid routing decision");
+
+            Ok(futures::executor::block_on(
+                communication_ref.send_to_engine(decision.destination(), request.clone()),
+            )
+            .expect("security-approved routed request must reach the test transport"))
+        });
+
+    assert!(result.is_ok());
+    assert_eq!(
+        events.lock().unwrap().as_slice(),
+        ["authenticate", "authorize", "route", "communicate"],
+    );
+}
+
+#[test]
+fn security_rejection_must_not_reach_routing_or_communication() {
+    let pipeline = ExecutionPipeline::new().with_middleware(SecurityMiddleware::new(
+        RejectingAuthenticator,
+        AllowingAuthorizer,
+        StaticCredentialExtractor {
+            credentials: Some(b"phase15-rejected-credentials".to_vec()),
+        },
+    ));
+
+    let route_calls = Arc::new(Mutex::new(0usize));
+    let route_calls_for_downstream = Arc::clone(&route_calls);
+
+    let (mut context, operation_context) = context_for_attempt(
+        "phase15-security-rejection-operation",
+        "phase15-security-rejection-node",
+        "phase15-security-rejection-attempt",
+    );
+    let mut request = request_with_target_instance(
+        "phase15-security-rejection-message",
+        PHASE15_CAPABILITY,
+        b"payload",
+        operation_context,
+        nizaam_core::identity::EngineInstanceId::new("phase15-security-rejection-instance")
+            .unwrap(),
+    );
+
+    let result: Result<UniversalResponse, RequestPipelineError<()>> =
+        pipeline.run_request(&mut context, &mut request, move |_context, _request| {
+            *route_calls_for_downstream.lock().unwrap() += 1;
+            Ok(response(_request, b"must-not-run"))
+        });
+
+    assert!(matches!(
+        result,
+        Err(RequestPipelineError::Middleware(
+            nizaam_core::middleware::chain::MiddlewareChainError::Rejected(_)
+        ))
+    ));
+    assert_eq!(*route_calls.lock().unwrap(), 0);
+    assert!(context.security().is_none());
+}
+
+#[test]
+fn retry_attempt_must_trigger_an_independent_routing_decision() {
+    let operation = "phase15-retry-routing-operation";
+
+    let first_attempt = phase15_attempt(operation, "phase15-retry-routing-attempt-1", 1);
+    let second_attempt = phase15_attempt(operation, "phase15-retry-routing-attempt-2", 2);
+
+    let first_resolution = phase15_resolution(operation, "phase15-retry-routing-instance-01");
+    let second_resolution = phase15_resolution(operation, "phase15-retry-routing-instance-02");
+
+    let first_decision = ControlPlane::new()
+        .route_resolved(&first_resolution, &first_attempt)
+        .unwrap();
+    let second_decision = ControlPlane::new()
+        .route_resolved(&second_resolution, &second_attempt)
+        .unwrap();
+
+    assert_eq!(
+        first_decision.operation_id(),
+        second_decision.operation_id()
+    );
+    assert_ne!(first_decision.attempt_id(), second_decision.attempt_id());
+    assert_ne!(first_decision.destination(), second_decision.destination());
+    assert_eq!(
+        first_decision.destination().as_str(),
+        "phase15-retry-routing-instance-01",
+    );
+    assert_eq!(
+        second_decision.destination().as_str(),
+        "phase15-retry-routing-instance-02",
+    );
+}
+
+#[test]
+fn routing_failure_must_not_create_an_automatic_retry_attempt() {
+    let membership = nizaam_core::control_plane::Membership::new();
+    let observations = Observations::new();
+
+    let destination = DestinationRequest::hard_logical(CapabilityRequirement::new(
+        CapabilityId::new(PHASE15_CAPABILITY).unwrap(),
+    ));
+
+    let membership_snapshot = membership.snapshot();
+    let observation_snapshot = observations.snapshot();
+
+    let routing_result = eligible_destinations(DestinationEligibilityInput::new(
+        &destination,
+        &membership_snapshot,
+        &observation_snapshot,
+        &CapabilityId::new(PHASE15_CAPABILITY).unwrap(),
+        &ContractDescriptor::new(
+            ContractId::new(PHASE15_CONTRACT).unwrap(),
+            CapabilityId::new(PHASE15_CAPABILITY).unwrap(),
+            Version::new(1, 0, 0),
+            Interaction::Request,
+            PayloadDescriptor::new("application/octet-stream", Version::new(1, 0, 0)).unwrap(),
+        ),
+    ));
+
+    assert_eq!(
+        routing_result,
+        Err(nizaam_core::control_plane::DestinationEligibilityError::NoEligibleDestination)
+    );
+
+    let attempt = phase15_attempt(
+        "phase15-routing-failure-operation",
+        "phase15-routing-failure-attempt-1",
+        1,
+    );
+
+    assert_eq!(attempt.state(), AttemptLifecycleState::Created);
+    assert_eq!(
+        attempt.operation_id().as_str(),
+        "phase15-routing-failure-operation"
+    );
+    assert_eq!(
+        attempt.attempt_id().as_str(),
+        "phase15-routing-failure-attempt-1"
+    );
+
+    membership
+        .register(phase15_registration(
+            "phase15-routing-failure-engine",
+            "phase15-routing-failure-instance",
+        ))
+        .unwrap();
+
+    observations
+        .update(phase15_healthy_observation(
+            "phase15-routing-failure-engine",
+            "phase15-routing-failure-instance",
+        ))
+        .unwrap();
+
+    assert!(membership.contains(
+        &nizaam_core::identity::EngineInstanceId::new("phase15-routing-failure-instance").unwrap()
+    ));
+
+    assert_eq!(attempt.state(), AttemptLifecycleState::Created);
+}
+
+#[test]
+fn control_plane_registry_and_runtime_state_must_remain_separate() {
+    let registry = EngineRegistry::new();
+    let registration =
+        phase15_registration("phase15-separation-engine", "phase15-separation-instance");
+
+    registry.register(registration).unwrap();
+
+    let runtime = serving_runtime("phase15-separation-engine", "phase15-separation-instance");
+
+    assert!(registry.contains(runtime.instance_id()));
+    assert_eq!(runtime.state(), LifecycleState::Serving);
+
+    runtime.transition(LifecycleState::Draining).unwrap();
+
+    // Registry metadata remains present; runtime lifecycle state changes
+    // independently and must be consulted by the runtime admission boundary.
+    assert!(registry.contains(runtime.instance_id()));
+    assert_eq!(runtime.state(), LifecycleState::Draining);
+    assert_eq!(
+        runtime.admit_request(),
+        Err(RequestAdmissionError::NotServing(LifecycleState::Draining)),
     );
 }

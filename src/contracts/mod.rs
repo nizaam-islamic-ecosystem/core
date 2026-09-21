@@ -24,7 +24,7 @@ mod tests {
     use super::*;
 
     use crate::identity::{
-        CapabilityId, ContractId, CorrelationId, EngineId, EventId, MessageId, OperationId,
+        CapabilityId, ContractId, CorrelationId, EngineId, MessageId, OperationId,
     };
     use crate::operation::{Operation, OperationContext};
 
@@ -63,7 +63,7 @@ mod tests {
     fn make_event() -> UniversalEvent {
         UniversalEvent::new(
             make_envelope(Interaction::Event),
-            EventId::new("event-1").unwrap(),
+            "operation.completed",
             "operation.completed",
             "engine:test",
         )
@@ -74,17 +74,21 @@ mod tests {
     fn contracts_root_reexports_the_complete_universal_message_surface() {
         let _: Version = Version::new(1, 0, 0);
         let _: Interaction = Interaction::Request;
+
         let _: PayloadDescriptor =
             PayloadDescriptor::new("application/octet-stream", Version::new(1, 0, 0)).unwrap();
 
         let event = make_event();
+
         let request = UniversalRequest::new(make_envelope(Interaction::Request));
+
         let response = UniversalResponse::new(
             make_envelope(Interaction::Response),
             crate::status::Status::Success,
         );
 
         assert!(event.has_event_interaction());
+        assert_eq!(event.event_name().as_str(), "operation.completed");
         assert!(request.has_request_interaction());
         assert!(response.has_response_interaction());
     }
@@ -92,128 +96,110 @@ mod tests {
     #[test]
     fn request_response_and_event_remain_distinct_interactions() {
         let request = UniversalRequest::new(make_envelope(Interaction::Request));
+
         let response = UniversalResponse::new(
             make_envelope(Interaction::Response),
             crate::status::Status::Success,
         );
+
         let event = make_event();
 
         assert!(request.has_request_interaction());
-        assert!(
-            !request
-                .envelope
-                .metadata
-                .descriptor
-                .interaction
-                .eq(&Interaction::Response)
+        assert_ne!(
+            request.event.envelope.metadata.descriptor.interaction,
+            Interaction::Response
         );
-        assert!(
-            !request
-                .envelope
-                .metadata
-                .descriptor
-                .interaction
-                .eq(&Interaction::Event)
+        assert_ne!(
+            request.event.envelope.metadata.descriptor.interaction,
+            Interaction::Event
         );
 
         assert!(response.has_response_interaction());
-        assert!(
-            !response
-                .envelope
-                .metadata
-                .descriptor
-                .interaction
-                .eq(&Interaction::Request)
+        assert_ne!(
+            response.event.envelope.metadata.descriptor.interaction,
+            Interaction::Request
         );
-        assert!(
-            !response
-                .envelope
-                .metadata
-                .descriptor
-                .interaction
-                .eq(&Interaction::Event)
+        assert_ne!(
+            response.event.envelope.metadata.descriptor.interaction,
+            Interaction::Event
         );
 
         assert!(event.has_event_interaction());
-        assert!(
-            !event
-                .envelope
-                .metadata
-                .descriptor
-                .interaction
-                .eq(&Interaction::Request)
+        assert_ne!(
+            event.envelope.metadata.descriptor.interaction,
+            Interaction::Request
         );
-        assert!(
-            !event
-                .envelope
-                .metadata
-                .descriptor
-                .interaction
-                .eq(&Interaction::Response)
+        assert_ne!(
+            event.envelope.metadata.descriptor.interaction,
+            Interaction::Response
         );
     }
 
     #[test]
-    fn universal_event_composes_with_message_envelope_and_preserves_context_and_payload() {
+    fn request_response_and_event_have_automatic_event_identity() {
+        let request = UniversalRequest::new(make_envelope(Interaction::Request));
+
+        let response = UniversalResponse::new(
+            make_envelope(Interaction::Response),
+            crate::status::Status::Success,
+        );
+
         let event = make_event();
 
-        assert_eq!(event.event_id().as_str(), "event-1");
-        assert_eq!(event.message_id().as_str(), "message-1");
-        assert_eq!(
-            event.envelope.operation_context.operation.id.as_str(),
-            "operation-1"
-        );
-        assert_eq!(
-            event
-                .envelope
-                .operation_context
-                .operation
-                .correlation_id
-                .as_str(),
-            "correlation-1"
-        );
-        assert_eq!(event.envelope.payload.bytes(), b"test payload");
-        assert_eq!(event.event_type(), "operation.completed");
-        assert_eq!(event.scope(), "engine:test");
+        assert!(!request.event_id().as_str().is_empty());
+        assert!(!response.event_id().as_str().is_empty());
+        assert!(!event.event_id().as_str().is_empty());
+
+        assert_ne!(request.event_id(), response.event_id());
+        assert_ne!(request.event_id(), event.event_id());
+        assert_ne!(response.event_id(), event.event_id());
     }
 
     #[test]
-    fn event_and_message_identity_remain_distinct_at_the_contract_boundary() {
+    fn event_and_message_identity_remain_distinct() {
+        let request = UniversalRequest::new(make_envelope(Interaction::Request));
+
+        assert_ne!(request.event_id().as_str(), request.message_id().as_str());
+
+        let response = UniversalResponse::new(
+            make_envelope(Interaction::Response),
+            crate::status::Status::Success,
+        );
+
+        assert_ne!(response.event_id().as_str(), response.message_id().as_str());
+
         let event = make_event();
 
-        let event_id = event.event_id();
-        let message_id = event.message_id();
-
-        assert_eq!(event_id.as_str(), "event-1");
-        assert_eq!(message_id.as_str(), "message-1");
-        assert_ne!(event_id.as_str(), message_id.as_str());
-
-        let _: &EventId = event_id;
-        let _: &MessageId = message_id;
+        assert_ne!(event.event_id().as_str(), event.message_id().as_str());
     }
 
     #[test]
-    fn universal_event_rejects_request_and_response_envelopes() {
-        let event_id = EventId::new("event-1").unwrap();
+    fn universal_event_preserves_request_and_response_envelopes() {
+        let request = UniversalEvent::new(
+            make_envelope(Interaction::Request),
+            "universal.request",
+            "request",
+            "global",
+        )
+        .unwrap();
 
+        let response = UniversalEvent::new(
+            make_envelope(Interaction::Response),
+            "universal.response",
+            "response",
+            "global",
+        )
+        .unwrap();
+
+        assert!(!request.has_event_interaction());
+        assert!(!response.has_event_interaction());
         assert_eq!(
-            UniversalEvent::new(
-                make_envelope(Interaction::Request),
-                event_id.clone(),
-                "operation.completed",
-                "engine:test",
-            ),
-            Err(UniversalEventError::WrongInteraction(Interaction::Request))
+            request.envelope.metadata.descriptor.interaction,
+            Interaction::Request
         );
-
         assert_eq!(
-            UniversalEvent::new(
-                make_envelope(Interaction::Response),
-                event_id,
-                "operation.completed",
-                "engine:test",
-            ),
-            Err(UniversalEventError::WrongInteraction(Interaction::Response))
+            response.envelope.metadata.descriptor.interaction,
+            Interaction::Response
         );
     }
 
@@ -225,11 +211,24 @@ mod tests {
     }
 
     #[test]
+    fn universal_event_rejects_empty_event_name() {
+        assert_eq!(
+            UniversalEvent::new(
+                make_envelope(Interaction::Event),
+                "   ",
+                "operation.completed",
+                "engine:test",
+            ),
+            Err(UniversalEventError::EmptyEventName)
+        );
+    }
+
+    #[test]
     fn universal_event_requires_event_specific_metadata() {
         assert_eq!(
             UniversalEvent::new(
                 make_envelope(Interaction::Event),
-                EventId::new("event-1").unwrap(),
+                "operation.completed",
                 "   ",
                 "engine:test",
             ),
@@ -239,7 +238,7 @@ mod tests {
         assert_eq!(
             UniversalEvent::new(
                 make_envelope(Interaction::Event),
-                EventId::new("event-2").unwrap(),
+                "operation.completed",
                 "operation.completed",
                 " ",
             ),
@@ -256,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_keeps_event_interaction_in_the_contract_comparison() {
+    fn compatibility_keeps_event_interaction_in_contract_comparison() {
         let event_descriptor = make_envelope(Interaction::Event)
             .metadata
             .descriptor
@@ -274,25 +273,28 @@ mod tests {
     }
 
     #[test]
-    fn module_paths_and_root_reexports_compose_without_duplicate_contract_surfaces() {
+    fn module_paths_and_root_reexports_compose_without_duplicate_surfaces() {
         let root_event = make_event();
 
         let module_event = event::UniversalEvent::new(
             make_envelope(Interaction::Event),
-            EventId::new("event-2").unwrap(),
+            "operation.failed",
             "operation.failed",
             "engine:other",
         )
         .unwrap();
 
-        assert_eq!(root_event.event_id().as_str(), "event-1");
-        assert_eq!(module_event.event_id().as_str(), "event-2");
+        assert!(!root_event.event_id().as_str().is_empty());
+        assert!(!module_event.event_id().as_str().is_empty());
+        assert_ne!(root_event.event_id(), module_event.event_id());
 
         let _: descriptor::Interaction = Interaction::Event;
         let _: envelope::MessageEnvelope = root_event.envelope.clone();
         let _: metadata::ContractMetadata = root_event.envelope.metadata.clone();
+
         let _: request::UniversalRequest =
             UniversalRequest::new(make_envelope(Interaction::Request));
+
         let _: response::UniversalResponse = UniversalResponse::new(
             make_envelope(Interaction::Response),
             crate::status::Status::Success,

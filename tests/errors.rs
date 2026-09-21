@@ -49,7 +49,7 @@ fn a_consumer_registers_and_reports_a_contextual_error() {
         )
         .unwrap();
 
-    assert_eq!(event.reference.as_str(), "CORE.CONTRACT.001");
+    assert_eq!(event.reference().as_str(), "CORE.CONTRACT.001");
     assert_eq!(
         event.error.context.operation.operation.id.as_str(),
         "operation-3"

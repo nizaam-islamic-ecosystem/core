@@ -31,11 +31,10 @@ Implementation began with an existing Cargo library skeleton at the repository r
 | 12 | Streaming, Concurrency, Background Tasks     | 12    | verified    |
 | 13 | Retry and Idempotency                        | 13    | verified    |
 | 14 | Internal Events                              | 14    | verified    |
-| 15 | Control Plane                                | 15    | in progress |
-| 16 | Engine SDK                                   | 16    | not started |
-| 17 | Testing and Conformance hardening            | 17    | not started |
+| 15 | Control Plane                                | 15    | verified    |
+| 16 | Testing and Conformance hardening            | 16    | in progress |
 
-Testing is continuous. Phase 17 is the final integration and conformance hardening phase, not the first point at which tests are written.
+Testing is continuous. Phase 16 is the final integration and conformance hardening phase, not the first point at which tests are written.
 
 ## Project Structure
 
@@ -11688,446 +11687,605 @@ mechanism rather than a general-purpose messaging platform.
 
 ### Goal
 
-Provide the shared Core control-plane mechanisms responsible for system-level
-admission, contract and capability identification, destination eligibility,
-routing, engine registration, context propagation, and routing failure
-reporting.
+Implement the Nizaam Core Control Plane as the Nizaam-wide communication and coordination boundary for inter-engine operations.
 
-The Control Plane determines **WHERE** an operation attempt should be
-delivered.
+The Control Plane is responsible for secure, standardized, contract-aware, observable and lifecycle-aware communication between engines, together with the engine-agnostic coordination needed to resolve capability requirements and establish inter-engine interactions.
 
-The Engine Runtime remains responsible for determining whether the selected
-engine can accept and execute that request.
-
-Capabilities remain responsible for defining and executing domain-specific
-behavior.
+The Control Plane may maintain a shallow, versioned global coordination plan describing capability-level and engine-level relationships. It does not contain engine-internal workflow steps, domain algorithms, semantic reasoning, domain governance, or engine-local execution logic.
 
 The fundamental authority model is:
 
 ```text
-Caller / Planner
-→ WHAT logical operation/capability is needed
+Caller / Engine Local Planner
+→ WHAT capability/interaction is needed
 
 Control Plane
-→ WHERE the attempt should go
+→ WHY/HOW the interaction is resolved at the ecosystem boundary
+→ WHICH capability/provider satisfies the requirement
+→ WHICH destination/instance should receive an attempt
+→ WHICH common context/contract/security rules apply
 
-Transport
-→ HOW the message moves
+Transport / Communication
+→ HOW bytes/messages move
 
 Engine Runtime
-→ CAN this destination accept it?
-  + HOW it executes locally
+→ CAN the selected destination accept the request?
+→ HOW the engine executes its own local work
 
-Capability
+Capability / Engine
 → WHAT the operation actually does
-````
 
-The Control Plane MUST NOT become a planner, workflow engine, reasoning
-engine, inference engine, or domain execution system.
+Governing Engine, where applicable
+→ WHETHER the resulting candidate/output is acceptable under its domain authority
+```
+
+The Control Plane MUST remain domain-neutral.
 
 ---
 
-### Planned implementation
+### Final Architectural Position
 
-Add the shared Control Plane mechanisms for:
-
-```text
-system-level admission
-request validation
-contract identification
-contract compatibility / resolution
-capability identification
-engine registration
-engine-instance membership
-destination eligibility
-routing-policy evaluation
-destination selection
-context propagation
-routing decision tracking
-routing lifecycle integration
-routing failure reporting
-runtime integration
-```
-
-The Control Plane builds on existing Core systems including:
+The final architecture combines the two planning levels established in the implementation discussions:
 
 ```text
-contracts
-capabilities
-identity
-security
-runtime lifecycle
-transport
-operations/context
-health
-observability
-streaming
-retry/idempotency
-artifacts
-provenance
+                NIZAAM OPERATION
+                       │
+                       ▼
+                CONTROL PLANE
+                       │
+          global, engine-agnostic
+             coordination state
+                       │
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+       Engine A     Engine B     Engine C
+          │
+          ▼
+    ENGINE-LOCAL PLAN
+          │
+          ▼
+    ENGINE-LOCAL WORKFLOW
+          │
+          ▼
+    ENGINE-LOCAL EXECUTION
 ```
 
-It MUST NOT replace or duplicate those systems.
+The global plan is intentionally shallow.
+
+It may contain:
+
+```text
+capability requirements
+capability relationships
+engine/provider bindings
+contract compatibility
+communication relationships
+blocking/non-blocking dependency relationships
+context requirements
+routing/destination decisions
+plan version information
+coordination state
+```
+
+It MUST NOT contain:
+
+```text
+domain workflow steps
+engine-internal task ordering
+database implementation details
+model/inference steps
+domain algorithms
+domain reasoning
+local worker scheduling
+local provider/backend implementation details
+domain result interpretation
+```
+
+The distinction is:
+
+```text
+Global Plan
+→ capability/engine coordination
+
+Local Plan
+→ actual engine work
+```
 
 ---
 
 ### Control Plane Authority
 
-The Control Plane is responsible for deciding whether a logical communication
-request can enter its routing path and where an allowed attempt should be
-delivered.
+The Control Plane is authoritative for ecosystem-level communication and coordination.
 
-The Control Plane may determine:
+It may determine:
 
 ```text
-admission
+system-level admission
+request validation
+contract identification
 contract compatibility
-capability identity
+capability identification
+capability resolution
+provider resolution
+engine registration
+engine-instance membership
 destination eligibility
-routing
-forwarding
+routing policy
+destination selection
+global coordination-plan state
+context propagation
+communication lifecycle
+request routing
+response routing
+communication failure reporting
 ```
 
-The Control Plane does NOT determine:
+It does NOT determine:
 
 ```text
 domain meaning
+domain workflow
+domain dependency semantics
 capability implementation
-multi-step workflow
-reasoning strategy
+domain reasoning
 model inference
 business logic
-execution semantics
+engine methodology
+engine-local execution
+domain result correctness
+domain governance
 ```
 
-The Control Plane ends its responsibility when a valid concrete destination
-has been selected and the request has been handed to the communication
-mechanism.
+The Control Plane MUST NOT become:
 
-It must not remain responsible for execution progress, stream results,
-handler behavior, artifact generation, or workflow completion.
+```text
+workflow engine
+domain planner
+domain reasoning engine
+inference engine
+global executor
+universal worker scheduler
+governing engine
+```
 
 ---
 
-### Control Plane vs Engine Runtime
+### Engine-Driven Coordination and Planning Handshake
 
-There are two distinct admission decisions:
+An engine remains the source of the semantic need for another capability.
 
-```text
-Control Plane admission
-→ system-level communication/routing admission
-
-Engine Runtime admission
-→ destination-engine execution admission
-```
-
-Conceptually:
+The interaction is:
 
 ```text
-Logical Request
-      ↓
+Engine Local Plan
+       ↓
+CapabilityRequirement
+       ↓
 Control Plane
-      ↓
-destination selected
-      ↓
-Transport
-      ↓
-Engine Runtime
-      ↓
-engine admission
-      ↓
-capability execution
+       ↓
+Capability Resolution
+       ↓
+Provider Resolution
+       ↓
+Contract / Context / Security Resolution
+       ↓
+Destination Resolution
+       ↓
+Global Coordination Update
+       ↓
+Inter-Engine Request
+       ↓
+Target Engine
 ```
 
-The Control Plane MUST NOT replace Engine Runtime admission.
-
-The Engine Runtime remains the final local authority on whether the selected
-engine instance can accept the request.
-
-A routing decision is therefore not a guarantee of execution acceptance.
+The Control Plane MUST NOT invent a domain need merely because a capability is available.
 
 For example:
 
 ```text
-Control Plane:
-Engine A appears READY
-        ↓
-Engine A becomes DRAINING
-        ↓
-request reaches Engine A
-        ↓
-Engine Runtime rejects new work
+Hadith Engine
+→ "I require quran.retrieve"
 ```
 
-This is valid behavior.
+The Control Plane may then resolve:
 
-The Control Plane MUST NOT override the Engine Runtime's local admission
-decision.
+```text
+quran.retrieve
+→ compatible provider
+→ compatible contract
+→ eligible destination
+```
+
+But it must not decide:
+
+```text
+Hadith
+→ first Arabic
+→ then Quran
+→ then Tafsir
+→ then Grading
+```
+
+unless those relationships are explicitly presented as capability-level requirements by the participating engine/workflow.
 
 ---
 
-### Security Boundary
+### Global Coordination Graph vs Local Workflow Graph
 
-Phase 9 remains the authoritative security system.
+Two graph concepts are permitted and MUST remain distinct.
 
-Phase 15 MUST NOT create a second authentication or authorization framework.
+Global coordination graph:
 
-Where appropriate, the Control Plane may perform system-level authorization
-checks such as whether a principal may use a particular communication path
-or destination.
+```text
+Hadith
+ ├── requires Arabic capability
+ ├── requires Quran capability
+ └── may require Aqeedah governance
+```
 
-The Engine Runtime remains responsible for engine/capability-level
-authorization.
+Local workflow graph:
+
+```text
+Hadith
+ ├── normalize
+ ├── inspect
+ ├── retrieve
+ ├── combine
+ └── produce candidate
+```
+
+The first represents ecosystem-level capability/engine coordination.
+
+The second represents engine-internal work.
+
+The Control Plane MUST NOT expose or execute the second graph.
+
+---
+
+### Global Plan
+
+The Control Plane may maintain a global coordination plan for the current operation.
 
 Conceptually:
 
 ```text
-Caller
-   ↓
-Security context
-   ↓
-Control Plane
-   ↓
-routing
-   ↓
-Engine Runtime
-   ↓
-capability authorization/execution
+Plan
+├── PlanId
+├── OperationId
+├── version
+├── coordination nodes
+├── capability requirements
+├── capability/provider bindings
+├── contract bindings
+├── communication relationships
+├── dependency relationships
+├── context requirements
+└── coordination state
 ```
 
-The exact placement of individual authorization checks remains governed by the
-existing security model.
+The plan is not a domain workflow.
 
-The important invariant is:
+A plan node represents a globally relevant capability/engine interaction, not every internal engine task.
+
+Global plan state may progress through coordination states such as:
 
 ```text
-Control Plane
-≠
-Security system
+DRAFT
+VALIDATED
+ACTIVE
+SUPERSEDED
+COMPLETED
+FAILED
 ```
+
+These states refer to coordination state only.
+
+The Control Plane MUST NOT interpret them as semantic domain completion.
 
 ---
 
-### Contract Identification
+### Plan Identity and Operation Identity
 
-The Control Plane may identify the contract targeted by the incoming request.
-
-Conceptually:
+The following MUST remain distinct:
 
 ```text
-Request
-   ↓
-ContractId / contract descriptor
+PlanId
+PlanVersion
+OperationId
+NodeId
+AttemptId
+MessageId
+CorrelationId
 ```
-
-Contract identification answers:
-
-```text
-What contract does this request target?
-```
-
-This is distinct from executable capability resolution.
-
-The Control Plane uses existing Core contract metadata.
-
-It MUST NOT inspect domain payload contents merely to determine domain
-semantics.
-
----
-
-### Contract Compatibility and Resolution
-
-The Control Plane may resolve a compatible contract definition/version for
-routing purposes.
-
-Conceptually:
-
-```text
-Request
-   ↓
-Contract identity
-   ↓
-contract/version compatibility
-   ↓
-compatible contract definition
-```
-
-Compatibility filtering may consider:
-
-```text
-ContractId
-version
-supported contract versions
-destination compatibility
-other generic contract metadata
-```
-
-The Control Plane MUST NOT reinterpret an incompatible domain payload to make
-it compatible.
-
-Actual contract semantics remain owned by the contract system and the
-appropriate engine/capability.
-
----
-
-### Capability Identification
-
-The Control Plane may identify which capability a request targets.
 
 For example:
 
 ```text
-CapabilityId = Quran.Search
+Operation X
+   │
+   └── Plan P
+        ├── Version 1
+        ├── Version 2
+        └── Version 3
+
+Attempt 1
+Attempt 2
+Attempt 3
 ```
 
-This information may be used to determine which engines advertise support for
-that capability.
+A plan revision does not create a new operation.
 
-Capability identification is not capability execution.
+A retry attempt does not automatically create a new plan version.
 
-The Control Plane MUST NOT:
+---
+
+### Dynamic Requirements and Replanning
+
+Dynamic dependencies may be surfaced from engine-local planning.
+
+The planning handshake is:
 
 ```text
-load capability handlers
+Local Plan
+    ↓
+new CapabilityRequirement
+    ↓
+Control Plane
+    ↓
+resolve/validate/coordinate
+    ↓
+global coordination state update
+```
+
+When the newly discovered requirement changes global coordination, the Control Plane may publish a new plan version.
+
+Example:
+
+```text
+Plan v1
+Hadith
+
+new requirement:
+quran.retrieve
+
+Plan v2
+Hadith → Quran
+```
+
+A later requirement may produce:
+
+```text
+Plan v3
+Hadith → Quran → Aqeedah
+```
+
+The Control Plane MUST only represent dependencies that are relevant to inter-engine coordination.
+
+An engine changing its own local workflow does not, by itself, require a global plan revision.
+
+---
+
+### Dependency Semantics
+
+Global dependency relationships may represent:
+
+```text
+BLOCKING
+NON_BLOCKING
+CONDITIONAL
+```
+
+and may include:
+
+```text
+capability
+target
+requirement
+condition
+context requirement
+```
+
+The global dependency graph MUST remain engine-agnostic.
+
+The Control Plane MUST NOT translate internal engine task dependencies into globally addressable nodes unless the architecture explicitly requires them to cross an engine boundary.
+
+---
+
+### Plan Validation
+
+Before global coordination state becomes active, the Control Plane may validate:
+
+```text
+required capability exists
+provider can satisfy the capability
+contract compatibility exists
+required interaction mode is supported
+security constraints are satisfied
+destination constraints are satisfiable
+context requirements are resolvable
+dependency relationships are valid
+coordination state is internally coherent
+```
+
+It MUST NOT validate domain semantics that belong to the target capability/engine.
+
+---
+
+### Plan Revision Safety
+
+When coordination state changes:
+
+```text
+old plan version
+→ remains historically identifiable
+
+new plan version
+→ contains the new coordination state
+```
+
+The Control Plane MUST NOT silently rewrite already-issued execution decisions merely because later policy or membership state changes.
+
+Already-established work remains associated with its existing decision unless an explicit operation contract permits a change.
+
+---
+
+### Capability Resolution
+
+Capability resolution answers:
+
+```text
+Which registered capability/provider can satisfy this requirement?
+```
+
+It does not answer:
+
+```text
+How should the engine execute that capability?
+```
+
+The Control Plane may use:
+
+```text
+CapabilityId
+capability metadata
+supported contracts
+supported versions
+interaction modes
+provider metadata
+availability
+readiness
+security constraints
+routing constraints
+```
+
+It MUST NOT:
+
+```text
+load handlers
 obtain executable function pointers
 invoke handlers
-interpret domain logic
+interpret domain payload meaning
 ```
 
-Instead:
+Capability execution remains an Engine Runtime responsibility.
+
+---
+
+### Provider Resolution
+
+Provider resolution is an ecosystem-level coordination function.
+
+Conceptually:
 
 ```text
-Control Plane
-→ identifies/routes capability
+CapabilityRequirement
+       ↓
+candidate providers
+       ↓
+provider eligibility
+       ↓
+provider selection
+```
 
+Provider selection MUST remain distinct from concrete instance routing.
+
+```text
+Capability
+   ↓
+Provider
+   ↓
+Provider Instance
+   ↓
 Engine Runtime
-→ resolves executable capability implementation
+   ↓
+local worker/resource
 ```
+
+The Control Plane may select a compatible provider when the operation permits provider substitution.
+
+It MUST NOT select physical backend algorithms such as:
+
+```text
+HNSW
+FAISS
+Lucene
+FST
+PostgreSQL GIN
+```
+
+Those remain infrastructure-engine implementation details.
+
+Provider/backend abstraction is not mandatory for every infrastructure engine.
 
 ---
 
-### Logical Engine Identity
+### Provider Substitution
 
-`EngineId` represents the logical identity of an engine.
-
-For example:
+Provider substitution is distinct from retry.
 
 ```text
-EngineId = ArabicEngine
+Provider A unavailable
+→ Control Plane may resolve Provider B
 ```
 
-A logical engine may have one or many runtime instances.
-
-The logical engine identity MUST remain stable independently of scaling.
-
-For example:
+only when:
 
 ```text
-ArabicEngine
-├── arabic-01
-├── arabic-02
-└── arabic-03
+capability compatibility
+contract compatibility
+security
+data/policy constraints
+version compatibility
+provider eligibility
 ```
+
+permit substitution.
+
+Engine-local fallback remains engine-owned:
+
+```text
+Arabic Engine
+→ local model A
+→ local model B
+```
+
+Control Plane MUST NOT silently impose semantic fallback policies.
 
 ---
 
-### Engine Instance Identity
+### Registration
 
-`EngineInstanceId` represents one concrete runtime participant.
+An Engine Runtime registers with the Control Plane using a structured registration description.
 
 Conceptually:
 
 ```text
-EngineId
-→ logical engine
-
-EngineInstanceId
-→ concrete runtime instance
+EngineRegistration
+├── EngineId
+├── EngineInstanceId
+├── supported capabilities
+├── supported contracts / versions
+├── transport endpoint
+├── runtime metadata
+├── lifecycle/readiness information
+└── routing metadata
 ```
 
-For example:
-
-```text
-EngineId = ArabicEngine
-EngineInstanceId = arabic-02
-```
-
-The Control Plane normally resolves a request to a concrete
-`EngineInstanceId`.
-
-The separation between logical engine identity and concrete instance identity
-MUST remain explicit.
-
-Instances MUST NOT be modeled as unrelated logical engines merely because
-multiple instances exist.
-
----
-
-### Engine Registration
-
-An Engine Runtime registers itself with the Control Plane by presenting a
-structured registration description.
-
-Conceptually:
-
-```text
-Engine Runtime starts
-      ↓
-registration descriptor
-      ↓
-Control Plane
-      ↓
-registration validation
-      ↓
-routing membership
-```
-
-Registration information must be capable of describing:
-
-```text
-EngineId
-EngineInstanceId
-supported capabilities
-supported contracts / versions
-transport endpoint
-runtime version
-lifecycle/readiness information
-routing metadata
-```
-
-Not every registration needs to contain every optional field.
-
-The exact registration structure and wire representation remain implementation
-choices.
-
----
-
-### Registration Ownership
+Registration is declarative.
 
 The Engine Runtime presents its registration information.
 
 The Control Plane owns the routing membership view.
 
-Therefore:
-
-```text
-Engine Runtime
-→ declares membership
-
-Control Plane
-→ maintains routing membership
-```
-
-An engine MUST NOT directly modify the Control Plane's routing tables.
+An engine MUST NOT directly mutate Control Plane routing state.
 
 ---
 
 ### Registration Validation
 
-The Control Plane MUST perform generic structural validation of registration
-information.
+The Control Plane MUST structurally validate registration information.
 
-Examples include:
+Examples:
 
 ```text
 EngineId validity
@@ -12138,90 +12296,126 @@ endpoint validity
 registration identity/security validity
 ```
 
-Registration validation is generic Core behavior.
-
-The Control Plane MUST NOT attempt to determine whether the engine's domain
-implementation is semantically correct.
+Registration validation MUST NOT attempt to establish semantic correctness of the engine's implementation.
 
 For example:
 
 ```text
-"Does this Arabic engine actually implement Arabic morphology correctly?"
+"Does this Arabic engine implement morphology correctly?"
 ```
 
-is an engine/domain concern, not a registration-validation concern.
+is not a Control Plane registration question.
 
 ---
 
-### Capability Advertisement
+### Engine Identity
 
-Capability advertisement is declarative.
+`EngineId` represents the logical engine.
 
-An engine may advertise multiple capabilities:
+`EngineInstanceId` represents a concrete runtime participant.
 
-```text
-ArabicEngine / arabic-01
-├── Arabic.Tokenize
-├── Arabic.Sarf
-├── Arabic.Nahw
-└── Arabic.Analyze
-```
-
-A capability may be advertised by multiple logical engines:
+Example:
 
 ```text
-Quran.Search
-├── QuranEngine
-├── KnowledgeEngine
-└── SearchEngine
+ArabicEngine
+├── arabic-01
+├── arabic-02
+└── arabic-03
 ```
 
-when their contract and capability metadata make them compatible.
+The logical engine identity remains stable across scaling.
 
-The Control Plane treats capability advertisements as routing metadata.
+The Control Plane normally resolves a concrete execution attempt to an `EngineInstanceId`.
 
-Capability correctness remains an engine responsibility.
+These identities MUST remain distinct.
 
 ---
 
-### Registration and Lifecycle
+### Membership
 
-Registration membership is NOT a second engine lifecycle system.
-
-Phase 8 remains authoritative over actual Engine Runtime lifecycle.
+The Control Plane maintains routing membership independently from Engine Runtime lifecycle ownership.
 
 Conceptually:
 
 ```text
-Engine Runtime lifecycle
-        ↓
-Control Plane routing eligibility
+Engine Runtime
+→ declares membership / state
+
+Control Plane
+→ maintains routing membership view
 ```
 
-For example:
+Membership must support:
 
 ```text
-Engine Runtime = SERVING
-        ↓
-instance may be routing-eligible
+register
+update
+unregister
+lookup
+snapshot
+candidate enumeration
 ```
 
-and:
+Routing should operate on a coherent membership/routing-state snapshot.
+
+Concurrent:
 
 ```text
-Engine Runtime = DRAINING
-        ↓
-instance is not eligible for new normal routing
+routing decisions
++
+membership changes
 ```
 
-The Control Plane MUST NOT create a competing lifecycle state machine whose
-state conflicts with the runtime lifecycle.
+MUST be safe.
+
+A routing decision MUST NOT accidentally combine state from incompatible membership versions.
+
+---
+
+### Registry Integration
+
+The Registry is the discovery/metadata authority.
+
+The relationship is:
+
+```text
+Registry
+→ what exists?
+→ what capabilities/contracts/providers are advertised?
+→ what metadata is known?
+
+Control Plane
+→ resolve/coordinate
+→ apply communication policy
+→ choose destination/provider
+
+Target Engine
+→ execute capability
+```
+
+The Registry MUST NOT become a workflow executor.
+
+The Control Plane MUST NOT duplicate the Registry's authoritative discovery model unnecessarily.
+
+Registry information may be cached where later reliability rules explicitly permit it.
+
+---
+
+### Stale Registry Information
+
+Cached registry/capability information may be used only within declared freshness, compatibility, security and operation constraints.
+
+A stale cache MUST NOT become an indefinite substitute for authoritative discovery.
+
+For already-established safe interactions, loss of Control Plane/Registry access does not necessarily terminate work that no longer requires a new global resolution decision.
+
+New dynamic interactions may fail to resolve while existing communication continues where safe.
 
 ---
 
 ### Destination Resolution
 
-Destination resolution consists of two conceptual stages:
+Destination resolution has two stages:
 
 ```text
 Eligibility
@@ -12229,16 +12423,12 @@ Eligibility
 Selection
 ```
 
-First determine which destinations are eligible.
-
-Then select one according to routing policy.
-
-Conceptually:
+Flow:
 
 ```text
-Request
+Requirement
    ↓
-contract/capability requirements
+contract/capability/provider requirements
    ↓
 eligible destinations
    ↓
@@ -12247,82 +12437,49 @@ routing policy
 selected EngineInstanceId
 ```
 
+A registered destination is not automatically eligible.
+
 ---
 
 ### Destination Eligibility
 
-A destination is eligible only when it satisfies the applicable generic
-requirements.
-
-These may include:
+A destination may be eligible only when applicable requirements are satisfied:
 
 ```text
 capability support
 contract compatibility
+provider compatibility
 engine/runtime availability
 instance readiness
+capability readiness
 security constraints
 routing constraints
+policy constraints
 ```
 
-For example:
+Health and readiness are inputs.
+
+They are not independent routing authorities.
+
+Example:
 
 ```text
 Engine A
-capability ✅
-contract ✅
-ready ✅
+→ READY
+→ capability Search READY
 
 Engine B
-capability ✅
-contract ❌
-
-Engine C
-capability ✅
-ready ❌
-```
-
-produces:
-
-```text
-eligible destination = Engine A
-```
-
-The routing algorithm MUST NOT select a destination merely because it is
-registered.
-
----
-
-### Capability-Level Eligibility
-
-Engine-level readiness is not sufficient by itself.
-
-For example:
-
-```text
-Engine A
-→ overall READY
-
-Search capability
 → READY
-
-Grammar capability
-→ NOT READY
+→ capability Search NOT READY
 ```
 
-A request for Grammar MUST NOT be routed to A merely because A is generally
-READY.
-
-Capability-level readiness/availability may therefore participate in
-destination eligibility.
+A Search request must not be routed to B merely because the overall engine is ready.
 
 ---
 
-### Health and Routing
+### Health and Readiness
 
-Phase 11 provides health information.
-
-Phase 15 consumes that information when determining routing eligibility.
+Phase 11 remains authoritative for health information.
 
 The relationship is:
 
@@ -12331,53 +12488,43 @@ Health
 → observation/input
 
 Control Plane
-→ routing decision
+→ routing eligibility/selection
 ```
 
-Health MUST NOT directly perform routing.
+The Control Plane MUST NOT create a competing health system.
 
-For example:
+Lifecycle states such as:
 
 ```text
-Engine A
-→ liveness healthy
-→ readiness ready
-
-Engine B
-→ liveness healthy
-→ readiness false
+SERVING
+DRAINING
+STOPPED
 ```
 
-can result in:
+must be interpreted through the existing runtime lifecycle.
 
-```text
-A → eligible
-B → ineligible
-```
-
-Health information is an input to routing policy rather than an independent
-routing authority.
+Normal new routing should not select an instance that is draining or stopped when the applicable policy excludes it.
 
 ---
 
-### Load and Routing
+### Capability Readiness
 
-Load information may be used by routing policy.
+Engine-level readiness is not sufficient.
 
-For example:
+A capability may independently be:
 
 ```text
-Engine A = 95% load
-Engine B = 30% load
+READY
+NOT_READY
+DEGRADED
+UNAVAILABLE
 ```
 
-may result in B being selected.
+or equivalent according to the existing health model.
 
-However, load is an input to routing policy, not an independent routing
-authority.
+Capability readiness may participate in destination eligibility.
 
-High load does not automatically make a destination invalid unless the
-configured routing policy defines that behavior.
+The actual capability remains engine-owned.
 
 ---
 
@@ -12385,22 +12532,23 @@ configured routing policy defines that behavior.
 
 The Control Plane is authoritative for destination selection.
 
-Routing policy may consider:
+Policy may consider:
 
 ```text
 platform configuration
 engine metadata
+provider metadata
 health/readiness
-capability eligibility
+capability readiness
 contract compatibility
 load
+locality
 caller-provided routing constraints
+provider constraints
 other explicitly supported routing metadata
 ```
 
-The final routing decision belongs to the Control Plane.
-
-Possible routing strategies may include:
+Possible policy strategies include:
 
 ```text
 round robin
@@ -12409,40 +12557,46 @@ capacity-aware selection
 locality-aware selection
 latency-aware selection
 explicit preference
+cost-aware selection when explicitly supported
 ```
 
-The exact routing algorithm remains an implementation/configuration choice.
+The algorithm itself remains an implementation/configuration decision.
 
-The architecture requires only that routing follow an explicit, deterministic
-policy.
-
----
-
-### Routing Determinism
-
-Given equivalent:
+Equivalent inputs:
 
 ```text
 request
-routing constraints
+constraints
 routing state
-routing policy
+policy
 ```
 
-the Control Plane MUST make a predictable routing decision according to that
-policy.
+MUST produce predictable policy-driven selection.
 
-The implementation MUST NOT introduce arbitrary or unexplained destination
-selection.
+---
+
+### Load
+
+Load is a routing input, not an independent routing authority.
+
+For example:
+
+```text
+Engine A = 95% load
+Engine B = 30% load
+```
+
+may influence selection.
+
+High load does not automatically make a destination ineligible unless the applicable routing policy says so.
 
 ---
 
 ### Logical Destination
 
-A logical destination represents a request for a service/capability/logical
-engine rather than a specific instance.
+A logical destination identifies a service/capability/logical engine rather than a concrete instance.
 
-For example:
+Example:
 
 ```text
 Capability = Arabic.Analyze
@@ -12454,18 +12608,13 @@ may resolve to:
 ArabicEngine / arabic-02
 ```
 
-among multiple eligible instances.
-
-Logical destinations permit scaling without changing the logical caller-facing
-identity of an engine.
+among eligible instances.
 
 ---
 
 ### Explicit Destination
 
-A request may explicitly identify a concrete `EngineInstanceId`.
-
-For example:
+A request may specify:
 
 ```text
 EngineInstanceId = arabic-02
@@ -12482,33 +12631,30 @@ routing constraints
 runtime admission
 ```
 
-Specifying an instance MUST NOT bypass safety or authorization boundaries.
+An explicit destination MUST NOT bypass safety or authorization requirements.
 
 ---
 
-### Hard Destination vs Preference
-
-Routing constraints distinguish between a hard destination and a preference.
+### Hard Destination and Preference
 
 A hard destination means:
 
 ```text
-"Use this concrete destination."
+Use this concrete destination.
 ```
 
-If the destination is unavailable or ineligible:
+If it is unavailable/ineligible:
 
 ```text
 → report destination unavailable
 ```
 
-The Control Plane MUST NOT silently select another destination for a hard
-destination unless the request contract explicitly permits fallback.
+and there is no automatic fallback unless the request contract explicitly permits it.
 
 A preference means:
 
 ```text
-"Prefer this destination."
+Prefer this destination.
 ```
 
 If the preferred destination is unavailable:
@@ -12517,16 +12663,13 @@ If the preferred destination is unavailable:
 → another eligible destination may be selected
 ```
 
-This distinction MUST remain explicit.
+The distinction MUST remain explicit.
 
 ---
 
 ### Caller Routing Constraints
 
-A caller may supply routing preferences or constraints only when the applicable
-contract permits them.
-
-Examples include:
+Caller-provided routing information may include:
 
 ```text
 preferred instance
@@ -12535,33 +12678,17 @@ preferred region
 other supported routing metadata
 ```
 
-Caller routing information is not automatically absolute authority.
+Such information is not automatically absolute authority.
 
-The Control Plane remains authoritative over the final destination selection.
-
----
-
-### Routing Fallback
-
-Fallback behavior is determined by routing semantics.
-
-```text
-hard destination
-→ no automatic fallback
-
-logical destination / preference
-→ eligible fallback may be selected
-```
-
-The Control Plane MUST NOT assume that all requests permit fallback.
+The Control Plane remains authoritative for the final routing decision.
 
 ---
 
 ### Routing Per Attempt
 
-Each concrete execution attempt receives a destination decision.
+Every concrete execution attempt receives a destination decision.
 
-For example:
+Example:
 
 ```text
 Operation X
@@ -12579,788 +12706,1207 @@ Control Plane resolves destination again
 Engine B
 ```
 
-Phase 15 does not decide whether another attempt should exist.
+Phase 15 MUST NOT decide whether another retry attempt exists.
 
 Phase 13 owns retry policy.
 
-Phase 15 resolves the destination for an attempt that has already been
-authorized to execute.
+Phase 15 resolves the destination for an already-authorized attempt.
 
 ---
 
-### Retry Destination Policy
+### Attempt Stability
 
-Whether a retry prefers the same instance, another instance, or ordinary
-routing remains a routing-policy choice.
-
-Possible policies include:
+Once a routing decision is issued for an attempt:
 
 ```text
-prefer previous instance
-avoid previous instance
-ordinary routing
+policy changes
+membership changes
+later registrations
 ```
 
-No one strategy is universally required.
+MUST NOT silently rewrite that already-issued decision.
 
----
-
-### Existing Attempt Stability
-
-Once a destination has been selected for an attempt, later routing-policy
-changes MUST NOT retroactively change that attempt's destination.
-
-Conceptually:
-
-```text
-Attempt 1
-→ routing policy P1
-→ Engine A
-```
-
-then:
-
-```text
-routing policy changes to P2
-```
-
-does not move Attempt 1 to another engine.
-
-A later retry may use the current routing policy when resolving its new
-destination.
-
----
-
-### Registration Changes and Existing Attempts
-
-If an engine unregisters or becomes ineligible after an attempt's destination
-has already been selected:
-
-```text
-Attempt 1
-→ Engine A selected
-
-Engine A
-→ unregisters
-```
-
-the existing attempt's destination does not retroactively change.
-
-The transport/runtime determines what happens to the active execution.
-
-If Phase 13 creates another attempt:
-
-```text
-Attempt 2
-→ new destination resolution
-```
-
-uses current routing state.
-
----
-
-### Routing State Consistency
-
-Each routing decision MUST observe a coherent routing state.
-
-A routing decision MUST NOT observe a partially updated membership/policy
-configuration.
-
-Conceptually:
-
-```text
-Routing State Snapshot N
-→ one coherent decision
-```
-
-The implementation may achieve this using:
-
-```text
-immutable snapshots
-locks
-versioned state
-transactional updates
-other concurrency-safe mechanisms
-```
-
-The exact mechanism remains an implementation choice.
-
----
-
-### Routing-State Staleness
-
-The Control Plane's routing state may have unavoidable timing differences from
-actual engine runtime state.
-
-The architecture therefore accepts:
-
-```text
-Control Plane routing decision
-→ based on routing state known at decision time
-```
-
-while:
-
-```text
-Engine Runtime
-→ final local admission authority
-```
-
-The Control Plane should maintain reasonably current routing information through
-appropriate registration, lifecycle, health, or equivalent mechanisms.
-
-A specific heartbeat/lease protocol is not frozen by this phase.
+The decision remains associated with the attempt unless the applicable contract explicitly supports rerouting.
 
 ---
 
 ### No Implicit Waiting
 
-If no eligible destination currently exists:
+If no eligible destination is currently available:
 
 ```text
-→ destination unavailable / no eligible destination
+→ return an explicit resolution/routing failure
 ```
 
-The Control Plane MUST NOT implicitly wait for an engine to appear.
-
-A higher-level policy may decide to:
-
-```text
-wait
-retry
-queue
-```
-
-but that behavior is outside the base destination-resolution decision.
+The Control Plane MUST NOT silently wait indefinitely for a future destination.
 
 ---
 
 ### No Implicit Queueing
 
-If a destination has no available capacity, the Control Plane MUST NOT
-implicitly queue requests indefinitely.
+The Control Plane MUST NOT create indefinite implicit request queues merely because no destination is available.
 
-The base mechanism may return an explicit unavailable/capacity outcome.
-
-Queueing behavior, when required, belongs to a separately defined policy.
+Any explicit queueing behavior must be bounded and contractually defined.
 
 ---
 
 ### Routing vs Retry
 
-The Control Plane does not decide whether an operation should be retried.
-
-For example:
+Routing answers:
 
 ```text
-No eligible destination
+Where should this attempt go?
 ```
 
-means:
+Retry answers:
 
 ```text
-routing failure/unavailability
+Should another attempt exist?
 ```
 
-not automatically:
+These remain separate.
 
-```text
-retry operation
-```
-
-Phase 13 owns retry decisions.
-
-The Control Plane may resolve a different destination for a later attempt after
-Phase 13 permits that attempt.
+Communication-level retry primitives may exist in Core, while operation/capability/domain retry policy remains owned by the appropriate operation/engine layer.
 
 ---
 
 ### Routing vs Transport
 
-The Control Plane determines:
+The Control Plane produces a logical communication/destination decision.
 
-```text
-WHERE
-```
+Transport moves the message.
 
-Transport determines:
-
-```text
-HOW bytes move
-```
-
-The relationship is:
+Conceptually:
 
 ```text
 Control Plane
-      ↓
-selected destination
-      ↓
-Transport
-      ↓
-Engine Runtime
+→ RoutingDecision
+
+Universal Client / Transport
+→ actual communication
 ```
 
-The Control Plane MUST NOT become a transport implementation.
-
-Transport socket details, framing, fragmentation, reassembly, buffering, and
-wire-level behavior remain owned by Phase 7 transport mechanisms.
+The Control Plane MUST NOT become transport framing infrastructure.
 
 ---
 
-### Frame Routing
+### Logical Request vs Transport Frame
 
-The Control Plane operates on logical requests/messages.
+Routing operates on logical requests/interactions.
 
-It MUST NOT route individual transport frames.
+A single logical message may use multiple transport frames.
 
-Invalid model:
-
-```text
-Frame 1 → Engine A
-Frame 2 → Engine B
-```
-
-Correct model:
-
-```text
-Logical Request
-      ↓
-destination resolution
-      ↓
-selected EngineInstanceId
-      ↓
-transport framing/transmission
-```
-
-Phase 7 remains responsible for frame handling.
+The Control Plane MUST NOT route individual frames independently.
 
 ---
 
 ### Routing vs Streaming
 
-For an application-level stream:
+Once a stream is established:
 
 ```text
-Operation
-   ↓
-Control Plane
-   ↓
-Engine Instance A
-   ↓
-Stream
+Attempt
+→ selected destination
+→ stream
 ```
 
-the Control Plane routes the logical operation/attempt.
+the stream remains associated with the selected execution destination.
 
-Once the stream is established, the stream remains associated with that
-execution destination.
+Ordinary routing MUST NOT move individual stream items between different destinations.
 
-The Control Plane MUST NOT dynamically route individual stream items to
-unrelated destinations.
-
-For example:
-
-```text
-stream item 1 → A
-stream item 2 → B
-stream item 3 → C
-```
-
-is not the default supported behavior.
-
-This preserves Phase 12 stream ordering and execution ownership.
+A new destination requires a separately defined new attempt/resume/retry semantic.
 
 ---
 
 ### Routing vs Artifacts
 
-The Control Plane may forward an `ArtifactReference` or other generic artifact
-metadata when needed for routing/communication.
+The Control Plane may carry:
+
+```text
+ArtifactReference
+ArtifactId
+version
+integrity/provenance metadata
+```
+
+when needed for communication.
 
 It MUST NOT become responsible for:
 
 ```text
-artifact retrieval
 artifact storage
-artifact integrity verification
-artifact lifecycle
+artifact retrieval
 artifact versioning
+artifact lifecycle
+artifact integrity implementation
 ```
 
 Those remain Phase 10 responsibilities.
 
-For example:
-
-```text
-Request
-→ ArtifactReference A:v7
-→ route request
-```
-
-does not imply that the Control Plane retrieves A:v7.
-
 ---
 
-### Routing vs Internal Events
+### Routing vs Events
 
-Phase 14 events may optionally describe routing-related occurrences such as:
+Phase 14 events may describe routing/control occurrences such as:
 
 ```text
 EngineRegistered
-EngineBecameUnavailable
-RouteMembershipChanged
+MembershipChanged
+RouteSelected
+EngineUnavailable
+PlanUpdated
+ResolutionFailed
 ```
 
-However, the internal event system is not the authoritative routing state.
-
-The relationship is:
+but:
 
 ```text
 Event
 → optional notification
 
-Control Plane routing state
-→ authoritative routing state
+Control Plane routing/membership state
+→ authoritative state
 ```
 
-The Control Plane MUST NOT require the event system merely to maintain its
-basic routing semantics unless a later implementation explicitly chooses to
-use it internally.
+The event system MUST NOT be required to become the routing database.
 
 ---
 
 ### Context Propagation
 
-The Control Plane MUST preserve the logical operation context across the
-Control Plane → Transport → Engine Runtime boundary.
+The Control Plane must preserve and propagate applicable shared context across inter-engine boundaries.
 
 Relevant context may include:
 
 ```text
 OperationId
 CorrelationId
+AttemptId
+NodeId
 deadline
 cancellation
 security context
 tracing context
 provenance context
+billing/accounting context where authorized
+routing constraints
+capability/contract metadata
 ```
 
-The Control Plane MUST NOT unnecessarily create unrelated replacement
-contexts.
+The Control Plane transports and projects this information.
 
-The destination engine must receive the request as the same logical operation
-and execution context.
+The receiving engine remains responsible for deciding whether domain/context requirements are sufficient.
 
 ---
 
-### Context and Identity
+### Dynamic Context Requests
 
-The Control Plane MUST preserve the distinction between:
+The standard context exchange is:
 
 ```text
-MessageId
-OperationId
-CorrelationId
-TraceId
-EngineId
-EngineInstanceId
+ContextRequirement
+       ↓
+ContextRequest
+       ↓
+Context-owning Engine / Provider
+       ↓
+ContextPackage
+       ↓
+Requesting Engine
+       ↓
+context sufficiency decision
 ```
 
-and other Core identities.
+The Control Plane coordinates and transports this interaction.
 
-Routing metadata must not overwrite logical operation identity.
+It MUST NOT decide the semantic meaning of the context.
 
 ---
 
-### Routing Result
+### Security Boundary
 
-A routing result should contain enough information for downstream execution and
-observability.
+Phase 9 remains authoritative.
 
-Conceptually, it may include:
+Phase 15 MUST NOT create a second authentication or authorization framework.
 
-```text
-selected EngineId
-selected EngineInstanceId
-routing policy/selection information where appropriate
-routing state/snapshot identifier where applicable
-```
-
-The routing result should provide enough information to answer:
+The Control Plane may enforce communication-level authorization such as:
 
 ```text
-Why was this request routed to this instance?
+Is this caller allowed to use this route?
+Is this destination eligible for this principal?
+Is this communication path permitted?
 ```
 
-without exposing unnecessary internal state.
+The target Engine Runtime remains responsible for engine/capability-level authorization.
+
+Conceptually:
+
+```text
+Caller
+   ↓
+Security Context
+   ↓
+Control Plane
+   ↓
+Routing
+   ↓
+Engine Runtime
+   ↓
+Capability Authorization / Execution
+```
+
+The Control Plane MUST NOT bypass security for explicit destinations, retries, streaming, artifacts or internal calls.
 
 ---
 
-### Control Plane and Observability
+### Contract Enforcement
 
-Phase 11 remains responsible for observability.
-
-The Control Plane should expose enough information for observing:
+The Control Plane must ensure that the interaction satisfies the common contract boundary:
 
 ```text
-routing decisions
-destination resolution latency
-routing failures
-registration changes
-eligible destination counts
-membership changes
+Envelope
+→ Contract
+→ Version
+→ Payload Descriptor
+→ structural validation
+→ Communication
 ```
 
-The Control Plane MUST NOT create a second telemetry system.
+The Control Plane may determine:
 
-Routing failures and engine execution failures must remain distinguishable.
+```text
+ContractId
+compatible version
+destination compatibility
+supported interaction mode
+```
+
+It MUST NOT reinterpret an incompatible domain payload to make it compatible.
+
+Domain-specific payload semantics remain outside the Control Plane.
 
 ---
 
-### Failure Ownership
+### Request / Response Lifecycle
+
+The communication-focused lifecycle is:
+
+```text
+Request
+   ↓
+security verification
+   ↓
+admission
+   ↓
+envelope validation
+   ↓
+contract identification
+   ↓
+contract compatibility
+   ↓
+capability identification
+   ↓
+provider/destination resolution
+   ↓
+context propagation
+   ↓
+request delivery
+   ↓
+target Engine Runtime admission
+   ↓
+capability execution
+   ↓
+response
+   ↓
+response validation/correlation
+   ↓
+return to requester
+```
+
+The Control Plane ends its direct responsibility when the valid interaction has been handed to the communication mechanism, while it may continue to observe/report communication lifecycle state through the shared runtime.
+
+---
+
+### Response Routing
+
+The reverse path must preserve the established communication metadata:
+
+```text
+message_id
+operation_id
+correlation_id
+sender
+target
+capability
+contract/version
+trace context
+security context
+provenance metadata
+```
+
+Example:
+
+```text
+Quran Engine
+   ↓
+Universal Response
+   ↓
+communication infrastructure
+   ↓
+correlation/validation
+   ↓
+Hadith Engine
+```
+
+A domain response is not reinterpreted by the Control Plane.
+
+---
+
+### Communication Modes
+
+The universal inter-engine architecture supports multiple semantic interaction modes:
+
+```text
+RPC
+Artifact
+Event
+Validation / Governance
+```
+
+The Control Plane and common communication layer must preserve the interaction mode as part of the contract/operation model.
+
+For synchronous internal capability requests:
+
+```text
+gRPC/RPC
+```
+
+is the default transport model established by the architecture.
+
+The Control Plane does not redefine REST/application API semantics.
+
+---
+
+### Communication Lifecycle
+
+Common communication lifecycle mechanisms include:
+
+```text
+connect
+authenticate
+send
+receive
+stream
+timeout
+cancel
+close
+```
+
+The Control Plane uses existing Core runtime/transport mechanisms rather than creating an alternative transport lifecycle.
+
+---
+
+### Deadlines and Cancellation
+
+The Control Plane must propagate applicable:
+
+```text
+deadline
+cancellation
+```
+
+across an inter-engine request.
+
+Cancellation remains a shared Core operation/runtime mechanism.
+
+The target Engine Runtime determines how its local work responds to cancellation.
+
+---
+
+### Communication-Level Retry
+
+Core may provide communication-level retry primitives for failures such as:
+
+```text
+request did not reach target
+connection reset
+temporary transport failure
+```
+
+This is not semantic retry.
+
+```text
+communication retry
+≠
+semantic retry
+```
+
+Domain/workflow retry and fallback decisions remain outside the Control Plane.
+
+---
+
+### Control Plane Availability
+
+The architecture distinguishes:
+
+```text
+Control Plane unavailable
+vs
+destination unavailable
+vs
+transport unavailable
+vs
+Engine Runtime rejection
+```
+
+An established safe interaction may continue without an immediate new global-resolution decision where the existing communication path remains valid.
+
+A new interaction requiring fresh global resolution may fail when the Control Plane or required discovery information is unavailable.
+
+The Control Plane MUST NOT claim failure merely because the downstream transport or engine failed.
+
+---
+
+### Failure Classification
 
 Control Plane failures may include:
 
 ```text
-ControlPlaneUnavailable
-InvalidRoutingRequest
+AdmissionFailure
+ValidationFailure
 ContractResolutionFailure
+CapabilityResolutionFailure
+ProviderResolutionFailure
 NoEligibleDestination
 DestinationUnavailable
 RoutingPolicyFailure
-RegistrationFailure
+ControlPlaneUnavailable
+ContextResolutionFailure
 ```
 
-Transport failures remain transport-owned.
-
-Engine Runtime failures remain engine-runtime-owned.
-
-Capability failures remain capability/engine-owned.
-
-These failures MUST remain distinguishable.
-
----
-
-### Control Plane Unavailable vs No Eligible Destination
-
-These are not equivalent:
+These remain distinct from:
 
 ```text
-Control Plane unavailable
-≠
-No eligible destination
+TransportFailure
+EngineRuntimeRejection
+CapabilityFailure
+Cancellation
+Deadline
 ```
 
-If the Control Plane itself cannot perform routing, this should be reported as a
-Control Plane/system failure.
+The existing Core Error System remains authoritative for shared error structure and causality.
 
-If the Control Plane is functioning but no registered destination satisfies
-the request, that is a destination/routing availability failure.
+Phase 15 MUST preserve failure causality.
 
 ---
 
-### Transport Failure vs Routing Failure
-
-If:
+### Failure Examples
 
 ```text
 Control Plane
-→ correctly selects Engine A
+→ selects Engine A
+→ transport connection fails
 ```
 
-but:
+means:
 
 ```text
-Transport
-→ cannot establish delivery
+routing succeeded
+transport failed
 ```
 
-the resulting failure is a transport failure, not a destination-resolution
-failure.
+not:
 
-Phase 13 may later determine whether another attempt should be made.
+```text
+Control Plane failed
+```
 
----
-
-### Engine Runtime Rejection
-
-If:
+Likewise:
 
 ```text
 Control Plane
-→ correctly selects Engine A
-
-Transport
-→ delivers successfully
-
-Engine Runtime
-→ rejects because it is now DRAINING
+→ selects Engine A
+→ Engine A enters DRAINING
+→ Runtime rejects new request
 ```
 
-the Control Plane has still completed its responsibility correctly.
+means:
 
-The Engine Runtime rejection remains a runtime admission outcome.
+```text
+routing decision existed
+Engine Runtime rejected admission
+```
 
-The Control Plane MUST NOT override that rejection.
+The Control Plane MUST NOT override that local admission decision.
 
 ---
 
-### Error Causality
+### Observability
 
-The Control Plane MUST preserve the original failure cause when forwarding
-errors.
+Control Plane decisions and communication outcomes must remain observable through existing Phase 11 mechanisms.
 
-For example:
-
-```text
-Control Plane
-→ destination selected
-
-Transport
-→ delivery succeeded
-
-Engine Runtime
-→ capability execution failed
-```
-
-must not be flattened into:
+Relevant identities include:
 
 ```text
-ControlPlaneError
-```
-
-merely because the request passed through the Control Plane.
-
-Failure ownership and causal context must remain observable.
-
----
-
-### Control Plane Concurrency
-
-The Control Plane MUST safely support concurrent:
-
-```text
-destination resolution
-engine registration
-membership updates
-health/readiness updates
-draining
-unregistration
-routing-policy changes
-```
-
-Routing decisions must observe coherent state.
-
-The implementation may use:
-
-```text
-RwLock
-immutable snapshots
-atomic state
-versioned state
-other concurrency-safe mechanisms
-```
-
-The exact synchronization strategy remains an implementation choice.
-
----
-
-### Routing Snapshots
-
-A routing snapshot is a logical consistency concept.
-
-It means:
-
-```text
-one routing decision
-→ one coherent membership + policy state
-```
-
-It does not require a literal `RoutingSnapshot` struct.
-
-The implementation may represent this using any appropriate mechanism.
-
-A snapshot/policy change MUST NOT retroactively modify a destination already
-selected for an existing attempt.
-
----
-
-### Deployment Topology
-
-The architecture defines a logical Control Plane, not a mandatory number of
-processes.
-
-A deployment may contain:
-
-```text
-one Control Plane instance
-multiple Control Plane instances
-```
-
-without changing the logical responsibility of the Control Plane.
-
-Phase 15 does not define:
-
-```text
-consensus
-leader election
-distributed agreement
-global strongly consistent routing
-```
-
-as mandatory functionality.
-
-Those concerns remain deployment/platform architecture decisions unless
-explicitly introduced later.
-
----
-
-### Runtime Membership Persistence
-
-Runtime engine membership does not need to be permanently durable by default.
-
-A typical lifecycle may be:
-
-```text
-Engine starts
-→ registers
-
-Engine stops
-→ membership disappears
-```
-
-Persistent routing configuration and transient runtime membership are separate
-concepts.
-
-Phase 15 does not require permanent storage for runtime registrations.
-
----
-
-### Planner and Workflow Boundary
-
-The Control Plane MUST NOT become a planner or workflow engine.
-
-If a planner produces:
-
-```text
-Step 1 → Arabic Engine
-Step 2 → Knowledge Graph
-Step 3 → Grading Engine
-```
-
-the Control Plane may route each already-defined step:
-
-```text
-Step 1 → destination
-Step 2 → destination
-Step 3 → destination
-```
-
-but it does not determine:
-
-```text
-Step 1 → Step 2 → Step 3
-```
-
-The workflow relationship belongs to the planner/orchestrator.
-
----
-
-### Domain-Payload Boundary
-
-The Control Plane MUST NOT inspect application payloads to invent routing
-decisions.
-
-For example:
-
-```text
-payload:
-"find verses about patience"
-```
-
-must not cause the Control Plane to infer:
-
-```text
-→ Quran Search
-```
-
-based on domain reasoning.
-
-The request must already provide appropriate generic routing information such
-as:
-
-```text
+OperationId
+PlanId
+PlanVersion
+NodeId
+AttemptId
+MessageId
+CorrelationId
+EngineId
+EngineInstanceId
 CapabilityId
 ContractId
-logical destination
-routing constraints
 ```
 
-The payload remains application/domain data.
-
-Therefore:
+Observability should permit causal chains such as:
 
 ```text
-Request metadata
-→ routing information
-
-Payload
-→ application semantics
+Operation X
+→ Plan P:v3
+→ CapabilityRequirement R
+→ Provider A
+→ EngineInstance A-02
+→ Attempt 2
+→ Transport
+→ Runtime
 ```
+
+The Control Plane MUST NOT create a separate observability system.
 
 ---
 
-### Capability Semantics Boundary
+### Provenance
 
-The Control Plane knows enough capability metadata to route correctly.
-
-It does not know:
+The Control Plane/common communication layer preserves protocol/execution provenance such as:
 
 ```text
-what the capability implementation does
-how the algorithm works
-how the engine stores its data
-how domain reasoning works
+operation
+attempt
+engine
+capability
+message
+timestamp
+source/version metadata
 ```
+
+Domain-specific provenance remains owned by the relevant engine.
+
+A Control Plane route does not become a domain provenance authority.
+
+---
+
+### Artifacts and Large Results
+
+The Control Plane may carry artifact references for large/reusable results.
+
+The architectural distinction remains:
+
+```text
+inline payload
+vs
+ArtifactReference
+```
+
+The Control Plane does not become:
+
+```text
+artifact database
+artifact store
+artifact retrieval service
+```
+
+Large semantic results may remain represented by references where appropriate.
+
+---
+
+### Configuration and Policy Coordination
+
+The Control Plane may coordinate ecosystem-level configuration and policy distribution.
+
+It may:
+
+```text
+discover global configuration
+distribute relevant global configuration
+propagate relevant policy versions
+coordinate configuration lifecycle
+coordinate global secret references
+report configuration state
+```
+
+It must NOT own every engine's internal configuration.
+
+Global configuration should be predominantly reference/constraint-oriented:
+
+```text
+IDs
+references
+defaults
+constraints
+routing metadata
+policy references
+```
+
+Engine-local configuration remains engine-owned.
+
+---
+
+### Configuration Validation
+
+Two validation layers remain distinct.
+
+Global/distribution validation:
+
+```text
+structural validity
+authorization
+version validity
+target compatibility
+distribution constraints
+```
+
+Engine semantic validation:
+
+```text
+engine-specific configuration meaning
+internal parameter compatibility
+provider/backend-specific validity
+domain-specific configuration rules
+```
+
+The Control Plane MUST NOT interpret domain-specific configuration semantics.
+
+---
+
+### Secrets
+
+The Control Plane may coordinate authorized secret references but MUST NOT normally propagate raw secrets between engines.
 
 The boundary is:
 
 ```text
-metadata
-✅
+Control Plane
+→ identity/security/context/reference
 
-domain semantics
-❌
+Secret System
+→ secret retrieval
+
+Engine
+→ least-privilege secret consumption
 ```
+
+The Control Plane MUST NOT become a global secret store or broadcast every engine credential.
+
+---
+
+### Billing and Accounting Context
+
+Where an operation has accounting/billing context, the Control Plane may propagate authorized metadata such as:
+
+```text
+billing principal
+reservation/authorization reference
+policy version
+operation/accounting context
+```
+
+It does not become the billing authority.
+
+The global billing/catalog system remains authoritative for pricing, budgets and accounting policy.
+
+Cost may be one routing signal when explicitly included in routing policy, but cost alone does not become the routing authority.
+
+---
+
+### Local vs Global Policy
+
+Global policy may constrain ecosystem coordination:
+
+```text
+communication authorization
+residency restrictions
+global safety constraints
+global routing constraints
+billing admission constraints
+```
+
+Engine-local policy remains engine-owned:
+
+```text
+Arabic fallback policy
+Quran local strategy
+KG traversal policy
+Indexing selection strategy
+engine-specific workflow decisions
+```
+
+The Control Plane MUST NOT reinterpret engine-local policy.
+
+---
+
+### Security of Context and Secrets
+
+Security context, billing context and operation metadata may cross engine boundaries where authorized.
+
+Raw secrets should normally remain local to the component that consumes them.
+
+The Control Plane MUST NOT use the existence of a route as permission to expose unrelated credentials or sensitive internal state.
+
+---
+
+### Capability Ownership
+
+Capability advertisement is declarative.
+
+An engine instance may advertise multiple capabilities.
+
+A capability may be advertised by multiple logical engines when their advertised contracts and metadata are compatible.
+
+The Control Plane treats advertisements as routing/coordination metadata.
+
+Capability correctness remains the engine's responsibility.
+
+---
+
+### Direct Inter-Engine Communication
+
+The Control Plane is not a mandatory proxy for every engine-to-engine message.
+
+A typical communication topology may be:
+
+```text
+Hadith Engine
+      │
+      │ secure universal RPC
+      ▼
+Quran Engine
+```
+
+with the Control Plane providing the necessary:
+
+```text
+identity
+routing information
+contract information
+security policy
+context
+communication lifecycle
+observability
+coordination state
+```
+
+This avoids making the Control Plane a business-message bottleneck.
+
+The Control Plane may participate in resolution/control without physically carrying every application message.
+
+---
+
+### Established Interaction Stability
+
+Once a communication interaction is established, later Control Plane membership/policy changes MUST NOT silently rewrite that interaction.
+
+For example:
+
+```text
+route selected → Engine A
+Engine A remains the established destination
+later policy change → does not retroactively move the active interaction
+```
+
+New attempts may be resolved using newer routing state when their semantics permit it.
+
+---
+
+### Concurrency
+
+The Control Plane must safely support concurrent:
+
+```text
+admission
+resolution
+routing
+registration
+membership updates
+policy updates
+```
+
+Routing decisions should use coherent state snapshots.
+
+The implementation MUST avoid data races, inconsistent multi-map reads and accidental cross-version routing state.
+
+---
+
+### Resource Bounds
+
+The Control Plane MUST avoid implicit unbounded growth.
+
+Any internal queue, cache, pending-resolution structure, subscription-like mechanism or background activity introduced by Phase 15 must have explicit lifecycle/resource semantics.
+
+The Control Plane MUST NOT become an unbounded asynchronous work sink.
+
+---
+
+### Lifecycle Integration
+
+Phase 8 remains authoritative over Engine Runtime lifecycle.
+
+Phase 15 consumes lifecycle information for routing eligibility.
+
+Conceptually:
+
+```text
+Engine Runtime
+→ lifecycle truth
+
+Control Plane
+→ routing eligibility based on lifecycle truth
+```
+
+Normal new work should not be routed to destinations excluded by applicable lifecycle state.
+
+The Control Plane MUST NOT create a competing engine lifecycle machine.
+
+---
+
+### Graceful Shutdown
+
+Control Plane and routing resources must participate in existing Core shutdown semantics.
+
+On shutdown:
+
+```text
+stop admitting new Control Plane work
+→ finish/cancel in-flight control operations according to contract
+→ stop background coordination work
+→ release resources
+```
+
+Engine-local work remains under the Engine Runtime's lifecycle.
+
+---
+
+### Deployment and Scaling
+
+The Control Plane is logically one Nizaam coordination system.
+
+It may be deployed as:
+
+```text
+one instance
+or
+multiple Control Plane instances
+```
+
+The architecture MUST NOT require the logical Control Plane to be a single physical process.
+
+If multiple instances are deployed, their coordination state must still obey the same logical consistency rules.
+
+The exact deployment topology/provider remains an implementation choice.
+
+---
+
+### Control Plane Persistence
+
+Durable persistence of Control Plane state is not assumed merely because the logical Control Plane may have multiple instances.
+
+Where persistence is introduced, it must be explicitly justified and remain limited to Control Plane-owned coordination state.
+
+The Control Plane MUST NOT become the persistence owner for:
+
+```text
+domain state
+engine-local workflow state
+domain artifacts
+provider backend state
+```
+
+---
+
+### Reliability Boundaries
+
+The Control Plane may participate in:
+
+```text
+provider failover
+destination rerouting for new attempts
+communication recovery
+cached capability resolution
+configuration coordination
+```
+
+but it does not automatically own:
+
+```text
+semantic retry
+domain fallback
+domain degradation
+domain recovery strategy
+engine-local circuit-breaker policy
+engine-local worker scheduling
+```
+
+Those remain with the appropriate engine/runtime/policy subsystem.
+
+---
+
+### Control Plane and Engine Runtime
+
+There are two different admissions:
+
+```text
+Control Plane admission
+→ may this logical interaction enter the communication/routing path?
+
+Engine Runtime admission
+→ can this selected engine instance accept the actual execution?
+```
+
+A routing success does not guarantee runtime acceptance.
+
+This state is valid:
+
+```text
+Control Plane
+→ Engine A appears eligible
+
+Engine A
+→ becomes DRAINING
+
+request reaches A
+
+Engine Runtime
+→ rejects new work
+```
+
+The Control Plane MUST NOT override that decision.
+
+---
+
+### Control Plane and Governing Engines
+
+A governing engine, such as an Aqeedah engine where applicable, owns domain governance of candidate outputs.
+
+```text
+Candidate Output
+      ↓
+Governing Engine
+      ↓
+GovernanceResult
+```
+
+The Control Plane transports the governance interaction.
+
+It does not decide:
+
+```text
+accepted
+rejected
+insufficient evidence
+requires review
+```
+
+as a domain judgment.
+
+Governance outcomes remain distinct from communication success/failure.
+
+---
+
+### Control Plane and Domain Completion
+
+The Control Plane may know:
+
+```text
+request delivered
+response received
+stream ended
+timeout
+communication failed
+```
+
+It MUST NOT decide:
+
+```text
+Hadith evidence is sufficient
+Quran answer is complete
+Fiqh reasoning is finished
+Aqeedah interpretation is correct
+```
+
+These are domain/engine decisions.
+
+---
+
+### Control Plane and Domain Payloads
+
+The Control Plane may route opaque capability payloads under a common contract.
+
+It MUST NOT change the semantic meaning of the application payload.
+
+The invariant is:
+
+```text
+Routing metadata
+→ may change
+
+Application payload semantics
+→ do not change
+```
+
+Domain payload structures remain outside the generic semantics of Control Plane.
+
+---
+
+### Interaction with Infrastructure Engines
+
+Infrastructure engines participate in the same Control Plane.
+
+Examples:
+
+```text
+Domain Engine
+→ CapabilityRequirement
+→ Control Plane
+→ Infrastructure Engine
+→ infrastructure-local planning
+→ infrastructure execution
+```
+
+For Indexing:
+
+```text
+Control Plane
+→ indexing capability required
+→ Indexing Engine
+→ Indexing-local planner
+→ index selection/retrieval/build/update
+```
+
+For KG:
+
+```text
+Control Plane
+→ KG capability required
+→ KG Engine
+→ KG-local planner
+→ traversal/inference/execution
+```
+
+Infrastructure engines MUST NOT embed a second global Control Plane.
+
+Their local planners remain responsible for their specialized internal execution strategies.
+
+---
+
+### Interaction with Indexing
+
+The Control Plane must understand generic capability/provider requirements such as:
+
+```text
+semantic similarity
+language constraint
+domain/reference metadata
+top_k
+relationship requirements
+lexical requirements
+```
+
+when these are expressed through generic contracts.
+
+It MUST NOT choose physical indexing algorithms.
+
+The Indexing Engine remains responsible for:
+
+```text
+index selection
+index strategy
+physical implementation
+build/update/rebuild
+ranking
+retrieval execution
+```
+
+---
+
+### Interaction with KG
+
+The Control Plane may route:
+
+```text
+entity operations
+claim operations
+relationship queries
+evidence requests
+graph queries
+governance-related KG requests
+```
+
+as capability-level interactions.
+
+It MUST NOT implement:
+
+```text
+ontology logic
+graph traversal
+inference rules
+entity-resolution semantics
+KG curation
+knowledge truth
+```
+
+These remain KG responsibilities.
+
+---
+
+### Communication Ownership Summary
+
+```text
+Registry
+→ discovery/metadata
+
+Control Plane
+→ resolve/coordinate/route
+
+Transport
+→ move messages
+
+Engine Runtime
+→ admit and execute locally
+
+Capability
+→ perform semantic work
+
+Governing Engine
+→ govern relevant outputs
+```
+
+This ownership model is mandatory throughout Phase 15.
 
 ---
 
 ### Explicit Non-Goals
 
-Phase 15 must not become:
+Phase 15 does not implement:
 
-* a planner;
-* a workflow engine;
-* a reasoning engine;
-* a model inference engine;
-* a domain execution engine;
-* a business-logic router;
-* a distributed consensus system;
-* a service-mesh replacement;
-* a transport implementation;
-* a frame-routing system;
-* a stream scheduler;
-* a retry system;
-* an idempotency system;
-* an artifact store;
-* an artifact resolver;
-* an observability platform;
-* an event broker;
-* a durable runtime-membership database.
+```text
+domain workflows
+domain reasoning
+domain inference
+domain algorithms
+domain governance
+engine-internal planning
+engine-local scheduling
+worker management
+database implementation
+physical indexing algorithms
+provider backend implementation
+application-facing REST APIs
+Engine SDK
+```
 
-Phase 15 provides Core routing and control-plane mechanisms only.
+Phase 15 does implement the shared mechanisms necessary to coordinate and communicate with those components.
 
 ---
 
@@ -13368,175 +13914,194 @@ Phase 15 provides Core routing and control-plane mechanisms only.
 
 **Control Plane**
 
-* `src/control/mod.rs`
-* `src/control/plane.rs`
-* `src/control/admission.rs`
-* `src/control/registration.rs`
-* `src/control/membership.rs`
-* `src/control/resolution.rs`
-* `src/control/routing.rs`
-* `src/control/policy.rs`
+```text
+src/control_plane/mod.rs
+src/control_plane/plane.rs
+src/control_plane/admission.rs
+src/control_plane/registration.rs
+src/control_plane/membership.rs
+src/control_plane/contract.rs
+src/control_plane/capability.rs
+src/control_plane/provider.rs
+src/control_plane/dependency.rs
+src/control_plane/plan.rs
+src/control_plane/replanning.rs
+src/control_plane/resolution.rs
+src/control_plane/destination.rs
+src/control_plane/policy.rs
+src/control_plane/routing.rs
+src/control_plane/context.rs
+src/control_plane/failure.rs
+src/control_plane/lifecycle.rs
+```
 
-**Routing identity**
+**Related Core systems**
 
-* `src/identity/`
-* `src/engine/`
+```text
+src/identity/
+src/contracts/
+src/operation/
+src/capability/
+src/runtime/
+src/security/
+src/transport/
+src/client/
+src/server/
+src/health/
+src/observability/
+src/provenance/
+src/artifact/
+src/streaming/
+src/retry/
+src/idempotency/
+src/events/
+src/middleware/
+src/config/
+```
 
-**Related contracts**
+Phase 15 may integrate with these existing systems, but MUST NOT duplicate them.
 
-* `src/contracts/`
-* `src/capability/`
+`resolution.rs` owns composition of:
 
-**Runtime integration**
+```text
+capability
+provider
+contract
+context
+destination
+policy
+```
 
-* `src/runtime/`
-* `src/operation/`
-* `src/middleware/`
-
-**Related systems**
-
-* `src/security/`
-* `src/health/`
-* `src/observability/`
-* `src/transport/`
-* `src/streaming/`
-* `src/retry/`
-* `src/idempotency/`
-* `src/artifact/`
-* `src/provenance/`
-* `src/events/`
-
-**Tests**
-
-* `tests/control_plane.rs`
-* `tests/routing.rs`
-* `tests/registration.rs`
-* `tests/integration.rs`
-* `tests/conformance.rs`
-
-Exact filenames may be adjusted if the repository already provides equivalent
-modules. The architectural boundaries defined in this phase must remain.
+rather than becoming a second global execution system.
 
 ---
 
-### Boundary
+### Testing Requirements
 
-The Control Plane owns:
+Testing follows the repository's three-level architecture.
+
+#### Level 1: source-file unit tests
+
+Every Phase 15 implementation source file must contain unit tests covering:
 
 ```text
-system-level admission
-contract identification/compatibility
-capability identification
-engine registration membership
-destination eligibility
-routing policy
-destination selection
-routing context propagation
-routing-state management
-routing failure reporting
+constructors
+validation paths
+state transitions
+success paths
+failure paths
+edge cases
+relevant ownership/lifecycle behavior
 ```
 
-The Control Plane does NOT own:
+The minimum relevant areas are:
 
 ```text
-engine execution
-capability implementation
-domain semantics
-workflow planning
-retry decisions
-stream lifecycle
-transport framing
-artifact management
-security framework
-health observation
-observability infrastructure
+admission
+registration
+membership
+contract compatibility
+capability resolution
+provider resolution
+dependency handling
+plan construction
+plan versioning
+replanning
+destination semantics
+policy
+routing
+context propagation
+failure classification
+lifecycle integration
 ```
 
-The final responsibility boundary is:
+#### Level 2: `control_plane/mod.rs`
+
+Module-level composition tests must cover:
 
 ```text
-WHAT?
-→ Caller / Planner / Capability Contract
+registration
+→ membership
+→ capability/contract resolution
+→ provider resolution
+→ destination eligibility
+→ policy
+→ routing
+→ global coordination
+```
 
-WHERE?
-→ Control Plane
+These remain module-level tests, not repository integration tests.
 
-HOW?
-→ Transport + Engine Runtime
+#### Level 3: `tests/`
 
-CAN NOW?
-→ Engine Runtime
+Use repository-level integration tests for:
 
-WHAT DOES IT ACTUALLY DO?
-→ Capability
+```text
+tests/control_plane.rs
+tests/registration.rs
+tests/routing.rs
+tests/phase15_end_to_end.rs
+tests/conformance.rs
+```
+
+Use the repository's existing equivalent files when they already exist.
+
+Do not move event-module tests into `events/*.rs` as integration tests. Event integration remains in the repository-level `tests/` structure.
+
+---
+
+### Required Integration Test Topology
+
+Create a deterministic multi-engine fixture with examples such as:
+
+```text
+ArabicEngine
+├── arabic-01
+├── arabic-02
+└── arabic-03
+
+QuranEngine
+├── quran-01
+└── quran-02
+
+HadithEngine
+└── hadith-01
+
+KGEngine
+└── kg-01
+
+IndexingEngine
+├── index-01
+└── index-02
+```
+
+The fixture must verify:
+
+```text
+one logical engine → multiple instances
+one instance → multiple capabilities
+one capability → multiple logical engines
+different providers
+different contracts
+different versions
+readiness changes
+membership changes
+policy changes
+logical destinations
+explicit destinations
+hard destinations
+preferences
+fallback
+per-attempt routing
+dynamic capability requirements
+plan version changes where global coordination changes
 ```
 
 ---
 
-### Done when
+### Mandatory Behavioral Test Matrix
 
-A test engine or Core fixture can:
-
-1. accept an incoming logical request through the Control Plane;
-2. perform system-level admission;
-3. preserve the established security context;
-4. identify the requested contract;
-5. resolve/filter compatible contract versions;
-6. identify the requested capability;
-7. distinguish capability identification from executable capability resolution;
-8. register a logical engine and concrete engine instance;
-9. validate engine registration structurally;
-10. maintain routing membership independently from engine lifecycle ownership;
-11. distinguish `EngineId` from `EngineInstanceId`;
-12. support one logical engine with multiple runtime instances;
-13. support multiple capabilities on one engine instance;
-14. support a capability being advertised by multiple logical engines;
-15. determine destination eligibility before selection;
-16. incorporate engine readiness into routing eligibility;
-17. incorporate capability readiness where applicable;
-18. incorporate contract compatibility into routing eligibility;
-19. incorporate security/routing constraints into eligibility;
-20. select a concrete `EngineInstanceId` according to an explicit routing policy;
-21. support logical destinations;
-22. support explicit concrete destinations;
-23. distinguish hard destinations from preferences;
-24. prevent fallback for hard destinations unless explicitly permitted;
-25. permit fallback among eligible destinations for logical/preference-based
-    routing;
-26. make routing decisions per execution attempt;
-27. permit later retries to resolve a different destination without making
-    routing responsible for retry decisions;
-28. preserve an attempt's selected destination after routing-policy changes;
-29. preserve an attempt's selected destination after registration changes;
-30. use coherent routing state for each destination decision;
-31. support concurrent routing decisions and membership updates safely;
-32. prevent implicit indefinite waiting when no destination is available;
-33. prevent implicit indefinite request queueing;
-34. propagate operation, correlation, security, tracing, deadline, cancellation,
-    and provenance context where applicable;
-35. preserve the distinction between all Core identity types;
-36. route logical requests rather than transport frames;
-37. avoid changing application payload semantics during routing;
-38. keep established application streams associated with their selected
-    execution destination;
-39. distinguish routing failures from transport failures;
-40. distinguish Control Plane failure from destination unavailability;
-41. distinguish routing failure from Engine Runtime rejection;
-42. preserve causal failure information;
-43. expose enough routing information for Phase 11 observability;
-44. optionally integrate with Phase 14 internal events without making events
-    the authoritative routing mechanism;
-45. integrate with Phase 10 artifact references without becoming the artifact
-    system;
-46. integrate with Phase 13 retries without owning retry policy;
-47. integrate with Phase 8 lifecycle without creating a competing lifecycle
-    state machine;
-48. maintain routing behavior without requiring durable runtime membership;
-49. remain independent of whether the logical Control Plane is deployed as one
-    or multiple instances;
-50. preserve all previously verified Core behavior.
-
-Unit tests and integration tests must cover:
+Tests MUST cover:
 
 ```text
 Control Plane admission
@@ -13544,6 +14109,8 @@ security boundary integration
 contract identification
 contract compatibility
 capability identification
+capability resolution
+provider resolution
 registration validation
 logical engine identity
 engine-instance identity
@@ -13568,7 +14135,11 @@ explicit destination handling
 logical destination handling
 concurrent routing
 concurrent membership updates
-context propagation
+global coordination-plan construction
+global plan versioning
+dynamic requirement handling
+replanning boundaries
+context acquisition/propagation
 routing/transport separation
 routing/frame separation
 routing/streaming separation
@@ -13580,1794 +14151,269 @@ transport failure classification
 engine rejection handling
 error causality
 observability integration
+provenance propagation
+configuration/policy distribution boundaries
 planner/workflow boundary
 domain-payload boundary
+governance boundary
 shutdown integration
 ```
 
 ---
 
-### Architectural Invariant
+### Critical Negative Tests
 
-The central Phase 15 invariant is:
+The implementation must explicitly prove that:
 
 ```text
+Control Plane does not invoke capability handlers
+Control Plane does not perform domain reasoning
+Control Plane does not become the domain workflow owner
+Control Plane does not bypass security
+Control Plane does not route individual transport frames
+Control Plane does not silently rewrite application payload semantics
+Control Plane does not own domain completion
+Control Plane does not replace the Engine Runtime admission decision
+Control Plane does not become the artifact store
+Control Plane does not become the retry policy owner
+Control Plane does not become the event system's authoritative state
+Control Plane does not require itself as a proxy for every engine-to-engine message
+Control Plane does not expose raw unrelated engine secrets
+```
+
+---
+
+### Phase 15 Done When
+
+A deterministic Core test fixture can:
+
+1. accept a logical inter-engine request;
+2. perform Control Plane admission;
+3. preserve applicable security context;
+4. identify the contract;
+5. resolve/filter compatible contract versions;
+6. identify the requested capability;
+7. resolve a compatible provider where applicable;
+8. distinguish capability identification from executable capability resolution;
+9. accept and validate engine registration;
+10. distinguish logical `EngineId` from concrete `EngineInstanceId`;
+11. maintain routing membership independently from Engine Runtime lifecycle ownership;
+12. support multiple instances for one logical engine;
+13. support multiple capabilities on one instance;
+14. support one capability advertised by multiple logical engines;
+15. determine destination eligibility before selection;
+16. incorporate engine readiness;
+17. incorporate capability readiness where applicable;
+18. incorporate contract compatibility;
+19. incorporate provider compatibility;
+20. incorporate security/routing constraints;
+21. select a concrete `EngineInstanceId` according to explicit routing policy;
+22. support logical destinations;
+23. support explicit concrete destinations;
+24. distinguish hard destinations from preferences;
+25. enforce explicit fallback semantics;
+26. resolve destinations per authorized execution attempt;
+27. permit a later authorized attempt to resolve a different destination;
+28. preserve an already-issued attempt destination across later policy changes;
+29. preserve an already-issued attempt destination across later registration changes;
+30. maintain coherent routing state under concurrent membership/routing activity;
+31. reject rather than indefinitely wait when no destination is available;
+32. reject rather than silently enqueue indefinitely;
+33. establish and update an engine-agnostic global coordination state where required;
+34. represent plan identity/version distinctly from operation/attempt identity;
+35. accept capability-level dependency/requirement information from an engine;
+36. update global coordination state when a new inter-engine requirement materially changes it;
+37. keep engine-internal workflow details outside the global plan;
+38. propagate operation/correlation/security/tracing/deadline/cancellation/provenance context where applicable;
+39. route logical requests rather than transport frames;
+40. preserve established stream destination;
+41. distinguish communication retry primitives from semantic retry policy;
+42. distinguish routing failure from transport failure;
+43. distinguish Control Plane failure from destination unavailability;
+44. distinguish routing success from Engine Runtime rejection;
+45. preserve failure causality;
+46. expose enough routing/control information to Phase 11 observability;
+47. use Phase 14 events only as optional notifications, not as authoritative routing state;
+48. carry Phase 10 artifact references without owning artifact storage;
+49. integrate with Phase 13 retries without owning retry policy;
+50. integrate with Phase 8 lifecycle without creating a competing lifecycle state machine;
+51. coordinate ecosystem-level configuration/policy references without owning engine-local configuration;
+52. avoid propagating raw unrelated secrets;
+53. remain independent of whether the logical Control Plane is deployed as one or multiple instances;
+54. preserve existing established interactions where safe during temporary Control Plane/Registry unavailability;
+55. preserve all previously verified Core behavior.
+
+---
+
+### Architectural Invariants
+
+The central invariant is:
+
+```text
+Global Coordination
+→ shallow, engine-agnostic capability/engine coordination
+
+Local Engine Planning
+→ internal workflow
+
 Control Plane
-→ WHERE
+→ secure resolution, coordination, routing and communication control
 
 Engine Runtime
-→ CAN / HOW
+→ local admission + local execution
 
 Capability
-→ WHAT
+→ semantic operation
+
+Governing Engine
+→ domain result governance
 ```
 
 Therefore:
 
 ```text
 Control Plane ≠ Engine Runtime
-Control Plane ≠ Security
-Control Plane ≠ Retry
-Control Plane ≠ Transport
-Control Plane ≠ Streaming
-Control Plane ≠ Workflow
-Control Plane ≠ Domain Logic
+Control Plane ≠ Security System
+Control Plane ≠ Retry Policy
+Control Plane ≠ Transport Framing
+Control Plane ≠ Streaming Engine
+Control Plane ≠ Artifact System
+Control Plane ≠ Event System
+Control Plane ≠ Domain Workflow
+Control Plane ≠ Domain Execution
+Control Plane ≠ Domain Governance
 
 EngineId ≠ EngineInstanceId
-
-Routing ≠ Retry
-Routing ≠ Health
-Routing ≠ Transport
-Routing ≠ Streaming
-
-Logical Request ≠ Transport Frame
+PlanId ≠ PlanVersion
+PlanId ≠ OperationId
+OperationId ≠ AttemptId
+OperationId ≠ MessageId
 
 Capability Identification ≠ Capability Execution
-```
-
-The Control Plane must remain a **routing and control boundary**, not become the
-place where Nizaam starts thinking, planning, executing domain logic, or
-managing application workflows.
-
----
-
-## Phase 16: Engine SDK
-
-### Goal
-
-Provide a stable, curated, engine-facing development interface over Core so
-engine authors can build engines without depending directly on Core's
-implementation internals.
-
-The Engine SDK is an API-ergonomics and compatibility boundary.
-
-It simplifies correct Core usage, hides unstable implementation details,
-provides safe defaults, exposes supported extension points, and preserves the
-semantics established by earlier Core phases.
-
-The Engine SDK MUST NOT create a second runtime, redefine Core semantics, or
-replace any existing Core subsystem.
-
-The fundamental architecture is:
-
-```text
-Engine Developer
-       ↓
-   Engine SDK
-       ↓
-      Core
-````
-
-Core remains the actual infrastructure and execution authority.
-
----
-
-### SDK Audience and Trust Boundary
-
-The Engine SDK is intended primarily for:
-
-```text
-Engine authors
-Engine integration developers
-Engine test fixtures
-```
-
-It is NOT the universal SDK for the Nizaam ecosystem.
-
-The following are separate:
-
-```text
-Internal Core API
-→ used by Nizaam/Core implementation
-
-Engine SDK API
-→ supported interface for engine implementations
-
-External API
-→ public API used by application/client consumers
-```
-
-Therefore:
-
-```text
-External API
-≠
-Engine SDK
-≠
-Internal Core API
-```
-
-The Go API does not depend on the Rust Engine SDK.
-
-The future Database does not have to use the Engine SDK and may use Core
-directly where its infrastructure role requires it.
-
----
-
-### Core Team Direct Access
-
-The Nizaam Core team/application code is an internal trusted consumer of Core.
-
-Nizaam-owned components may directly import and use Core internals when
-implementing or adapting engines, infrastructure, or future Core-level
-components, subject to the repository's internal architecture and ownership
-rules.
-
-This direct Core access is separate from the Engine SDK contract.
-
-Conceptually:
-
-```text
-Nizaam-owned implementation
-        ↓
-      Core
-```
-
-and:
-
-```text
-Third-party / external engine implementation
-        ↓
-   Engine SDK
-        ↓
-      Core
-```
-
-The ability of Nizaam-owned code to directly use or modify Core MUST NOT cause
-those internals to become part of the stable Engine SDK API.
-
----
-
-### SDK Restriction Model
-
-The Engine SDK MUST expose only supported engine-facing functionality.
-
-SDK consumers MUST NOT receive a supported API for replacing or mutating
-Core's internal mechanisms such as:
-
-```text
-runtime state machine
-routing tables
-Control Plane internals
-transport framing
-connection management
-task registry
-cancellation engine
-stream internals
-retry engine
-idempotency storage
-health aggregation
-event delivery machinery
-artifact storage internals
-provenance storage internals
-observability provider internals
-```
-
-The restriction is architectural and API-level.
-
-The SDK must not expose public extension points whose purpose is to replace
-these internal Core mechanisms.
-
-The SDK may expose controlled configuration or extension hooks where Core
-explicitly supports them.
-
----
-
-### Direct Core Access Boundary
-
-The normal Engine SDK API MUST be sufficient for ordinary engine development.
-
-Direct access to Core internals is not part of the supported Engine SDK
-contract.
-
-If an infrastructure-grade Nizaam component genuinely requires lower-level
-Core functionality, it may use Core directly as an internal Nizaam component
-rather than weakening the SDK abstraction for every engine.
-
-The architecture therefore distinguishes:
-
-```text
-supported SDK extension
-≠
-internal Core customization
-```
-
----
-
-### SDK as Facade
-
-The Engine SDK is a facade over Core.
-
-It provides:
-
-```text
-stable public abstractions
-developer ergonomics
-safe defaults
-controlled extension points
-Core invariant enforcement
-```
-
-It does NOT provide:
-
-```text
-new runtime semantics
-new lifecycle semantics
-new cancellation semantics
-new streaming semantics
-new retry semantics
-new event semantics
-new health semantics
-new artifact semantics
-new provenance semantics
-```
-
-The rule is:
-
-> The SDK hides complexity, not semantics.
-
----
-
-### Stable SDK Concepts
-
-The SDK should expose a curated set of stable engine-facing concepts such as:
-
-```text
-Engine
-Capability
-Request
-Response
-Context
-Stream
-Configuration
-Health
-Error
-ArtifactReference
-Event integration
-Observability integration
-```
-
-These concepts must map to the corresponding Core semantics.
-
-The SDK MUST NOT automatically expose every public Core struct.
-
----
-
-### Hidden Core Mechanisms
-
-The following remain implementation details unless explicitly promoted into
-the stable SDK contract:
-
-```text
-runtime state machine internals
-routing tables
-Control Plane membership state
-transport frames
-frame fragmentation
-transport connection internals
-buffer management
-task registry
-retry state machine
-idempotency storage
-health aggregation implementation
-event queues
-artifact storage implementation
-provenance storage implementation
-observability provider internals
-```
-
-Internal types may change without requiring an Engine SDK breaking change.
-
----
-
-### API Surface Curability
-
-The SDK MUST remain intentionally smaller than Core.
-
-Core may expose many low-level mechanisms internally.
-
-The SDK should expose only the functionality required for supported engine
-development.
-
-The SDK MUST NOT become an automatically generated wrapper around every Core
-type.
-
-Conceptually:
-
-```text
-Core
-→ broad infrastructure API
-
-Engine SDK
-→ small curated engine API
-```
-
----
-
-### Engine Builder
-
-The SDK MUST provide a structured mechanism for defining an engine.
-
-Conceptually:
-
-```rust
-Engine::builder(...)
-```
-
-or an equivalent builder/factory API.
-
-The engine definition may include:
-
-```text
-engine identity
-engine metadata
-capabilities
-configuration
-lifecycle hooks
-supported extension points
-```
-
-The exact type and method names remain an implementation decision.
-
-The SDK MUST NOT allow engine construction to bypass the Core Runtime
-lifecycle.
-
----
-
-### Capability Registration
-
-The SDK MUST provide an ergonomic capability-registration mechanism.
-
-Conceptually:
-
-```rust
-engine.capability(...)
-```
-
-or:
-
-```rust
-register_capability(...)
-```
-
-The SDK may support typed registration such as:
-
-```rust
-register_capability::<Request, Response>(handler)
-```
-
-where practical.
-
-Typed SDK APIs SHOULD provide:
-
-```text
-compile-time request/response checking
-IDE support
-reduced manual conversion
-reduced runtime validation
-```
-
-while Core continues to support the universal contract model.
-
----
-
-### Capability Semantics
-
-The SDK exposes the stable capability contract.
-
-It does not expose Core's internal dispatch tables or registry implementation.
-
-The relationship is:
-
-```text
-Engine author
-→ implements capability
-
-SDK
-→ adapts capability to Core
-
-Core
-→ resolves/dispatches/execut es capability
-```
-
-The SDK MUST NOT move domain semantics into Core merely for developer
-convenience.
-
----
-
-### Request and Response
-
-The SDK MUST provide an ergonomic request/response API.
-
-Engine developers should work primarily with:
-
-```text
-Request
-Response
-Context
-```
-
-rather than:
-
-```text
-transport frames
-connection objects
-routing metadata internals
-serialization buffers
-internal envelopes
-```
-
-Where Core already provides universal request/response types, the SDK SHOULD
-prefer ergonomic views/adapters over unnecessary duplicate protocol types.
-
----
-
-### Universal Request / Response Boundary
-
-Core may use:
-
-```text
-UniversalRequest
-UniversalResponse
-```
-
-internally.
-
-The SDK should not require engine authors to manually construct or manipulate
-all universal envelope/protocol details.
-
-The SDK may expose stable request/response wrappers or views.
-
-Duplicate types MUST only be introduced when they provide a clear stable API
-benefit and have an explicit mapping to Core semantics.
-
----
-
-### Contract Exposure
-
-The SDK MUST expose enough contract information for an engine author to define
-a valid capability.
-
-It SHOULD avoid exposing low-level contract-construction machinery such as:
-
-```text
-raw descriptor internals
-internal envelope representation
-registry implementation
-dispatch metadata internals
-```
-
-unless that information is intentionally part of the stable engine-facing
-contract.
-
-The SDK should expose the minimum contract surface necessary for supported
-engine development.
-
----
-
-### Serialization Boundary
-
-The SDK MUST NOT become an independent serialization framework.
-
-Engine authors should be able to work with typed request/response values where
-the contract supports typed APIs.
-
-Core/contract infrastructure remains responsible for the actual protocol and
-serialization representation.
-
-Conceptually:
-
-```text
-Engine typed value
-      ↓
-Engine SDK
-      ↓
-Core contract/serialization
-      ↓
-universal representation
-```
-
----
-
-### Context API
-
-The SDK MUST expose a controlled engine-facing view of operation context.
-
-The API may expose:
-
-```text
-operation identity
-correlation identity
-deadline
-cancellation state
-security context where permitted
-tracing context where permitted
-other explicitly supported context
-```
-
-The SDK MUST NOT expose mutable internal context state.
-
-Foundational values such as:
-
-```text
-OperationId
-CorrelationId
-security principal
-deadline
-```
-
-must not be arbitrarily mutable by capability code.
-
----
-
-### Context Semantics
-
-The SDK context is primarily read-oriented.
-
-Where derived context is supported, derivation must follow Core semantics.
-
-The SDK MUST NOT allow engine code to silently replace foundational operation
-identity or authorization state.
-
----
-
-### Lifecycle API
-
-The SDK MUST expose convenient engine lifecycle hooks without implementing a
-second lifecycle state machine.
-
-Possible hooks include:
-
-```text
-initialize
-start
-ready
-shutdown
-```
-
-These hooks map to the existing Core Runtime lifecycle.
-
-The authoritative lifecycle remains:
-
-```text
-Core Runtime
-```
-
-not:
-
-```text
-SDK Runtime
-```
-
----
-
-### Runtime Ownership
-
-The Engine SDK MUST NOT create its own runtime.
-
-Conceptually:
-
-```text
-Engine
-   ↓
-SDK
-   ↓
-Core Runtime
-```
-
-not:
-
-```text
-Engine
-   ↓
-SDK Runtime
-   +
-Core Runtime
-```
-
-There must not be competing systems for:
-
-```text
-lifecycle
-task ownership
-cancellation
-streaming
-shutdown
-```
-
----
-
-### Managed Tasks
-
-The SDK MUST expose a supported mechanism for engine-owned background work
-through the Core-managed task system.
-
-Conceptually:
-
-```text
-engine.spawn_task(...)
-```
-
-or:
-
-```text
-ctx.spawn(...)
-```
-
-The exact API remains an implementation choice.
-
-The supported mechanism must integrate with:
-
-```text
-ownership
-cancellation
-shutdown
-resource limits
-```
-
-The normal SDK API SHOULD NOT encourage detached unmanaged tasks.
-
----
-
-### Async Execution
-
-The SDK MUST support the asynchronous execution model used by Core.
-
-Capability handlers may need asynchronous execution because engines may perform:
-
-```text
-database work
-network requests
-artifact reads
-model inference
-other engine calls
-```
-
-The exact trait signature remains an implementation decision.
-
-The SDK MUST NOT require engine developers to manually manage Core runtime
-internals merely to implement asynchronous capabilities.
-
----
-
-### Blocking / CPU-Heavy Work
-
-The SDK SHOULD provide a supported mechanism for engines to execute blocking or
-CPU-intensive work without unnecessarily blocking the main Core execution path.
-
-This is particularly relevant to engines performing:
-
-```text
-Arabic analysis
-ML inference
-embedding generation
-large graph processing
-other CPU-heavy computation
-```
-
-The actual executor/thread-pool mechanism remains a Core/Runtime concern.
-
----
-
-### Cancellation
-
-The SDK MUST provide convenient access to Core cancellation semantics.
-
-Conceptually:
-
-```text
-execute(context, request)
-```
-
-with controlled access to:
-
-```text
-ctx.is_cancelled()
-```
-
-or an equivalent mechanism.
-
-The SDK MUST NOT create a separate cancellation hierarchy.
-
-Cancellation remains owned by Core.
-
----
-
-### Deadlines
-
-The SDK MUST expose the applicable operation deadline to engine code.
-
-Conceptually:
-
-```text
-ctx.deadline()
-```
-
-The Core Runtime remains responsible for deadline semantics and enforcement.
-
-The SDK MUST NOT require engines to construct an independent deadline
-management system.
-
----
-
-### Streaming API
-
-The SDK MUST expose logical application streaming rather than transport-frame
-management.
-
-Conceptually:
-
-```text
-Stream<Item>
-```
-
-with operations appropriate to the existing Core stream semantics.
-
-Possible operations include:
-
-```text
-send(...)
-finish(...)
-cancel(...)
-```
-
-The exact API remains implementation-defined.
-
-The SDK MUST preserve:
-
-```text
-ordering
-backpressure
-cancellation
-deadline
-terminal states
-ownership
-```
-
----
-
-### Streaming vs Transport
-
-An SDK stream operation represents a logical application item.
-
-For example:
-
-```text
-stream.send(item)
-```
-
-means:
-
-```text
-logical stream item
-```
-
-not:
-
-```text
-transport frame
-```
-
-Engine developers should not need to understand Phase 7 frame fragmentation
-to produce normal stream output.
-
----
-
-### Stream Terminal Semantics
-
-The SDK MUST preserve explicit terminal semantics.
-
-Conceptually:
-
-```text
-COMPLETED
-FAILED
-CANCELLED
-```
-
-remain distinguishable.
-
-The SDK MUST NOT hide these meanings behind ambiguous operations.
-
-Core remains the authority for actual stream state.
-
----
-
-### Configuration API
-
-The SDK MUST provide convenient access to resolved engine configuration.
-
-The engine should consume resolved configuration rather than manually
-reimplementing:
-
-```text
-loading
-parsing
-resolution
-secret retrieval
-```
-
-where those mechanisms already belong to Core.
-
-The SDK MUST NOT duplicate the configuration pipeline.
-
----
-
-### Engine-Specific Configuration
-
-The SDK MUST support engine-specific configuration data.
-
-For example:
-
-```rust
-struct ArabicConfig {
-    model_path: String,
-    morphology_db: String,
-}
-```
-
-Conceptually:
-
-```text
-Core / SDK
-→ configuration mechanism
-
-Engine
-→ configuration meaning
-```
-
-Core does not need to understand the domain semantics of engine-specific
-configuration fields.
-
----
-
-### Health API
-
-The SDK MUST provide a convenient mechanism for an engine to contribute health
-information.
-
-Possible information includes:
-
-```text
-liveness
-readiness
-degraded state
-capability-level readiness
-```
-
-The SDK is only the developer-facing interface.
-
-Phase 11 remains authoritative for health semantics and aggregation.
-
-The SDK MUST NOT create a second health system.
-
----
-
-### Observability API
-
-The SDK SHOULD provide convenient engine-facing access to:
-
-```text
-logging
-metrics
-tracing
-diagnostics
-```
-
-The implementation forwards into Core's established observability system.
-
-The SDK MUST NOT create a competing telemetry system.
-
-Observability context must remain associated with the operation and engine
-execution where applicable.
-
----
-
-### Artifact API
-
-The SDK SHOULD provide engine-facing abstractions for:
-
-```text
-ArtifactReference
-artifact reading
-artifact writing
-artifact publication
-artifact access
-```
-
-where required.
-
-The SDK MUST NOT expose the storage provider's internal implementation.
-
-The relationship remains:
-
-```text
-Engine
- ↓
-SDK Artifact API
- ↓
-Core Artifact System
- ↓
-Storage/provider
-```
-
-Phase 10 remains authoritative for artifact identity, versioning, integrity,
-lifecycle, and storage semantics.
-
----
-
-### Provenance API
-
-The SDK SHOULD allow engine-specific provenance metadata where required.
-
-Core should automatically preserve relationships such as:
-
-```text
-Operation
-Attempt
-Engine
-Capability
-Artifact
-```
-
-where applicable.
-
-Engine code SHOULD NOT need to manually reconstruct the complete Core
-provenance model.
-
-Phase 10 remains authoritative.
-
----
-
-### Retry and Idempotency API
-
-The SDK MAY provide convenient declarations/configuration for engine
-capabilities such as:
-
-```text
-retryability
-idempotency requirements
-retry-related metadata
-```
-
-But the SDK MUST NOT implement a separate retry engine or idempotency store.
-
-The relationship is:
-
-```text
-SDK
-→ declaration / configuration
-
-Core Phase 13
-→ execution / enforcement
-```
-
-The SDK MUST preserve Phase 13 distinctions between:
-
-```text
-retryability
-idempotency
-retry safety
-```
-
----
-
-### Event API
-
-The SDK MAY provide convenient access to Core internal event publication.
-
-Conceptually:
-
-```text
-engine.events().publish(...)
-```
-
-The actual event mechanism remains owned by Phase 14.
-
-The SDK MUST NOT provide:
-
-```text
-second event bus
-second event lifecycle
-second delivery queue
-second replay mechanism
-```
-
-The SDK should hide publisher/subscriber implementation details.
-
----
-
-### Control Plane Integration
-
-Engine developers SHOULD NOT need to manually manage Control Plane internals.
-
-The SDK/Core runtime should automatically integrate:
-
-```text
-engine identity
-instance metadata
-capability advertisement
-contract advertisement
-registration
-membership
-routing
-```
-
-through the established Control Plane.
-
-The SDK MUST NOT expose normal engine code to:
-
-```text
-routing tables
-membership snapshots
-destination-selection internals
-```
-
-The engine author describes the engine and its capabilities.
-
-Core manages Control Plane interaction.
-
----
-
-### Transport Integration
-
-The SDK SHOULD NOT require engines to construct the transport stack manually.
-
-Normal engines should not need to manage:
-
-```text
-connections
-frame headers
-frame fragmentation
-reassembly
-connection pools
-transport routing
-```
-
-The relationship remains:
-
-```text
-Engine
- ↓
-SDK
- ↓
-Core Runtime
- ↓
-Control Plane + Transport
-```
-
-Raw transport internals are not part of the normal SDK API.
-
----
-
-### Error API
-
-The SDK MUST expose a stable engine-facing error model.
-
-It SHOULD preserve meaningful information such as:
-
-```text
-category
-cause
-context
-retryability information where applicable
-engine-specific error information where permitted
-```
-
-The SDK MUST NOT leak unstable Core implementation error types.
-
-Conceptually:
-
-```text
-Core internal error
-      ↓
-SDK stable error representation
-      ↓
-Engine code
-```
-
----
-
-### Engine-Specific Errors
-
-Engines MAY define rich domain-specific error types.
-
-For example:
-
-```text
-ArabicError::InvalidRoot
-```
-
-The SDK/Core layer should adapt those errors into the generic Core error model
-while preserving useful engine-specific information.
-
-Core MUST NOT become dependent on domain-specific error definitions merely to
-support their use.
-
----
-
-### SDK Error Causality
-
-The SDK MUST preserve useful failure causality.
-
-It must not flatten:
-
-```text
-engine failure
-dependency failure
-transport failure
-runtime failure
-cancellation
-deadline
-```
-
-into one generic SDK error that loses the original reason.
-
----
-
-### Versioning
-
-The Engine SDK is a compatibility boundary.
-
-Breaking SDK changes MUST be deliberate and versioned.
-
-Core internals MAY evolve without breaking engines when the SDK compatibility
-contract remains valid.
-
-Conceptually:
-
-```text
-Engine
- ↓
-SDK version
- ↓
-supported Core implementation
-```
-
-An engine should not depend on individual internal Core module versions.
-
----
-
-### SDK and Core Compatibility
-
-The SDK SHOULD define an explicit compatibility relationship with Core.
-
-The exact mechanism may be:
-
-```text
-supported version range
-feature compatibility
-workspace coupling
-other explicit compatibility policy
-```
-
-but the relationship must be deliberate.
-
-The engine developer SHOULD NOT need to understand which internal Core
-implementation version provides:
-
-```text
-runtime.rs
-routing.rs
-stream.rs
-```
-
-as long as the supported SDK/Core compatibility contract remains valid.
-
----
-
-### Stable and Experimental APIs
-
-The SDK MAY distinguish:
-
-```text
-stable SDK API
-experimental SDK API
-internal Core API
-```
-
-Experimental functionality MUST be clearly separated from stable compatibility
-commitments.
-
-The exact namespace or feature mechanism remains an implementation choice.
-
----
-
-### Type Re-Exports
-
-The SDK MAY re-export Core types when they are intentionally part of the stable
-engine-facing contract.
-
-Examples may include:
-
-```text
-EngineId
-CapabilityId
-OperationId
-ArtifactReference
-```
-
-A Core type MUST NOT be re-exported merely because it is convenient.
-
-Re-exporting creates a compatibility commitment and should therefore be
-intentional.
-
----
-
-### Extension Points
-
-The SDK MUST expose only intentional, supported extension points.
-
-Appropriate examples include:
-
-```text
-capability handler
-lifecycle hooks
-health provider
-configuration integration
-event definitions
-observability integration
-```
-
-The SDK MUST NOT provide normal extension points for replacing:
-
-```text
-runtime registry
-Control Plane routing
-transport framing
-cancellation engine
-stream implementation
-retry engine
-idempotency storage
-health aggregation
-artifact storage
-provenance storage
-```
-
-Extension points should occur at semantic boundaries, not internal mechanism
-boundaries.
-
----
-
-### Raw Core Escape Hatch
-
-Raw Core access is not part of the normal Engine SDK API.
-
-Advanced Nizaam-owned infrastructure components may directly depend on Core when
-their role genuinely requires lower-level access.
-
-However, this direct Core usage belongs to the internal Nizaam implementation
-boundary and MUST NOT be treated as part of the Engine SDK compatibility
-contract.
-
-The SDK therefore does not need to expose:
-
-```text
-get_core_mut()
-replace_runtime()
-replace_router()
-replace_transport()
-```
-
-or equivalent unrestricted hooks.
-
----
-
-### SDK Restrictions and Nizaam Ownership
-
-The architecture intentionally uses two levels of control:
-
-```text
-Nizaam Core Team
-→ trusted internal Core access
-→ may extend/change Core as required by Nizaam-owned implementations
-
-Engine Developer
-→ supported SDK access
-→ restricted to stable and intentional extension points
-```
-
-This is not contradictory.
-
-The SDK restriction exists to protect:
-
-```text
-Core invariants
-API stability
-runtime consistency
-security boundaries
-upgrade compatibility
-engine isolation
-```
-
-while direct Core access exists for the team that owns and evolves the
-infrastructure itself.
-
----
-
-### SDK Should Make Correct Usage Easy
-
-The SDK SHOULD provide safe defaults for:
-
-```text
-cancellation
-deadlines
-task ownership
-runtime registration
-health wiring
-observability context
-shutdown
-stream lifecycle
-```
-
-An ordinary engine should not need to manually wire these systems.
-
----
-
-### SDK Should Make Unsafe Usage Difficult
-
-The public API should guide developers toward valid Core usage.
-
-Examples:
-
-```text
-managed task creation
-→ preferred over detached task creation
-
-EngineBuilder
-→ preferred over manual runtime registration
-
-Context
-→ preferred over manual cancellation state manipulation
-
-SDK Stream
-→ preferred over direct buffer/channel management
-```
-
-The SDK should encode Core invariants where practical.
-
-For example, operations that are invalid after stream termination should be
-difficult or impossible through the normal SDK API.
-
----
-
-### SDK Safety
-
-The normal Engine SDK API SHOULD NOT require engine developers to use Rust
-`unsafe` merely to interact with Core.
-
-If an engine itself requires `unsafe`, that remains an engine implementation
-choice.
-
-The SDK MUST NOT make `unsafe` necessary because Core's stable interface is
-poorly encapsulated.
-
----
-
-### SDK and Testing
-
-The SDK MUST make engine testing practical without requiring a full production
-deployment.
-
-A test engine should be constructible around the same stable SDK abstractions.
-
-Conceptually:
-
-```text
-Test Engine
-   ↓
-Capability
-   ↓
-Request
-   ↓
-Response
-```
-
-Core may provide test infrastructure such as:
-
-```text
-InMemoryTransport
-InMemoryControlPlane
-TestRuntime
-```
-
-but those remain Core testing mechanisms, not second SDK runtimes.
-
----
-
-### Test Doubles
-
-The SDK SHOULD expose meaningful abstraction boundaries that can be replaced or
-mocked in tests where appropriate.
-
-Possible examples include:
-
-```text
-artifact access
-dependency access
-clock/time source
-other explicit engine-facing providers
-```
-
-The SDK MUST NOT become a general-purpose dependency-injection framework.
-
----
-
-### Generated Code
-
-Phase 16 is not itself a code-generation system.
-
-Typed contracts MAY be generated by another system when required.
-
-The SDK must support typed contracts whether their types are:
-
-```text
-handwritten
-generated
-```
-
-The actual code-generation architecture remains outside Phase 16 unless later
-required by the contract system.
-
----
-
-### Engine Packaging
-
-Engine projects SHOULD depend primarily on the Engine SDK rather than directly
-depending on every Core internal module.
-
-Conceptually:
-
-```text
-Engine package
-     ↓
-Engine SDK
-     ↓
-Core
-```
-
-This reduces accidental coupling to Core implementation details.
-
-The exact Cargo/workspace structure remains an implementation decision.
-
----
-
-### Feature Flags
-
-The SDK MAY use feature flags to expose optional functionality such as:
-
-```text
-runtime
-streaming
-artifacts
-events
-observability
-```
-
-but the exact feature layout is not part of the architectural contract.
-
-Feature flags must not create alternative runtime semantics.
-
----
-
-### Documentation
-
-The SDK MUST provide documentation aimed at engine developers, not merely
-generated Rust API documentation.
-
-At minimum, documentation should explain:
-
-```text
-engine creation
-capability implementation
-lifecycle
-request/response handling
-context
-cancellation
-deadlines
-streaming
-background tasks
-configuration
-health
-observability
-artifacts
-events
-errors
-testing
-SDK/Core compatibility
-```
-
-Documentation must emphasize semantic rules and correct usage patterns.
-
----
-
-### Semantic Transparency
-
-The SDK hides implementation complexity but MUST remain semantically
-transparent.
-
-An engine developer should understand:
-
-```text
-what Core guarantees
-what cancellation means
-what deadlines mean
-what stream termination means
-what errors mean
-what retryability means
-what idempotency means
-what health states mean
-```
-
-without needing to know:
-
-```text
-how Core implements those mechanisms internally
-```
-
----
-
-### Explicit Non-Goals
-
-Phase 16 must not become:
-
-* a universal Nizaam SDK;
-* an external public API SDK;
-* a second Core runtime;
-* a second lifecycle system;
-* a second cancellation system;
-* a second streaming system;
-* a second retry system;
-* a second event system;
-* a second health system;
-* a second configuration system;
-* a second artifact system;
-* a second provenance system;
-* a second transport system;
-* a second Control Plane;
-* a domain abstraction framework;
-* a dependency-injection framework;
-* a generated-wrapper-for-all-Core-types system;
-* a mechanism for arbitrary replacement of Core internals.
-
----
-
-### Files and Folders
-
-**Engine SDK**
-
-* `src/sdk/mod.rs`
-* `src/sdk/engine.rs`
-* `src/sdk/capability.rs`
-* `src/sdk/request.rs`
-* `src/sdk/response.rs`
-* `src/sdk/context.rs`
-* `src/sdk/stream.rs`
-* `src/sdk/error.rs`
-
-**SDK integrations**
-
-* `src/sdk/configuration.rs`
-* `src/sdk/health.rs`
-* `src/sdk/observability.rs`
-* `src/sdk/artifact.rs`
-* `src/sdk/events.rs`
-* `src/sdk/lifecycle.rs`
-* `src/sdk/tasks.rs`
-
-**Related Core systems**
-
-* `src/runtime/`
-* `src/contracts/`
-* `src/capability/`
-* `src/operation/`
-* `src/streaming/`
-* `src/control/`
-* `src/transport/`
-* `src/retry/`
-* `src/idempotency/`
-* `src/security/`
-* `src/health/`
-* `src/config/`
-* `src/artifact/`
-* `src/provenance/`
-* `src/observability/`
-* `src/events/`
-
-**Tests**
-
-* `tests/sdk.rs`
-* `tests/sdk_engine.rs`
-* `tests/sdk_capability.rs`
-* `tests/sdk_streaming.rs`
-* `tests/sdk_lifecycle.rs`
-* `tests/sdk_integration.rs`
-* `tests/conformance.rs`
-
-Exact filenames may be adjusted if the existing repository already provides
-equivalent modules. The architectural boundaries defined in this phase must
-remain.
-
----
-
-### Boundary
-
-Core owns:
-
-```text
-runtime
-transport
-contracts
-capabilities
-security
-streaming
-retry
-idempotency
-events
-Control Plane
-health
-configuration
-artifacts
-provenance
-observability
-```
-
-The Engine SDK owns only:
-
-```text
-stable engine-facing API
-developer ergonomics
-supported engine extension points
-adaptation to Core abstractions
-SDK-level safety and compatibility boundary
-```
-
-Nizaam-owned infrastructure components may bypass the SDK and consume Core
-directly when their internal role requires it.
-
-Engine authors using the supported SDK surface cannot replace Core's internal
-runtime mechanisms through SDK extension points.
-
----
-
-### Done when
-
-An engine developer can:
-
-1. create an engine through the SDK;
-2. declare engine identity and metadata;
-3. register capabilities without manipulating Core registries directly;
-4. use typed request/response abstractions where supported;
-5. receive a controlled operation context;
-6. observe cancellation;
-7. observe deadlines;
-8. implement asynchronous capabilities;
-9. execute managed background tasks;
-10. use logical streaming while preserving Core stream semantics;
-11. access resolved configuration;
-12. provide engine-specific configuration;
-13. expose health information;
-14. emit logs, metrics, traces, and diagnostics through Core observability;
-15. access artifacts through stable SDK abstractions;
-16. participate in provenance through supported APIs;
-17. declare retry/idempotency metadata without implementing another retry
-    subsystem;
-18. publish internal events without implementing another event bus;
-19. participate in Control Plane registration without manually managing routing
-    internals;
-20. start and shut down through Core lifecycle integration;
-21. return stable SDK errors without leaking private Core error types;
-22. define engine-specific errors while preserving generic Core error causality;
-23. use stable engine-facing types without depending on arbitrary Core internals;
-24. use supported extension points without replacing Core infrastructure;
-25. test engines through SDK abstractions without requiring a complete
-    production deployment;
-26. remain compatible with the supported SDK/Core compatibility policy;
-27. build a normal engine without requiring `unsafe` merely to interact with
-    Core;
-28. preserve all previously verified Core behavior.
-
-SDK tests and integration tests must verify:
-
-```text
-engine creation
-engine metadata
-capability registration
-typed capability support
-request/response adaptation
-context access
-identity preservation
-cancellation
-deadlines
-managed tasks
-streaming
-stream terminal semantics
-configuration
-health integration
-observability integration
-artifact integration
-provenance integration
-retry/idempotency integration
-event integration
-Control Plane integration
-lifecycle integration
-shutdown
-error adaptation
-error causality
-SDK/Core compatibility
-extension-point restrictions
-absence of competing runtime systems
-test-engine support
-```
-
----
-
-### Architectural Invariant
-
-The fundamental Phase 16 model is:
-
-```text
-Core
-→ infrastructure authority
-
-Engine SDK
-→ stable restricted engine-facing interface
-
-Engine
-→ domain implementation
-```
-
-And for trust boundaries:
-
-```text
-Nizaam-owned code
-→ may directly use Core
-
-Supported Engine code
-→ uses Engine SDK
-```
-
-The Engine SDK is intentionally restricted.
-
-Those restrictions protect the stability and integrity of Core; they do not
-prevent the Nizaam team from directly evolving Core because the Nizaam team
-owns the infrastructure.
-
-The final principle is:
-
-```text
-SDK hides HOW Core works
-SDK exposes WHAT the engine can do
-Core remains the authority
-```
-
-The SDK should make correct Core usage easy, make unsupported architectural
-behavior difficult, and never turn the engine-facing layer into a second
-implementation of Core itself.
-
----
-
-## Phase 17: Testing and Conformance
+Provider Resolution ≠ Instance Routing
+Routing ≠ Retry
+Routing ≠ Health
+Logical Request ≠ Transport Frame
+Communication Completion ≠ Domain Completion
+Global Coordination Graph ≠ Engine-local Workflow Graph
+```
+
+The Control Plane controls the communication/coordination path, not the meaning of the work.
+
+---
+
+### Architectural Anti-Patterns
+
+The following are prohibited:
+
+```text
+Control Plane containing Quran/Hadith/Arabic/KG semantics
+Control Plane executing capability handlers
+Control Plane owning engine-local workflows
+Control Plane performing universal worker scheduling
+Control Plane becoming a mandatory business-message proxy
+Control Plane storing every engine's complete configuration
+Control Plane broadcasting raw secrets
+Control Plane silently changing payload semantics
+Registry directly executing operations
+Health subsystem directly performing routing
+Retry subsystem silently becoming routing policy
+Routing subsystem silently becoming health authority
+Event subsystem becoming routing state
+Provider backend algorithm leaking into Control Plane policy
+Engine creating a second ecosystem-wide capability resolver
+Infrastructure engine creating its own global Control Plane
+```
+
+---
+
+### Verification and Regression
+
+Phase 15 MUST be verified against all previously implemented phases.
+
+Minimum repository-wide verification:
+
+```bash
+set -o pipefail
+{
+  cargo fmt --all --check &&
+  cargo clippy --workspace --all-targets -- -D warnings &&
+  cargo build --workspace &&
+  cargo check --workspace &&
+  cargo test --workspace --all-targets &&
+  cargo test --workspace --doc
+} 2>&1 | tee cargo-check.log
+```
+
+The phase is not complete when only Control Plane tests pass.
+
+All previous Core tests must continue to pass.
+
+### Phase 15 Implementation Checklist
+
+* [x] Implement Control Plane facade
+* [x] Implement communication admission
+* [x] Implement declarative engine registration
+* [x] Implement engine registry
+* [x] Implement independent routing membership
+* [x] Implement immutable membership snapshots
+* [x] Implement membership versioning
+* [x] Implement engine observation storage
+* [x] Implement contract identification and compatibility filtering
+* [x] Implement capability identification and advertisement filtering
+* [x] Implement declarative provider metadata
+* [x] Implement provider compatibility filtering
+* [x] Preserve provider resolution separately from instance routing
+* [x] Implement global capability requirements
+* [x] Implement blocking dependencies
+* [x] Implement non-blocking dependencies
+* [x] Implement conditional dependencies
+* [x] Implement global coordination plans
+* [x] Implement PlanId / PlanVersion separation
+* [x] Implement plan lifecycle validation
+* [x] Implement dependency graph validation
+* [x] Implement deterministic cycle detection
+* [x] Implement immutable coordination snapshots
+* [x] Implement deterministic replanning
+* [x] Implement logical destinations
+* [x] Implement explicit destinations
+* [x] Implement hard destination semantics
+* [x] Implement preferred destination semantics
+* [x] Implement explicit fallback semantics
+* [x] Implement destination eligibility
+* [x] Integrate lifecycle into destination eligibility
+* [x] Integrate health observations into destination eligibility
+* [x] Integrate capability advertisement into destination eligibility
+* [x] Integrate contract compatibility into destination eligibility
+* [x] Implement deterministic routing policy
+* [x] Implement round-robin routing policy
+* [x] Implement weighted routing policy
+* [x] Implement capacity-aware routing policy
+* [x] Implement locality-aware routing policy
+* [x] Keep routing policy stateless
+* [x] Implement immutable per-attempt routing decisions
+* [x] Preserve attempt identity during routing
+* [x] Reject operation/attempt context mismatches
+* [x] Implement resolution composition
+* [x] Implement generic context requirements
+* [x] Implement opaque context packages
+* [x] Preserve operation/provenance/artifact context
+* [x] Reuse existing Universal Client and Transport
+* [x] Implement concrete-instance communication targeting
+* [x] Implement Control Plane failure classification
+* [x] Preserve GlobalError causality and metadata
+* [x] Integrate Runtime lifecycle without creating a second lifecycle system
+* [x] Add source-file unit tests
+* [x] Add Control Plane module-level composition tests
+* [x] Add Control Plane integration tests
+* [x] Add Phase 15 end-to-end tests
+* [x] Add cross-phase conformance coverage
+* [x] Run complete repository verification
+* [x]  Confirm all previously verified phases remain green
+
+---
+
+## Phase 16: Testing and Conformance
 
 ### Goal
 
@@ -15376,14 +14422,14 @@ implementation satisfies the functional contracts, architectural invariants,
 security boundaries, resource constraints, lifecycle guarantees, compatibility
 rules, and cross-phase integration requirements established by Phases 1–16.
 
-Testing does not begin in Phase 17.
+Testing does not begin in Phase 16.
 
 Unit, component, integration, and feature testing MUST continue throughout
 development.
 
-Phase 17 is the final verification and release-readiness phase.
+Phase 16 is the final verification and release-readiness phase.
 
-Phase 17 MUST NOT introduce another Core runtime subsystem or redefine the
+Phase 16 MUST NOT introduce another Core runtime subsystem or redefine the
 architecture established by earlier phases.
 
 The central question is:
@@ -15432,7 +14478,7 @@ documentation/API consistency
 release gates
 ```
 
-Phase 17 collects and verifies requirements established by previous phases
+Phase 16 collects and verifies requirements established by previous phases
 rather than inventing a new independent architecture.
 
 ---
@@ -15451,9 +14497,9 @@ feature-specific tests
 regression tests
 ```
 
-Phase 17 adds the final system-wide verification and release gates.
+Phase 16 adds the final system-wide verification and release gates.
 
-A feature MUST NOT be postponed from testing merely because Phase 17 has not
+A feature MUST NOT be postponed from testing merely because Phase 16 has not
 started.
 
 ---
@@ -15831,7 +14877,7 @@ architecture-analysis tooling
 
 Core MUST remain domain-agnostic.
 
-Phase 17 SHOULD verify that Core does not accidentally acquire direct
+Phase 16 SHOULD verify that Core does not accidentally acquire direct
 dependencies or semantics for:
 
 ```text
@@ -15887,7 +14933,7 @@ Artifact storage internals
 
 Nizaam-owned internal code may still use Core directly.
 
-Phase 17 MUST verify both:
+Phase 16 MUST verify both:
 
 ```text
 supported Engine SDK usage
@@ -15982,7 +15028,7 @@ IdempotencyKey
 ArtifactId
 ```
 
-Phase 17 MUST include cross-system identity verification.
+Phase 16 MUST include cross-system identity verification.
 
 Examples:
 
@@ -16038,7 +15084,7 @@ Context behavior must preserve logical operation identity.
 
 ### Lifecycle Conformance
 
-Phase 17 MUST test all relevant lifecycle systems:
+Phase 16 MUST test all relevant lifecycle systems:
 
 ```text
 Engine
@@ -16131,7 +15177,7 @@ resources.
 
 ### Resource-Limit Conformance
 
-Phase 17 MUST deliberately exercise configured resource limits.
+Phase 16 MUST deliberately exercise configured resource limits.
 
 Tests may create controlled overload involving:
 
@@ -16241,7 +15287,7 @@ reassembly without payload loss.
 
 ### Transport vs Streaming Conformance
 
-Phase 17 MUST verify that transport fragmentation and application-level
+Phase 16 MUST verify that transport fragmentation and application-level
 streaming remain distinct.
 
 For example:
@@ -16545,7 +15591,7 @@ Phase 11 remains authoritative for observability implementation.
 
 ### Failure/Recovery Conformance
 
-Phase 17 MUST intentionally introduce failures in areas such as:
+Phase 16 MUST intentionally introduce failures in areas such as:
 
 ```text
 transport
@@ -16588,7 +15634,7 @@ where those concepts are defined.
 
 ### Recovery Guarantees
 
-Phase 17 MUST verify only recovery guarantees that the architecture actually
+Phase 16 MUST verify only recovery guarantees that the architecture actually
 promises.
 
 For example:
@@ -16652,7 +15698,7 @@ concurrent shutdown
 
 Chaos testing MUST remain a verification technique.
 
-Phase 17 MUST NOT become a separate distributed chaos-engineering platform.
+Phase 16 MUST NOT become a separate distributed chaos-engineering platform.
 
 ---
 
@@ -16782,7 +15828,7 @@ crash as persistent state.
 
 ### Long-Running Tests
 
-Phase 17 SHOULD include controlled long-running scenarios to detect:
+Phase 16 SHOULD include controlled long-running scenarios to detect:
 
 ```text
 memory growth
@@ -16826,7 +15872,7 @@ event delivery
 SDK overhead
 ```
 
-Phase 17 SHOULD compare against an appropriate project baseline.
+Phase 16 SHOULD compare against an appropriate project baseline.
 
 The architecture MUST NOT freeze arbitrary hardware-dependent limits such as:
 
@@ -16840,7 +15886,7 @@ without a separate explicit requirement.
 
 ### Compatibility Conformance
 
-Because the Engine SDK is the engine-facing compatibility boundary, Phase 17
+Because the Engine SDK is the engine-facing compatibility boundary, Phase 16
 MUST validate supported SDK/Core combinations.
 
 Conceptually:
@@ -16901,7 +15947,7 @@ Only explicitly supported compatibility paths require migration tests.
 
 ### Crash Consistency
 
-For persistent systems that promise crash consistency, Phase 17 MUST verify
+For persistent systems that promise crash consistency, Phase 16 MUST verify
 the declared guarantees around interruption during state updates.
 
 For example:
@@ -16921,7 +15967,7 @@ tested during crashes.
 
 ### Reference Conformance Engine
 
-Phase 17 MUST provide a minimal reference/conformance engine whose purpose is
+Phase 16 MUST provide a minimal reference/conformance engine whose purpose is
 testing Core infrastructure rather than implementing real domain functionality.
 
 Conceptually:
@@ -17046,7 +16092,7 @@ These are test tools and are not production domain capabilities.
 
 ### No Silent Failure Conformance
 
-Phase 17 MUST explicitly test for paths where:
+Phase 16 MUST explicitly test for paths where:
 
 ```text
 error occurs
@@ -17136,7 +16182,7 @@ The reference engine exists specifically to provide these scenarios.
 
 ### Documentation Conformance
 
-By Phase 17, stable documentation is part of the public contract for:
+By Phase 16, stable documentation is part of the public contract for:
 
 ```text
 Engine SDK semantics
@@ -17157,8 +16203,8 @@ internal refactor.
 
 ### Architecture Regression Protection
 
-Architecture checks established by Phase 17 SHOULD continue running after
-Phase 17.
+Architecture checks established by Phase 16 SHOULD continue running after
+Phase 16.
 
 For example:
 
@@ -17169,14 +16215,14 @@ Core
 
 must remain continuously protected after the initial conformance phase.
 
-Phase 17 establishes these checks; future CI/regression workflows keep them
+Phase 16 establishes these checks; future CI/regression workflows keep them
 active.
 
 ---
 
-### Architecture Changes After Phase 17
+### Architecture Changes After Phase 16
 
-After Phase 17, changing a frozen architectural invariant is not an ordinary
+After Phase 16, changing a frozen architectural invariant is not an ordinary
 bug fix.
 
 For example:
@@ -17230,7 +16276,7 @@ The exact report format remains an implementation/process decision.
 The overall verification model is:
 
 ```text
-                         Phase 17
+                         Phase 16
                             │
         ┌───────────────────┼───────────────────┐
         ↓                   ↓                   ↓
@@ -17268,7 +16314,7 @@ No single testing layer replaces the others.
 
 ### Release Gates
 
-Phase 17 uses hierarchical release gates.
+Phase 16 uses hierarchical release gates.
 
 #### PR Gate
 
@@ -17361,7 +16407,7 @@ where these conditions are observable through the available diagnostics.
 
 ### Cross-Phase Conformance
 
-Phase 17 MUST explicitly test important boundaries between phases.
+Phase 16 MUST explicitly test important boundaries between phases.
 
 Examples include:
 
@@ -17387,13 +16433,6 @@ new destination resolution
 ```
 
 ```text
-Phase 15 + Phase 16
-engine registration
-↔
-SDK abstraction
-```
-
-```text
 Phase 9 + Phase 15
 security
 ↔
@@ -17406,7 +16445,7 @@ Cross-phase behavior is a first-class conformance concern.
 
 ### Core Conformance vs Engine Domain Correctness
 
-Phase 17 MUST maintain the separation:
+Phase 16 MUST maintain the separation:
 
 ```text
 Core Conformance
@@ -17419,7 +16458,7 @@ Domain Tests
 → domain/algorithm correctness
 ```
 
-For example, Phase 17 may verify that:
+For example, Phase 16 may verify that:
 
 ```text
 Arabic Engine
@@ -17441,7 +16480,7 @@ That remains an engine/domain test.
 
 ### Explicit Non-Goals
 
-Phase 17 must not become:
+Phase 16 must not become:
 
 * a new runtime;
 * a new orchestration system;
@@ -17453,7 +16492,7 @@ Phase 17 must not become:
 * a replacement for unit/component testing;
 * a mechanism for inventing new architectural guarantees merely for testing.
 
-Phase 17 verifies the architecture built in Phases 1–16.
+Phase 16 verifies the architecture built in Phases 1–16.
 
 ---
 
@@ -17500,7 +16539,7 @@ remain.
 
 ### Boundary
 
-Phase 17 owns:
+Phase 16 owns:
 
 ```text
 verification
@@ -17514,7 +16553,7 @@ compatibility validation
 release gating
 ```
 
-Phase 17 does NOT own:
+Phase 16 does NOT own:
 
 ```text
 runtime architecture
@@ -17529,13 +16568,13 @@ domain implementation
 
 Those were defined by earlier phases.
 
-Phase 17 verifies them.
+Phase 16 verifies them.
 
 ---
 
 ### Done when
 
-Phase 17 is complete when:
+Phase 16 is complete when:
 
 1. all mandatory functional tests pass;
 2. all mandatory architectural conformance checks pass;
@@ -17560,7 +16599,7 @@ Phase 17 is complete when:
 
 ### Final Architectural Principle
 
-Phase 17 does not attempt to prove that every possible behavior has been tested.
+Phase 16 does not attempt to prove that every possible behavior has been tested.
 
 It proves that:
 
@@ -17582,7 +16621,7 @@ The final verification model is:
 Phases 1–16
 → define and build the system
 
-Phase 17
+Phase 16
 → challenge the system
 → verify the system
 → harden the system
@@ -17609,7 +16648,7 @@ CONFORM
 RELEASE
 ```
 
-Phase 17 is the final hardening phase, not the beginning of another
+Phase 16 is the final hardening phase, not the beginning of another
 architecture.
 
 ---
@@ -17878,41 +16917,48 @@ architecture.
   creating a competing runtime lifecycle state machine.
 * Phase 14 extends previously verified Core mechanisms rather than replacing
   them.
+* **Control Plane remains a coordination layer, not an execution engine.**
+* **Control Plane does not become a workflow engine.**
+* **Control Plane does not own transport.** Communication delegates to the existing `UniversalClient`/Transport layer.
+* **Control Plane does not duplicate Retry.** Retry creates new `AttemptId`s; Control Plane independently routes each attempt.
+* **`OperationId` and `AttemptId` remain separate identities.**
+* **`EngineId` and `EngineInstanceId` remain separate identities.** Routing targets concrete engine instances, not logical engines.
+* **Registry and Membership remain separate concerns.** Registry provides discovery/metadata; Membership provides routing membership and immutable snapshots.
+* **Membership snapshots are immutable.** A snapshot remains stable even if live membership changes afterward.
+* **Control Plane routing is stateless and deterministic.** Routing policies do not maintain cursors, mutable membership state, retry state, or randomness.
+* **Routing policy is separated from destination eligibility.** Eligibility determines which destinations are valid; policy chooses among eligible candidates.
+* **Explicit destination semantics are preserved.** A hard destination cannot fall back, while a preferred destination may fall back.
+* **Destination resolution does not itself select a concrete instance.** Logical destinations remain capability-based until the routing stage.
+* **Capability resolution only verifies capability advertisement.** It does not execute capabilities.
+* **Contract compatibility reuses the canonical Core compatibility system.** No second compatibility algorithm is introduced.
+* **Provider resolution does not execute or route to providers.**
+* **Provider identity remains provider-local.** Phase 15 uses a provider-local `String` rather than introducing a new global `ProviderId` Core primitive.
+* **No separate capability-readiness authority is introduced.** Routing eligibility currently combines lifecycle, readiness, health, capability advertisement, and contract compatibility.
+* **Lifecycle state is consumed, not mutated, by Control Plane.** Only `Serving` is considered routable.
+* **Health is an observation/input to routing eligibility, not a routing authority.**
+* **Observations are maintained separately from membership and registry state.**
+* **Planning remains declarative.** Plans do not contain provider implementations, worker state, retry state, queue state, health state, or domain execution state.
+* **Plan identity, operation identity, and plan version remain distinct concepts.**
+* **Dependency validation includes deterministic cycle detection.**
+* **Replanning is snapshot-based and deterministic.** Replanning compares coordination requirements without selecting providers, destinations, or creating plan identities.
+* **Identical coordination requirements do not trigger unnecessary replanning.**
+* **Dependency requirements are treated semantically as a set.** Duplicate identical requirements do not create false replanning changes.
+* **Context semantics remain opaque to Control Plane.** Provider/consumer layers own interpretation, authority, completeness, freshness, and consistency.
+* **Existing Core context types are reused.** No second systems for security, tracing, deadlines, cancellation, runtime, or provenance are introduced.
+* **Control Plane communication accepts only an already-routed concrete target.**
+* **Communication does not implement transport concerns such as connections, framing, fragmentation, reassembly, or transport retries.**
+* **Routing decisions are immutable once created.**
+* **Routing does not create retry attempts or mutate attempt lifecycle.**
+* **Stale routing decisions cannot override later runtime admission/authorization.**
+* **Security authorization remains outside Control Plane.** Control Plane does not create a second authorization system.
+* **Failure handling wraps and classifies the existing `GlobalError` system rather than creating a second error system.**
+* **The Control Plane facade remains thin and stateless.** It composes admission, replanning, resolution, and routing rather than maintaining another source of planning/routing state.
 
 ## Open Questions
 
 None currently. Concrete trait signatures, provider choices, serialization, async runtime, transport implementation, and eventual crate splitting are deliberately deferred by the plan rather than unresolved architecture. Phase 7's in-memory transport is a verification implementation of the abstract boundary and does not resolve or authorize a concrete production network transport, serialization provider, or async runtime.
 
 ### Current State
-
-Phase 14 is implemented, merged, and verified.
-
-Phases 0 through 14 are now verified.
-
-The Core currently provides:
-
-* foundational identity, operation, and status primitives;
-* universal contracts and payload boundaries;
-* the shared Error System;
-* structured Logging;
-* execution Context and lifecycle infrastructure;
-* Capability registration and dispatch;
-* Transport and universal client/server mechanisms;
-* Engine Runtime;
-* Middleware and Security;
-* Artifact and Provenance systems;
-* Configuration, Health, and Observability;
-* Streaming, Concurrency, and Background Tasks;
-* Retry and Idempotency mechanisms; and
-* the Internal Event subsystem.
-
-Phase 14 provides optional internal notification infrastructure while remaining
-separate from transport, streaming, Control Plane routing, durable messaging,
-workflow execution, and domain semantics.
-
-### Next Step
-
-Proceed to Phase 15: Control Plane.
 
 Phase 15 introduces the communication-focused Control Plane responsible for:
 
@@ -17944,3 +16990,7 @@ Control Plane
 
 Internal Events must not automatically become Control Plane messages, and the
 Control Plane must not replace the existing Event subsystem.
+
+### Next Step
+
+Proceed to Phase 15: Testing and Conformance.

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use nizaam_core::events::{
     DeliveryConfig, DeliveryDispatcher, DeliveryError, DeliveryOutcome, Event, EventContext,
-    EventPublisher, EventSubscriber, EventSubscription, Scope,
+    EventName, EventPublisher, EventSubscriber, EventSubscription, Scope,
 };
 use nizaam_core::identity::{CapabilityId, CorrelationId, EventId, OperationId};
 use nizaam_core::operation::{CancellationToken, Operation, OperationContext};
@@ -37,7 +37,13 @@ fn scope() -> Scope {
 }
 
 fn event(id: &str) -> Event {
-    Event::new(EventId::new(id).unwrap(), EVENT_TYPE, scope()).unwrap()
+    Event::new(
+        EventId::new(id).unwrap(),
+        EventName::new(EVENT_TYPE).unwrap(),
+        EVENT_TYPE,
+        scope(),
+    )
+    .unwrap()
 }
 
 fn dispatcher(queue_capacity: usize, worker_count: usize) -> DeliveryDispatcher {
@@ -49,7 +55,14 @@ fn dispatcher(queue_capacity: usize, worker_count: usize) -> DeliveryDispatcher 
 }
 
 fn subscription(handler: impl EventSubscriber, owner: &CancellationToken) -> EventSubscription {
-    EventSubscription::new(EVENT_TYPE, scope(), handler, owner).unwrap()
+    EventSubscription::new(
+        EventName::new(EVENT_TYPE).unwrap(),
+        EVENT_TYPE,
+        scope(),
+        handler,
+        owner,
+    )
+    .unwrap()
 }
 
 fn operation_context(operation_id: &str, correlation_id: &str) -> OperationContext {
@@ -141,6 +154,7 @@ fn published_event_only_reaches_matching_subscriptions() {
     let different_type = publisher
         .subscribe(
             EventSubscription::new(
+                EventName::new("other.event").unwrap(),
                 "other.event",
                 scope(),
                 |_event: &Event| panic!("non-matching event type must not be delivered"),
@@ -153,6 +167,7 @@ fn published_event_only_reaches_matching_subscriptions() {
     let different_scope = publisher
         .subscribe(
             EventSubscription::new(
+                EventName::new(EVENT_TYPE).unwrap(),
                 EVENT_TYPE,
                 Scope::new("engine:other").unwrap(),
                 |_event: &Event| panic!("non-matching scope must not be delivered"),
@@ -428,6 +443,7 @@ fn event_context_reaches_subscriber_through_delivery() {
 
     let event = Event::new_with_context(
         EventId::new("context-1").unwrap(),
+        EventName::new(EVENT_TYPE).unwrap(),
         EVENT_TYPE,
         scope(),
         event_context,
@@ -517,6 +533,7 @@ fn unauthorized_matching_subscription_does_not_receive_event() {
     let subscription = publisher
         .subscribe(
             EventSubscription::new(
+                EventName::new(EVENT_TYPE).unwrap(),
                 EVENT_TYPE,
                 scope(),
                 move |_event: &Event| {
@@ -571,6 +588,7 @@ fn authorization_failure_stops_event_delivery() {
     let subscription = publisher
         .subscribe(
             EventSubscription::new(
+                EventName::new(EVENT_TYPE).unwrap(),
                 EVENT_TYPE,
                 scope(),
                 move |_event: &Event| {

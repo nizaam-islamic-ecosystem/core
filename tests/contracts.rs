@@ -46,7 +46,7 @@ fn public_contract_request_validates_structurally() {
 #[test]
 fn public_contract_validation_rejects_the_wrong_interaction() {
     let mut request = request();
-    request.envelope.metadata.descriptor.interaction = Interaction::Response;
+    request.event.envelope.metadata.descriptor.interaction = Interaction::Response;
 
     assert_eq!(
         validate_request(&request),
@@ -57,8 +57,8 @@ fn public_contract_validation_rejects_the_wrong_interaction() {
 #[test]
 fn public_contract_response_validates_structurally() {
     let mut request = request();
-    request.envelope.metadata.descriptor.interaction = Interaction::Response;
-    let response = UniversalResponse::new(request.envelope, Status::Success);
+    request.event.envelope.metadata.descriptor.interaction = Interaction::Response;
+    let response = UniversalResponse::new(request.event.envelope, Status::Success);
 
     assert!(response.has_response_interaction());
     assert_eq!(validate_response(&response), Ok(()));
@@ -67,7 +67,7 @@ fn public_contract_response_validates_structurally() {
 #[test]
 fn public_contract_validation_rejects_an_unmet_capability_requirement() {
     let mut request = request();
-    request.envelope.metadata.requirements =
+    request.event.envelope.metadata.requirements =
         RequirementsMetadata::none().requiring_capability(CapabilityId::new("other").unwrap());
 
     assert_eq!(

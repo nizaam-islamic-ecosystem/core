@@ -1,11 +1,11 @@
 //! Connection trait and connection state for engine transport.
 //!
-//! A connection is an open duplex channel to one peer engine. Connections
-//! are produced by a `ConnectionFactory` and consumed by transport
+//! A connection is an open duplex channel to one concrete engine instance.
+//! Connections are produced by a `ConnectionFactory` and consumed by transport
 //! implementations. Core supplies the abstraction; concrete connection
 //! types live alongside their transport.
 
-use crate::identity::EngineId;
+use crate::identity::{EngineId, EngineInstanceId};
 use crate::transport::stream::{ByteSink, ByteSource};
 
 /// The lifecycle state of a connection.
@@ -28,14 +28,21 @@ impl ConnectionState {
     }
 }
 
-/// A connection to a peer engine.
+/// A connection to a concrete engine instance.
 ///
 /// A connection is a duplex pair of byte streams: a sink for outgoing
 /// bytes and a source for incoming bytes. Each transport implementation
 /// defines its own concrete connection type.
+///
+/// The logical [`EngineId`] identifies the engine represented by the peer,
+/// while [`EngineInstanceId`] identifies the concrete runtime instance at
+/// the other end of this connection.
 pub trait Connection: Send + Sync {
-    /// Returns the engine id of the peer at the other end of this connection.
-    fn peer(&self) -> &EngineId;
+    /// Returns the logical engine id of the peer at the other end.
+    fn peer_engine(&self) -> &EngineId;
+
+    /// Returns the concrete engine instance id of the peer at the other end.
+    fn peer_instance(&self) -> &EngineInstanceId;
 
     /// Returns the current state of this connection.
     fn state(&self) -> ConnectionState;

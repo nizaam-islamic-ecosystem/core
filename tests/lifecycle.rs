@@ -25,7 +25,10 @@ fn complete_lifecycle(lifecycle: &mut Lifecycle) {
 }
 
 fn serving_runtime() -> EngineRuntime {
-    let runtime = EngineRuntime::new();
+    let runtime = EngineRuntime::new(
+        nizaam_core::identity::EngineId::new("lifecycle-engine").unwrap(),
+        nizaam_core::identity::EngineInstanceId::new("lifecycle-instance").unwrap(),
+    );
 
     runtime.transition(LifecycleState::Starting).unwrap();
     runtime.transition(LifecycleState::Configuring).unwrap();
@@ -230,7 +233,10 @@ fn lifecycle_error_preserves_source_and_destination_states() {
 
 #[test]
 fn engine_runtime_exposes_the_same_ordered_lifecycle() {
-    let runtime = EngineRuntime::new();
+    let runtime = EngineRuntime::new(
+        nizaam_core::identity::EngineId::new("lifecycle-engine").unwrap(),
+        nizaam_core::identity::EngineInstanceId::new("lifecycle-instance").unwrap(),
+    );
 
     assert_eq!(runtime.state(), LifecycleState::Created);
 
@@ -254,7 +260,10 @@ fn engine_runtime_exposes_the_same_ordered_lifecycle() {
 
 #[test]
 fn engine_runtime_rejects_invalid_transition_without_changing_state() {
-    let runtime = EngineRuntime::new();
+    let runtime = EngineRuntime::new(
+        nizaam_core::identity::EngineId::new("lifecycle-engine").unwrap(),
+        nizaam_core::identity::EngineInstanceId::new("lifecycle-instance").unwrap(),
+    );
 
     let error = runtime
         .transition(LifecycleState::Serving)

@@ -4,14 +4,16 @@
 //! Core identities. It does not create replacement identifiers, maintain
 //! global request state, or define a transport-specific propagation format.
 
-use crate::identity::{AttemptId, CapabilityId, CorrelationId, EngineId, MessageId, OperationId};
+use crate::identity::{
+    AttemptId, CapabilityId, CorrelationId, EngineId, EngineInstanceId, MessageId, OperationId,
+};
 use crate::operation::{Operation, OperationContext};
 
 /// Correlation information that can be propagated with related activity.
 ///
 /// `CorrelationId` is the primary correlation identity. The remaining fields
 /// provide optional context about the message, logical operation, attempt,
-/// engine, or capability involved in the activity.
+/// engine, concrete engine instance, or capability involved in the activity.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CorrelationContext {
     correlation_id: CorrelationId,
@@ -19,6 +21,7 @@ pub struct CorrelationContext {
     attempt_id: Option<AttemptId>,
     message_id: Option<MessageId>,
     engine_id: Option<EngineId>,
+    engine_instance_id: Option<EngineInstanceId>,
     capability_id: Option<CapabilityId>,
 }
 
@@ -31,6 +34,7 @@ impl CorrelationContext {
             attempt_id: None,
             message_id: None,
             engine_id: None,
+            engine_instance_id: None,
             capability_id: None,
         }
     }
@@ -74,9 +78,14 @@ impl CorrelationContext {
         self.message_id.as_ref()
     }
 
-    /// Returns the associated engine identifier, when available.
+    /// Returns the associated logical engine identifier, when available.
     pub fn engine_id(&self) -> Option<&EngineId> {
         self.engine_id.as_ref()
+    }
+
+    /// Returns the associated concrete engine instance identifier, when available.
+    pub fn engine_instance_id(&self) -> Option<&EngineInstanceId> {
+        self.engine_instance_id.as_ref()
     }
 
     /// Returns the associated capability identifier, when available.
@@ -102,9 +111,15 @@ impl CorrelationContext {
         self
     }
 
-    /// Derives a context with an existing engine identifier attached.
+    /// Derives a context with an existing logical engine identifier attached.
     pub fn with_engine_id(mut self, engine_id: EngineId) -> Self {
         self.engine_id = Some(engine_id);
+        self
+    }
+
+    /// Derives a context with an existing concrete engine instance identifier attached.
+    pub fn with_engine_instance_id(mut self, engine_instance_id: EngineInstanceId) -> Self {
+        self.engine_instance_id = Some(engine_instance_id);
         self
     }
 
@@ -132,6 +147,7 @@ mod tests {
         assert!(context.attempt_id().is_none());
         assert!(context.message_id().is_none());
         assert!(context.engine_id().is_none());
+        assert!(context.engine_instance_id().is_none());
         assert!(context.capability_id().is_none());
     }
 
@@ -142,6 +158,7 @@ mod tests {
             .with_attempt_id(AttemptId::new("attempt-2").unwrap())
             .with_message_id(MessageId::new("msg-2").unwrap())
             .with_engine_id(EngineId::new("engine-2").unwrap())
+            .with_engine_instance_id(EngineInstanceId::new("instance-2").unwrap())
             .with_capability_id(CapabilityId::new("cap-2").unwrap());
 
         assert_eq!(context.correlation_id().as_str(), "corr-2");
@@ -149,6 +166,7 @@ mod tests {
         assert_eq!(context.attempt_id().unwrap().as_str(), "attempt-2");
         assert_eq!(context.message_id().unwrap().as_str(), "msg-2");
         assert_eq!(context.engine_id().unwrap().as_str(), "engine-2");
+        assert_eq!(context.engine_instance_id().unwrap().as_str(), "instance-2");
         assert_eq!(context.capability_id().unwrap().as_str(), "cap-2");
     }
 
@@ -221,6 +239,7 @@ mod tests {
             .with_attempt_id(AttemptId::new("attempt-6").unwrap())
             .with_message_id(MessageId::new("msg-6").unwrap())
             .with_engine_id(EngineId::new("engine-6").unwrap())
+            .with_engine_instance_id(EngineInstanceId::new("instance-6").unwrap())
             .with_capability_id(CapabilityId::new("cap-6").unwrap());
 
         let encoded = serde_json::to_string(&original).unwrap();

@@ -385,7 +385,7 @@ impl IdempotencyStateStore {
             ));
         }
 
-        if current_state == IdempotencyState::Failed {
+        if current_state.is_terminal() {
             let same_outcome = existing.outcome() == outcome.as_ref();
             let same_result_reference = existing.result_reference() == result_reference.as_deref();
 
@@ -394,7 +394,7 @@ impl IdempotencyStateStore {
             }
 
             return Err(IdempotencyStateError::InvalidTerminalMetadata(
-                IdempotencyState::Failed,
+                current_state,
             ));
         }
 
@@ -735,6 +735,68 @@ mod tests {
 
         assert_eq!(repeated, failed);
         assert_eq!(store.get(initial.identity()).unwrap(), Some(failed));
+    }
+
+    #[test]
+    fn succeeded_transition_rejects_changed_terminal_outcome_metadata() {
+        let store = IdempotencyStateStore::new();
+        let initial = record("service-a", "key-1", "operation-1", None, 500);
+
+        store.reserve(initial.clone(), 100).unwrap();
+        let succeeded = store
+            .transition(
+                initial.identity(),
+                IdempotencyState::Succeeded,
+                Some(RecordedOutcome::new(Status::Success, None)),
+                Some("result://operation-1".to_owned()),
+            )
+            .unwrap();
+
+        let result = store.transition(
+            initial.identity(),
+            IdempotencyState::Succeeded,
+            Some(RecordedOutcome::new(Status::Success, None)),
+            Some("result://operation-2".to_owned()),
+        );
+
+        assert_eq!(
+            result,
+            Err(IdempotencyStateError::InvalidTerminalMetadata(
+                IdempotencyState::Succeeded
+            ))
+        );
+        assert_eq!(store.get(initial.identity()).unwrap(), Some(succeeded));
+    }
+
+    #[test]
+    fn cancelled_transition_rejects_changed_terminal_outcome_metadata() {
+        let store = IdempotencyStateStore::new();
+        let initial = record("service-a", "key-1", "operation-1", None, 500);
+
+        store.reserve(initial.clone(), 100).unwrap();
+        let cancelled = store
+            .transition(
+                initial.identity(),
+                IdempotencyState::Cancelled,
+                Some(RecordedOutcome::new(Status::Cancelled, None)),
+                Some("result://operation-1".to_owned()),
+            )
+            .unwrap();
+
+        let result = store.transition(
+            initial.identity(),
+            IdempotencyState::Cancelled,
+            Some(RecordedOutcome::new(Status::Cancelled, None)),
+            Some("result://operation-2".to_owned()),
+        );
+
+        assert_eq!(
+            result,
+            Err(IdempotencyStateError::InvalidTerminalMetadata(
+                IdempotencyState::Cancelled
+            ))
+        );
+        assert_eq!(store.get(initial.identity()).unwrap(), Some(cancelled));
     }
 
     #[test]

@@ -7,6 +7,7 @@
 
 pub mod correlation;
 pub mod diagnostics;
+pub mod event;
 pub mod logging;
 pub mod metrics;
 pub mod tracing;
@@ -15,6 +16,7 @@ pub use diagnostics::{
     Diagnostic, DiagnosticCondition, DiagnosticDetails, DiagnosticError, DiagnosticKind,
     DiagnosticSubject,
 };
+pub use event::ObservabilityEvent;
 pub use logging::ObservabilityLogger;
 pub use metrics::{
     MetricDescriptor, MetricDimensions, MetricError, MetricKind, MetricName, MetricRecorder,
@@ -27,7 +29,8 @@ pub use tracing::{
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::identity::{CorrelationId, MessageId, OperationId};
+    use crate::events::EventName;
+    use crate::identity::{CorrelationId, OperationId};
     use crate::logging::{LogContext, LogEvent, LogEventType, LogLevel, LogScope, LogSource};
     use crate::operation::{Operation, OperationContext};
 
@@ -85,7 +88,7 @@ mod test {
 
         let log_context = LogContext::new(operation_context);
         let event = LogEvent::new(
-            MessageId::new("message-1").unwrap(),
+            EventName::new("logging.event").unwrap(),
             LogLevel::Info,
             LogSource::Core,
             LogScope::Global,
@@ -101,6 +104,6 @@ mod test {
             event.context.operation.operation.correlation_id.as_str(),
             "correlation-1"
         );
-        assert_eq!(event.event_type, LogEventType::Diagnostic);
+        assert_eq!(event.event_type(), "diagnostic");
     }
 }

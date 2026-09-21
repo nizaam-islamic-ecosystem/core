@@ -388,7 +388,9 @@ impl EventPublisher {
 
             subscriptions
                 .iter()
-                .filter(|subscription| subscription.matches(event.event_type(), event.scope()))
+                .filter(|subscription| {
+                    subscription.matches(event.event_name(), event.event_type(), event.scope())
+                })
                 .cloned()
                 .collect()
         };
@@ -494,7 +496,7 @@ fn encode_state(state: PublisherLifecycleState) -> u8 {
 mod tests {
     use super::*;
     use crate::{
-        events::{Event, Scope},
+        events::{Event, EventName, Scope},
         identity::EventId,
         operation::CancellationToken,
     };
@@ -510,6 +512,7 @@ mod tests {
     fn event() -> Event {
         Event::new(
             EventId::new("event-1").unwrap(),
+            EventName::new("test.event").unwrap(),
             "test.event",
             Scope::new("engine:test").unwrap(),
         )
@@ -601,6 +604,7 @@ mod tests {
         publisher.close();
 
         let subscription = EventSubscription::new(
+            EventName::new("operation.completed").unwrap(),
             "operation.completed",
             Scope::new("engine:test").unwrap(),
             |_event: &Event| {},
@@ -622,6 +626,7 @@ mod tests {
 
         let owner = CancellationToken::new();
         let subscription = EventSubscription::new(
+            EventName::new("operation.completed").unwrap(),
             "operation.completed",
             Scope::new("engine:test").unwrap(),
             |_event: &Event| {},
@@ -700,6 +705,7 @@ mod tests {
         publisher.activate().unwrap();
 
         let subscription = EventSubscription::new(
+            EventName::new("operation.completed").unwrap(),
             "operation.completed",
             Scope::new("engine:test").unwrap(),
             |_event: &Event| {},
@@ -721,6 +727,7 @@ mod tests {
         publisher.activate().unwrap();
 
         let subscription = EventSubscription::new(
+            EventName::new("operation.completed").unwrap(),
             "operation.completed",
             Scope::new("engine:test").unwrap(),
             |_event: &Event| {},
@@ -743,6 +750,7 @@ mod tests {
         publisher.activate().unwrap();
 
         let subscription = EventSubscription::new(
+            EventName::new("operation.completed").unwrap(),
             "operation.completed",
             Scope::new("engine:test").unwrap(),
             |_event: &Event| {},
@@ -764,6 +772,7 @@ mod tests {
         publisher.activate().unwrap();
 
         let subscription = EventSubscription::new(
+            EventName::new("operation.completed").unwrap(),
             "operation.completed",
             Scope::new("engine:test").unwrap(),
             |_event: &Event| {},

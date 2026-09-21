@@ -1,39 +1,81 @@
-//! Universal contract representation for internal Event messages.
+//! Universal logical-message occurrence representation.
 //!
-//! `UniversalEvent` is the contract-layer representation of an Event when the
-//! event participates in the common logical-message boundary. It reuses the
-//! existing [`MessageEnvelope`] rather than introducing a second envelope or
-//! transport representation.
+//! An Event is one interaction form of the common universal message boundary.
+//! Requests, Responses, and Events all use `MessageEnvelope`, while their
+//! interaction semantics remain explicit through `Interaction`.
 //!
-//! The Event subsystem remains responsible for local event publication,
-//! subscription, delivery, lifecycle, and matching. This type preserves the
-//! Event-specific semantic metadata that must survive the communication
-//! boundary:
+//! The occurrence boundary can wrap Request, Response, or Event interactions.
+//!
+//! Conceptually:
 //!
 //! ```text
-//! UniversalEvent
-//! ├── EventId
-//! ├── EventType
-//! ├── Scope
-//! └── MessageEnvelope
+//! Universal logical message
+//!          │
+//!          ├── Request
+//!          ├── Response
+//!          └── Event
+//!                ├── EventId
+//!                ├── EventName
+//!                ├── EventType
+//!                ├── Scope
+//!                └── MessageEnvelope
 //! ```
 //!
-//! `EventId` remains distinct from the envelope's `MessageId`. Likewise,
-//! `EventType` remains distinct from `CapabilityId`. The common
-//! `ContractDescriptor` continues to provide the existing communication
-//! contract metadata without being overloaded to represent EventType.
+//! `EventId` remains distinct from the envelope's `MessageId`.
+//! `EventName` identifies the semantic event being communicated.
+//! `EventType` remains distinct from `CapabilityId`.
 //!
-//! Event payload meaning remains opaque to Core.
+//! The event payload remains opaque to Core.
+//!
+//! The Phase 14 Event subsystem remains responsible for local event
+//! publication, subscription, delivery, lifecycle, matching, ownership, and
+//! cancellation. This contract representation does not turn the local Event
+//! subsystem into a distributed broker or Control Plane transport mechanism.
+//!
+//! In particular:
+//!
+//! ```text
+//! Common logical-message boundary
+//!     ├── Request
+//!     ├── Response
+//!     └── Event
+//!
+//! Phase 14 Event subsystem
+//!     └── local Event publication/subscription infrastructure
+//!
+//! Control Plane
+//!     └── formal engine/platform communication
+//! ```
+//!
+//! Therefore "event" at the common message boundary does not erase the
+//! semantic distinction between Request, Response, and Event interactions.
+//!
+//! ## Breaking UniversalEvent contract
+//!
+//! `UniversalEvent::new` requires the envelope plus three explicit semantic
+//! arguments:
+//! `event_name`, `event_type`, and `scope` are explicit semantic metadata.
+//! Consumers must supply all three values; they are not inferred from the
+//! payload or envelope.
+//!
+//! `UniversalRequest` and `UniversalResponse` own the common universal Event
+//! boundary internally. Consumers must access their message envelope through
+//! `request.event.envelope` or `response.event.envelope`, rather than through
+//! the old `request.envelope` or `response.envelope` paths.
+//!
+//! This is a breaking architectural change to the public contract surface.
+//! No backward-compatibility boundary is provided.
 
 use crate::contracts::descriptor::Interaction;
 use crate::contracts::envelope::MessageEnvelope;
+use crate::events::EventName;
 use crate::identity::{EventId, MessageId};
 
 /// Error returned when a message cannot be represented as a universal Event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UniversalEventError {
-    /// The supplied envelope does not represent an Event interaction.
-    WrongInteraction(Interaction),
+    /// An Event name must contain at least one non-whitespace character.
+    EmptyEventName,
 
     /// An Event type must contain at least one non-whitespace character.
     EmptyEventType,
@@ -45,12 +87,7 @@ pub enum UniversalEventError {
 impl std::fmt::Display for UniversalEventError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::WrongInteraction(interaction) => {
-                write!(
-                    formatter,
-                    "universal event requires Interaction::Event, found {interaction:?}"
-                )
-            }
+            Self::EmptyEventName => formatter.write_str("universal event name must not be empty"),
             Self::EmptyEventType => formatter.write_str("universal event type must not be empty"),
             Self::EmptyEventScope => formatter.write_str("universal event scope must not be empty"),
         }
@@ -59,23 +96,23 @@ impl std::fmt::Display for UniversalEventError {
 
 impl std::error::Error for UniversalEventError {}
 
-/// A universal Event message carried by the common [`MessageEnvelope`].
+/// A universal logical message carrying Event interaction semantics.
 ///
-/// `EventId` identifies the Event occurrence itself. The envelope independently
-/// carries its `MessageId`, so the two identities remain semantically distinct.
+/// `EventId` identifies the Event occurrence itself. The enclosing universal
+/// message independently carries its `MessageId`.
 ///
-/// `event_type` and `scope` are preserved explicitly because they are Event
-/// semantics rather than Request/Response capability metadata.
-///
-/// The event payload remains opaque and is owned/interpreted by the producer or
-/// receiving engine. This type does not inspect domain-specific payload content.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+/// `event_name`, `event_type`, and `scope` are explicit Event semantics and are
+/// not inferred from the payload.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UniversalEvent {
     /// The common logical-message envelope used for communication.
     pub envelope: MessageEnvelope,
 
     /// Identity of the Event occurrence represented by this message.
     pub event_id: EventId,
+
+    /// Semantic Event name preserved across the contract boundary.
+    pub event_name: EventName,
 
     /// Semantic Event type preserved across the contract boundary.
     pub event_type: Box<str>,
@@ -88,8 +125,26 @@ pub struct UniversalEvent {
 struct UniversalEventDeserialization {
     envelope: MessageEnvelope,
     event_id: EventId,
+    event_name: String,
     event_type: Box<str>,
     scope: Box<str>,
+}
+
+impl serde::Serialize for UniversalEvent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut state = serializer.serialize_struct("UniversalEvent", 5)?;
+        state.serialize_field("envelope", &self.envelope)?;
+        state.serialize_field("event_id", &self.event_id)?;
+        state.serialize_field("event_name", self.event_name.as_str())?;
+        state.serialize_field("event_type", &self.event_type)?;
+        state.serialize_field("scope", &self.scope)?;
+        state.end()
+    }
 }
 
 impl<'de> serde::Deserialize<'de> for UniversalEvent {
@@ -99,9 +154,10 @@ impl<'de> serde::Deserialize<'de> for UniversalEvent {
     {
         let intermediate = UniversalEventDeserialization::deserialize(deserializer)?;
 
-        Self::new(
+        Self::from_parts(
             intermediate.envelope,
             intermediate.event_id,
+            intermediate.event_name,
             intermediate.event_type,
             intermediate.scope,
         )
@@ -110,29 +166,45 @@ impl<'de> serde::Deserialize<'de> for UniversalEvent {
 }
 
 impl UniversalEvent {
-    /// Creates a universal Event from an existing message envelope and its
-    /// Event-specific semantic metadata.
+    /// Creates a universal occurrence wrapper from an existing message
+    /// envelope and its semantic metadata.
     ///
-    /// Construction succeeds only when the envelope's contract descriptor
-    /// declares `Interaction::Event`.
+    /// This constructor requires the consumer to provide `event_name`,
+    /// `event_type`, and `scope` explicitly. This is a breaking architectural
+    /// contract: those values are part of the universal Event boundary and are
+    /// not inferred or accepted through a backward-compatibility path.
     pub fn new(
         envelope: MessageEnvelope,
-        event_id: EventId,
+        event_name: impl Into<String>,
         event_type: impl Into<String>,
         scope: impl Into<String>,
     ) -> Result<Self, UniversalEventError> {
-        let interaction = envelope.metadata.descriptor.interaction;
+        Self::from_parts(envelope, EventId::generate(), event_name, event_type, scope)
+    }
 
-        if interaction != Interaction::Event {
-            return Err(UniversalEventError::WrongInteraction(interaction));
-        }
+    /// Constructs a universal Event from a caller-supplied occurrence identity.
+    ///
+    /// This is the crate-internal construction boundary for domain wrappers
+    /// that already own or derive the EventId. [`Self::new`] remains the public
+    /// constructor and generates the occurrence identity automatically.
+    pub(crate) fn from_parts(
+        envelope: MessageEnvelope,
+        event_id: EventId,
+        event_name: impl Into<String>,
+        event_type: impl Into<String>,
+        scope: impl Into<String>,
+    ) -> Result<Self, UniversalEventError> {
+        let event_name =
+            EventName::new(event_name).map_err(|_| UniversalEventError::EmptyEventName)?;
 
         let event_type = event_type.into();
+
         if event_type.trim().is_empty() {
             return Err(UniversalEventError::EmptyEventType);
         }
 
         let scope = scope.into();
+
         if scope.trim().is_empty() {
             return Err(UniversalEventError::EmptyEventScope);
         }
@@ -140,12 +212,13 @@ impl UniversalEvent {
         Ok(Self {
             envelope,
             event_id,
+            event_name,
             event_type: event_type.into_boxed_str(),
             scope: scope.into_boxed_str(),
         })
     }
 
-    /// Returns whether this universal message has Event interaction semantics.
+    /// Returns whether this logical message has Event interaction semantics.
     pub fn has_event_interaction(&self) -> bool {
         self.envelope.metadata.descriptor.interaction == Interaction::Event
     }
@@ -158,6 +231,11 @@ impl UniversalEvent {
     /// Returns the logical message identity carried by the envelope.
     pub fn message_id(&self) -> &MessageId {
         &self.envelope.message_id
+    }
+
+    /// Returns the semantic Event name.
+    pub fn event_name(&self) -> &EventName {
+        &self.event_name
     }
 
     /// Returns the semantic Event type.
@@ -218,7 +296,7 @@ mod tests {
     fn event() -> UniversalEvent {
         UniversalEvent::new(
             make_envelope(Interaction::Event),
-            EventId::new("event-1").unwrap(),
+            "operation.completed",
             "operation.completed",
             "engine:test",
         )
@@ -230,35 +308,57 @@ mod tests {
         let universal_event = event();
 
         assert!(universal_event.has_event_interaction());
-        assert_eq!(universal_event.event_id().as_str(), "event-1");
+        assert!(!universal_event.event_id().as_str().is_empty());
         assert_eq!(universal_event.message_id().as_str(), "msg-1");
+        assert_eq!(universal_event.event_name().as_str(), "operation.completed");
         assert_eq!(universal_event.event_type(), "operation.completed");
         assert_eq!(universal_event.scope(), "engine:test");
     }
 
     #[test]
-    fn rejects_request_interaction() {
+    fn preserves_request_interaction() {
+        let universal_event = UniversalEvent::new(
+            make_envelope(Interaction::Request),
+            "universal.request",
+            "request",
+            "global",
+        )
+        .unwrap();
+
+        assert!(!universal_event.has_event_interaction());
         assert_eq!(
-            UniversalEvent::new(
-                make_envelope(Interaction::Request),
-                EventId::new("event-1").unwrap(),
-                "operation.completed",
-                "engine:test",
-            ),
-            Err(UniversalEventError::WrongInteraction(Interaction::Request))
+            universal_event.envelope.metadata.descriptor.interaction,
+            Interaction::Request
         );
     }
 
     #[test]
-    fn rejects_response_interaction() {
+    fn preserves_response_interaction() {
+        let universal_event = UniversalEvent::new(
+            make_envelope(Interaction::Response),
+            "universal.response",
+            "response",
+            "global",
+        )
+        .unwrap();
+
+        assert!(!universal_event.has_event_interaction());
+        assert_eq!(
+            universal_event.envelope.metadata.descriptor.interaction,
+            Interaction::Response
+        );
+    }
+
+    #[test]
+    fn rejects_empty_event_name() {
         assert_eq!(
             UniversalEvent::new(
-                make_envelope(Interaction::Response),
-                EventId::new("event-1").unwrap(),
+                make_envelope(Interaction::Event),
+                "   ",
                 "operation.completed",
                 "engine:test",
             ),
-            Err(UniversalEventError::WrongInteraction(Interaction::Response))
+            Err(UniversalEventError::EmptyEventName)
         );
     }
 
@@ -267,7 +367,7 @@ mod tests {
         assert_eq!(
             UniversalEvent::new(
                 make_envelope(Interaction::Event),
-                EventId::new("event-1").unwrap(),
+                "operation.completed",
                 "   ",
                 "engine:test",
             ),
@@ -280,7 +380,7 @@ mod tests {
         assert_eq!(
             UniversalEvent::new(
                 make_envelope(Interaction::Event),
-                EventId::new("event-1").unwrap(),
+                "operation.completed",
                 "operation.completed",
                 "\t\n",
             ),
@@ -289,10 +389,20 @@ mod tests {
     }
 
     #[test]
+    fn generated_event_ids_are_automatic_and_distinct() {
+        let first = event();
+        let second = event();
+
+        assert!(!first.event_id().as_str().is_empty());
+        assert!(!second.event_id().as_str().is_empty());
+        assert_ne!(first.event_id(), second.event_id());
+    }
+
+    #[test]
     fn preserves_event_and_message_identity_separately() {
         let universal_event = event();
 
-        assert_eq!(universal_event.event_id().as_str(), "event-1");
+        assert!(!universal_event.event_id().as_str().is_empty());
         assert_eq!(universal_event.message_id().as_str(), "msg-1");
         assert_ne!(
             universal_event.event_id().as_str(),
@@ -304,6 +414,7 @@ mod tests {
     fn preserves_event_semantics_and_complete_envelope() {
         let universal_event = event();
 
+        assert_eq!(universal_event.event_name().as_str(), "operation.completed");
         assert_eq!(universal_event.event_type(), "operation.completed");
         assert_eq!(universal_event.scope(), "engine:test");
         assert_eq!(
@@ -347,17 +458,23 @@ mod tests {
     }
 
     #[test]
-    fn deserialization_rejects_non_event_interaction() {
+    fn deserialization_preserves_request_interaction_and_generated_identity() {
         let request = UniversalEventDeserialization {
             envelope: make_envelope(Interaction::Request),
-            event_id: EventId::new("event-1").unwrap(),
-            event_type: "operation.completed".into(),
-            scope: "engine:test".into(),
+            event_id: EventId::generate(),
+            event_name: "universal.request".into(),
+            event_type: "request".into(),
+            scope: "global".into(),
         };
 
         let encoded = serde_json::to_string(&request).unwrap();
-        let result: Result<UniversalEvent, _> = serde_json::from_str(&encoded);
+        let decoded: UniversalEvent = serde_json::from_str(&encoded).unwrap();
 
-        assert!(result.is_err());
+        assert!(!decoded.has_event_interaction());
+        assert_eq!(
+            decoded.envelope.metadata.descriptor.interaction,
+            Interaction::Request
+        );
+        assert_eq!(decoded.event_id(), &request.event_id);
     }
 }

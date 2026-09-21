@@ -658,7 +658,7 @@ impl DeliveryPath {
 mod tests {
     use super::*;
     use crate::{
-        events::{Event, EventSubscriber, EventSubscription, Scope},
+        events::{Event, EventName, EventSubscriber, EventSubscription, Scope},
         identity::EventId,
         operation::CancellationToken,
     };
@@ -685,7 +685,14 @@ mod tests {
         handler: impl EventSubscriber,
         owner: &CancellationToken,
     ) -> EventSubscription {
-        EventSubscription::new("test.event", scope(), handler, owner).unwrap()
+        EventSubscription::new(
+            EventName::new("test.event").unwrap(),
+            "test.event",
+            scope(),
+            handler,
+            owner,
+        )
+        .unwrap()
     }
 
     fn subscription(
@@ -700,7 +707,15 @@ mod tests {
     }
 
     fn make_event(id: &str) -> Arc<Event> {
-        Arc::new(Event::new(EventId::new(id).unwrap(), "test.event", scope()).unwrap())
+        Arc::new(
+            Event::new(
+                EventId::new(id).unwrap(),
+                EventName::new("test.event").unwrap(),
+                "test.event",
+                scope(),
+            )
+            .unwrap(),
+        )
     }
 
     fn receive<T: Send + 'static>(receiver: &Receiver<T>) -> T {

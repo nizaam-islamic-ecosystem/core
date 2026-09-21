@@ -208,7 +208,7 @@ where
          * Capability identification uses the Core contract descriptor.
          * No engine-specific payload interpretation occurs here.
          */
-        let capability_id = &request.envelope.metadata.descriptor.capability_id;
+        let capability_id = &request.event.envelope.metadata.descriptor.capability_id;
 
         let security = context
             .security()

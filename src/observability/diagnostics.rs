@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use crate::error::ErrorReference;
-use crate::identity::{CapabilityId, EngineId};
+use crate::identity::{CapabilityId, EngineId, EngineInstanceId};
 use crate::observability::correlation::CorrelationContext;
 
 /// Maximum number of structured detail entries carried by one diagnostic.
@@ -56,6 +56,7 @@ pub enum DiagnosticCondition {
 pub enum DiagnosticSubject {
     Component(String),
     Engine(EngineId),
+    EngineInstance(EngineInstanceId),
     Capability(CapabilityId),
     Dependency(String),
     Runtime,
@@ -90,6 +91,7 @@ impl DiagnosticSubject {
 enum DiagnosticSubjectWire {
     Component(String),
     Engine(EngineId),
+    EngineInstance(EngineInstanceId),
     Capability(CapabilityId),
     Dependency(String),
     Runtime,
@@ -106,6 +108,7 @@ impl<'de> serde::Deserialize<'de> for DiagnosticSubject {
                 DiagnosticSubject::component(value).map_err(serde::de::Error::custom)
             }
             DiagnosticSubjectWire::Engine(value) => Ok(Self::Engine(value)),
+            DiagnosticSubjectWire::EngineInstance(value) => Ok(Self::EngineInstance(value)),
             DiagnosticSubjectWire::Capability(value) => Ok(Self::Capability(value)),
             DiagnosticSubjectWire::Dependency(value) => {
                 DiagnosticSubject::dependency(value).map_err(serde::de::Error::custom)
@@ -457,11 +460,14 @@ mod tests {
     #[test]
     fn subjects_support_core_identities_and_generic_targets() {
         let engine = DiagnosticSubject::Engine(EngineId::new("engine-1").unwrap());
+        let instance =
+            DiagnosticSubject::EngineInstance(EngineInstanceId::new("instance-1").unwrap());
         let capability = DiagnosticSubject::Capability(CapabilityId::new("cap-1").unwrap());
         let component = DiagnosticSubject::component("core-runtime").unwrap();
         let dependency = DiagnosticSubject::dependency("database").unwrap();
 
         assert!(matches!(engine, DiagnosticSubject::Engine(_)));
+        assert!(matches!(instance, DiagnosticSubject::EngineInstance(_)));
         assert!(matches!(capability, DiagnosticSubject::Capability(_)));
         assert!(matches!(component, DiagnosticSubject::Component(_)));
         assert!(matches!(dependency, DiagnosticSubject::Dependency(_)));
@@ -475,6 +481,14 @@ mod tests {
         assert_eq!(
             component,
             DiagnosticSubject::component("core-runtime").unwrap()
+        );
+
+        let instance =
+            serde_json::from_str::<DiagnosticSubject>(r#"{"EngineInstance":"instance-1"}"#)
+                .expect("valid engine instance subject should deserialize");
+        assert_eq!(
+            instance,
+            DiagnosticSubject::EngineInstance(EngineInstanceId::new("instance-1").unwrap())
         );
 
         assert!(serde_json::from_str::<DiagnosticSubject>(r#"{"Component":""}"#).is_err());

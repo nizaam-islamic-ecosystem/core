@@ -1,7 +1,12 @@
-use crate::contracts::Version;
-use crate::identity::{CapabilityId, EngineId};
+use crate::contracts::descriptor::{
+    ContractDescriptor, EncodedPayload, Interaction, PayloadDescriptor,
+};
+use crate::contracts::metadata::{ContractMetadata, Participants};
+use crate::contracts::{MessageEnvelope, UniversalEvent, Version};
+use crate::identity::{CapabilityId, ContractId, EngineId, EventId, MessageId};
 use crate::operation::OperationContext;
 use crate::status::Retryability;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{ErrorClass, ErrorCode, ErrorOwner, ErrorReference, Severity};
 
@@ -64,11 +69,114 @@ pub struct GlobalError {
     pub cause: Option<ErrorReference>,
 }
 
-/// A runtime occurrence that references a catalog definition.
+/// A runtime error occurrence that owns its universal Event contract.
+///
+/// The error system supplies only the error-domain occurrence. The universal
+/// Event boundary is assembled internally so callers never have to construct
+/// or pass a `UniversalEvent`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ErrorEvent {
-    pub reference: ErrorReference,
+    /// The universal Event contract carrying the common event boundary.
+    pub event: UniversalEvent,
+    /// Error-specific occurrence data.
     pub error: GlobalError,
+}
+
+static NEXT_ERROR_EVENT_ID: AtomicU64 = AtomicU64::new(1);
+
+impl ErrorEvent {
+    /// Creates an ErrorEvent and constructs its universal Event internally.
+    pub fn new(error: GlobalError) -> Self {
+        let sequence = NEXT_ERROR_EVENT_ID.fetch_add(1, Ordering::Relaxed);
+        let event_id = EventId::new(format!("error-{sequence}-{}", error.code.as_str()))
+            .expect("validated error codes produce valid event ids");
+
+        let message_id = MessageId::new(format!("error-message-{event_id}"))
+            .expect("derived error message ids are non-empty");
+
+        let sender = error
+            .context
+            .engine_id
+            .clone()
+            .unwrap_or_else(|| EngineId::new("core").expect("static core engine id is valid"));
+
+        let descriptor = ContractDescriptor::new(
+            ContractId::new("error.event").expect("static error contract id is valid"),
+            CapabilityId::new("error.report").expect("static error capability id is valid"),
+            Version::new(1, 0, 0),
+            Interaction::Event,
+            PayloadDescriptor::new("text/plain", Version::new(1, 0, 0))
+                .expect("static error payload descriptor is valid"),
+        );
+
+        let payload_descriptor = descriptor.payload.clone();
+        let metadata = ContractMetadata::new(
+            descriptor,
+            Participants::new(
+                sender,
+                EngineId::new("error-system").expect("static error-system engine id is valid"),
+            ),
+        );
+
+        let envelope = MessageEnvelope::new(
+            message_id,
+            error.context.operation.clone(),
+            metadata,
+            EncodedPayload::new(payload_descriptor, error.message.as_bytes().to_vec()),
+        );
+
+        let scope = error
+            .context
+            .engine_id
+            .as_ref()
+            .map(|engine| format!("engine:{}", engine.as_str()))
+            .unwrap_or_else(|| "global".to_owned());
+
+        let event = UniversalEvent::from_parts(envelope, event_id, "error.occurred", "error", scope).expect("internal ErrorEvent construction must produce a valid universal Event");
+
+        Self { event, error }
+    }
+
+    /// Returns the error reference derived from the validated error code.
+    pub fn reference(&self) -> ErrorReference {
+        ErrorReference::new(self.error.code.as_str().to_owned())
+            .expect("validated error codes produce valid references")
+    }
+
+    /// Returns the universal Event occurrence identity.
+    pub fn event_id(&self) -> &EventId {
+        self.event.event_id()
+    }
+
+    /// Returns the universal logical message identity.
+    pub fn message_id(&self) -> &MessageId {
+        self.event.message_id()
+    }
+
+    /// Returns the semantic Event name.
+    pub fn event_name(&self) -> &crate::events::EventName {
+        self.event.event_name()
+    }
+
+    /// Returns the semantic Event type.
+    pub fn event_type(&self) -> &str {
+        self.event.event_type()
+    }
+
+    /// Returns the generic Event scope.
+    pub fn event_scope(&self) -> &str {
+        self.event.scope()
+    }
+
+    /// Returns the complete universal Event contract.
+    pub fn universal_event(&self) -> &UniversalEvent {
+        &self.event
+    }
+
+    /// Returns the error-specific payload.
+    pub fn error(&self) -> &GlobalError {
+        &self.error
+    }
 }
 
 impl GlobalError {
@@ -116,6 +224,7 @@ impl GlobalError {
 mod tests {
     use super::*;
     use crate::contracts::Version;
+    use crate::contracts::descriptor::Interaction;
     use crate::error::{ErrorClass, ErrorCode, ErrorDefinition, ErrorOwner, Severity};
     use crate::identity::{CorrelationId, OperationId};
     use crate::operation::Operation;
@@ -222,5 +331,40 @@ mod tests {
         let cause = ErrorReference::new("CORE.CAUSE.001").unwrap();
         error = error.caused_by(cause.clone());
         assert_eq!(error.cause, Some(cause));
+    }
+
+    #[test]
+    fn error_event_constructs_universal_event_internally() {
+        let event = ErrorEvent::new(global_error());
+
+        assert!(!event.event_id().as_str().is_empty());
+        assert!(!event.message_id().as_str().is_empty());
+        assert_eq!(event.event_name().as_str(), "error.occurred");
+        assert_eq!(event.event_type(), "error");
+        assert_eq!(event.event_scope(), "global");
+        assert_eq!(event.reference().as_str(), "CORE.TEST.001");
+        assert_eq!(event.error().message, "Test error");
+    }
+
+    #[test]
+    fn error_event_preserves_operation_context_in_universal_envelope() {
+        let error = global_error();
+        let operation = error.context.operation.clone();
+
+        let event = ErrorEvent::new(error);
+
+        assert_eq!(
+            event.universal_event().envelope.operation_context,
+            operation
+        );
+        assert_eq!(
+            event
+                .universal_event()
+                .envelope
+                .metadata
+                .descriptor
+                .interaction,
+            Interaction::Event
+        );
     }
 }

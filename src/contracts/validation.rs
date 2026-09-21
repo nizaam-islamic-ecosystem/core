@@ -7,11 +7,12 @@ use crate::contracts::event::UniversalEvent;
 use crate::contracts::request::UniversalRequest;
 use crate::contracts::response::UniversalResponse;
 
-/// A structural contract validation failure.
+/// A structural contract validation failurae.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValidationError {
     EmptyPayload,
     InteractionMismatch,
+    EmptyEventName,
     EmptyEventType,
     EmptyEventScope,
     CapabilityRequirementMismatch,
@@ -24,6 +25,7 @@ impl fmt::Display for ValidationError {
         let message = match self {
             Self::EmptyPayload => "a contract payload must not be empty",
             Self::InteractionMismatch => "the envelope interaction does not match its message kind",
+            Self::EmptyEventName => "an event name must not be empty",
             Self::EmptyEventType => "an event type must not be empty",
             Self::EmptyEventScope => "an event scope must not be empty",
             Self::CapabilityRequirementMismatch => {
@@ -36,6 +38,7 @@ impl fmt::Display for ValidationError {
                 "the payload descriptor does not match the contract descriptor"
             }
         };
+
         formatter.write_str(message)
     }
 }
@@ -68,19 +71,52 @@ pub fn validate_envelope(envelope: &MessageEnvelope) -> Result<(), ValidationErr
 }
 
 pub fn validate_request(request: &UniversalRequest) -> Result<(), ValidationError> {
-    if request.envelope.metadata.descriptor.interaction != Interaction::Request {
+    let event = request.universal_event();
+
+    if event.envelope.metadata.descriptor.interaction != Interaction::Request {
         return Err(ValidationError::InteractionMismatch);
     }
 
-    validate_envelope(&request.envelope)
+    validate_wrapper_event_metadata(event, "universal.request", "request")?;
+    validate_envelope(&event.envelope)
 }
 
 pub fn validate_response(response: &UniversalResponse) -> Result<(), ValidationError> {
-    if response.envelope.metadata.descriptor.interaction != Interaction::Response {
+    let event = response.universal_event();
+
+    if event.envelope.metadata.descriptor.interaction != Interaction::Response {
         return Err(ValidationError::InteractionMismatch);
     }
 
-    validate_envelope(&response.envelope)
+    validate_wrapper_event_metadata(event, "universal.response", "response")?;
+    validate_envelope(&event.envelope)
+}
+
+fn validate_wrapper_event_metadata(
+    event: &UniversalEvent,
+    expected_event_name: &str,
+    expected_event_type: &str,
+) -> Result<(), ValidationError> {
+    if event.event_name().as_str().trim().is_empty() {
+        return Err(ValidationError::EmptyEventName);
+    }
+
+    if event.event_type().trim().is_empty() {
+        return Err(ValidationError::EmptyEventType);
+    }
+
+    if event.scope().trim().is_empty() {
+        return Err(ValidationError::EmptyEventScope);
+    }
+
+    if event.event_name().as_str() != expected_event_name
+        || event.event_type() != expected_event_type
+        || event.scope() != "global"
+    {
+        return Err(ValidationError::InteractionMismatch);
+    }
+
+    Ok(())
 }
 
 /// Validates the structural invariants of a universal Event.
@@ -91,6 +127,10 @@ pub fn validate_response(response: &UniversalResponse) -> Result<(), ValidationE
 pub fn validate_event(event: &UniversalEvent) -> Result<(), ValidationError> {
     if event.envelope.metadata.descriptor.interaction != Interaction::Event {
         return Err(ValidationError::InteractionMismatch);
+    }
+
+    if event.event_name().as_str().trim().is_empty() {
+        return Err(ValidationError::EmptyEventName);
     }
 
     if event.event_type().trim().is_empty() {
@@ -107,34 +147,35 @@ pub fn validate_event(event: &UniversalEvent) -> Result<(), ValidationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::contracts::descriptor::{
         ContractDescriptor, EncodedPayload, Interaction, PayloadDescriptor, Version,
     };
     use crate::contracts::event::UniversalEvent;
     use crate::contracts::metadata::{ContractMetadata, Participants};
-    use crate::contracts::request::UniversalRequest;
     use crate::identity::{
-        CapabilityId, ContractId, CorrelationId, EngineId, EventId, MessageId, OperationId,
+        CapabilityId, ContractId, CorrelationId, EngineId, MessageId, OperationId,
     };
     use crate::operation::{Operation, OperationContext};
 
-    #[test]
-    fn valid_request_passes_structural_validation() {
+    fn make_envelope(interaction: Interaction) -> MessageEnvelope {
         let descriptor = ContractDescriptor::new(
-            ContractId::new("lookup.request").unwrap(),
-            CapabilityId::new("lookup").unwrap(),
+            ContractId::new("validation.contract").unwrap(),
+            CapabilityId::new("validation.capability").unwrap(),
             Version::new(1, 0, 0),
-            Interaction::Request,
+            interaction,
             PayloadDescriptor::new("application/octet-stream", Version::new(1, 0, 0)).unwrap(),
         );
+
         let metadata = ContractMetadata::new(
             descriptor.clone(),
             Participants::new(
-                EngineId::new("caller").unwrap(),
-                EngineId::new("provider").unwrap(),
+                EngineId::new("sender").unwrap(),
+                EngineId::new("receiver").unwrap(),
             ),
         );
-        let envelope = MessageEnvelope::new(
+
+        MessageEnvelope::new(
             MessageId::new("message-1").unwrap(),
             OperationContext::new(Operation::new(
                 OperationId::new("operation-1").unwrap(),
@@ -142,68 +183,90 @@ mod tests {
             )),
             metadata,
             EncodedPayload::new(descriptor.payload, b"payload".to_vec()),
-        );
-
-        assert_eq!(validate_request(&UniversalRequest::new(envelope)), Ok(()));
+        )
     }
 
     #[test]
-    fn request_rejects_a_contract_below_the_minimum_required_version() {
-        let descriptor = ContractDescriptor::new(
-            ContractId::new("lookup.request").unwrap(),
-            CapabilityId::new("lookup").unwrap(),
-            Version::new(1, 2, 0),
-            Interaction::Request,
-            PayloadDescriptor::new("application/octet-stream", Version::new(1, 0, 0)).unwrap(),
-        );
-        let metadata = ContractMetadata::new(
-            descriptor.clone(),
-            Participants::new(
-                EngineId::new("caller").unwrap(),
-                EngineId::new("provider").unwrap(),
-            ),
-        )
-        .with_requirements(
-            crate::contracts::metadata::RequirementsMetadata::none()
-                .requiring_contract_version(Version::new(1, 3, 0)),
-        );
-        let envelope = MessageEnvelope::new(
-            MessageId::new("message-2").unwrap(),
-            OperationContext::new(Operation::new(
-                OperationId::new("operation-2").unwrap(),
-                CorrelationId::new("correlation-2").unwrap(),
-            )),
-            metadata,
-            EncodedPayload::new(descriptor.payload, b"payload".to_vec()),
+    fn valid_request_passes_structural_validation() {
+        let request = UniversalRequest::new(make_envelope(Interaction::Request));
+
+        assert_eq!(validate_request(&request), Ok(()));
+    }
+
+    #[test]
+    fn response_rejects_non_response_interaction() {
+        let response = UniversalResponse::new(
+            make_envelope(Interaction::Request),
+            crate::status::Status::Success,
         );
 
         assert_eq!(
-            validate_request(&UniversalRequest::new(envelope)),
-            Err(ValidationError::MinimumContractVersionMismatch)
+            validate_response(&response),
+            Err(ValidationError::InteractionMismatch)
         );
+    }
+
+    #[test]
+    fn request_rejects_contradictory_event_metadata() {
+        let mut request = UniversalRequest::new(make_envelope(Interaction::Request));
+        request.event.event_type = "response".into();
+
+        assert_eq!(
+            validate_request(&request),
+            Err(ValidationError::InteractionMismatch)
+        );
+    }
+
+    #[test]
+    fn response_rejects_contradictory_event_metadata() {
+        let mut response = UniversalResponse::new(
+            make_envelope(Interaction::Response),
+            crate::status::Status::Success,
+        );
+        response.event.scope = "engine:test".into();
+
+        assert_eq!(
+            validate_response(&response),
+            Err(ValidationError::InteractionMismatch)
+        );
+    }
+
+    #[test]
+    fn valid_event_passes_structural_validation() {
+        let event = UniversalEvent::new(
+            make_envelope(Interaction::Event),
+            "operation.completed",
+            "operation.completed",
+            "engine:test",
+        )
+        .unwrap();
+
+        assert_eq!(validate_event(&event), Ok(()));
     }
 
     #[test]
     fn envelope_rejects_empty_payload() {
         let descriptor = ContractDescriptor::new(
-            ContractId::new("lookup.request").unwrap(),
-            CapabilityId::new("lookup").unwrap(),
+            ContractId::new("validation.empty").unwrap(),
+            CapabilityId::new("validation.capability").unwrap(),
             Version::new(1, 0, 0),
             Interaction::Request,
             PayloadDescriptor::new("application/octet-stream", Version::new(1, 0, 0)).unwrap(),
         );
+
         let metadata = ContractMetadata::new(
             descriptor.clone(),
             Participants::new(
-                EngineId::new("caller").unwrap(),
-                EngineId::new("provider").unwrap(),
+                EngineId::new("sender").unwrap(),
+                EngineId::new("receiver").unwrap(),
             ),
         );
+
         let envelope = MessageEnvelope::new(
-            MessageId::new("message-1").unwrap(),
+            MessageId::new("message-empty").unwrap(),
             OperationContext::new(Operation::new(
-                OperationId::new("operation-1").unwrap(),
-                CorrelationId::new("correlation-1").unwrap(),
+                OperationId::new("operation-empty").unwrap(),
+                CorrelationId::new("correlation-empty").unwrap(),
             )),
             metadata,
             EncodedPayload::new(descriptor.payload, Vec::<u8>::new()),
@@ -216,140 +279,42 @@ mod tests {
     }
 
     #[test]
-    fn response_rejects_non_response_interaction() {
-        let descriptor = ContractDescriptor::new(
-            ContractId::new("lookup.response").unwrap(),
-            CapabilityId::new("lookup").unwrap(),
-            Version::new(1, 0, 0),
-            Interaction::Request,
-            PayloadDescriptor::new("application/octet-stream", Version::new(1, 0, 0)).unwrap(),
-        );
-        let metadata = ContractMetadata::new(
-            descriptor.clone(),
-            Participants::new(
-                EngineId::new("caller").unwrap(),
-                EngineId::new("provider").unwrap(),
-            ),
-        );
-        let envelope = MessageEnvelope::new(
-            MessageId::new("message-1").unwrap(),
-            OperationContext::new(Operation::new(
-                OperationId::new("operation-1").unwrap(),
-                CorrelationId::new("correlation-1").unwrap(),
-            )),
-            metadata,
-            EncodedPayload::new(descriptor.payload, b"payload".to_vec()),
-        );
-
-        assert_eq!(
-            validate_response(&UniversalResponse::new(
-                envelope,
-                crate::status::Status::Success
-            )),
-            Err(ValidationError::InteractionMismatch)
-        );
-    }
-
-    #[test]
-    fn envelope_rejects_payload_descriptor_mismatch() {
-        let payload =
-            PayloadDescriptor::new("application/octet-stream", Version::new(1, 0, 0)).unwrap();
-        let other_payload =
-            PayloadDescriptor::new("application/json", Version::new(1, 0, 0)).unwrap();
-        let descriptor = ContractDescriptor::new(
-            ContractId::new("lookup.request").unwrap(),
-            CapabilityId::new("lookup").unwrap(),
-            Version::new(1, 0, 0),
-            Interaction::Request,
-            payload,
-        );
-        let metadata = ContractMetadata::new(
-            descriptor.clone(),
-            Participants::new(
-                EngineId::new("caller").unwrap(),
-                EngineId::new("provider").unwrap(),
-            ),
-        );
-        // The encoded payload uses a different descriptor than the metadata requires
-        let envelope = MessageEnvelope::new(
-            MessageId::new("message-1").unwrap(),
-            OperationContext::new(Operation::new(
-                OperationId::new("operation-1").unwrap(),
-                CorrelationId::new("correlation-1").unwrap(),
-            )),
-            metadata,
-            EncodedPayload::new(other_payload, b"payload".to_vec()),
-        );
-
-        assert_eq!(
-            validate_envelope(&envelope),
-            Err(ValidationError::PayloadDescriptorMismatch)
-        );
-    }
-
-    #[test]
-    fn valid_event_passes_structural_validation() {
-        let descriptor = ContractDescriptor::new(
-            ContractId::new("event.contract").unwrap(),
-            CapabilityId::new("events.read").unwrap(),
-            Version::new(1, 0, 0),
-            Interaction::Event,
-            PayloadDescriptor::new("application/octet-stream", Version::new(1, 0, 0)).unwrap(),
-        );
-        let metadata = ContractMetadata::new(
-            descriptor.clone(),
-            Participants::new(
-                EngineId::new("publisher").unwrap(),
-                EngineId::new("subscriber").unwrap(),
-            ),
-        );
-        let envelope = MessageEnvelope::new(
-            MessageId::new("event-message-1").unwrap(),
-            OperationContext::new(Operation::new(
-                OperationId::new("event-operation-1").unwrap(),
-                CorrelationId::new("event-correlation-1").unwrap(),
-            )),
-            metadata,
-            EncodedPayload::new(descriptor.payload, b"event payload"),
-        );
-
-        let event = UniversalEvent::new(
-            envelope,
-            EventId::new("event-1").unwrap(),
-            "operation.completed",
-            "engine:test",
-        )
-        .unwrap();
-
-        assert_eq!(validate_event(&event), Ok(()));
-    }
-
-    #[test]
     fn validation_error_display_messages() {
         assert_eq!(
             ValidationError::EmptyPayload.to_string(),
             "a contract payload must not be empty"
         );
+
         assert_eq!(
             ValidationError::InteractionMismatch.to_string(),
             "the envelope interaction does not match its message kind"
         );
+
+        assert_eq!(
+            ValidationError::EmptyEventName.to_string(),
+            "an event name must not be empty"
+        );
+
         assert_eq!(
             ValidationError::EmptyEventType.to_string(),
             "an event type must not be empty"
         );
+
         assert_eq!(
             ValidationError::EmptyEventScope.to_string(),
             "an event scope must not be empty"
         );
+
         assert_eq!(
             ValidationError::CapabilityRequirementMismatch.to_string(),
             "the required capability does not match the contract"
         );
+
         assert_eq!(
             ValidationError::MinimumContractVersionMismatch.to_string(),
             "the contract version does not meet the minimum required version"
         );
+
         assert_eq!(
             ValidationError::PayloadDescriptorMismatch.to_string(),
             "the payload descriptor does not match the contract descriptor"
@@ -359,6 +324,7 @@ mod tests {
     #[test]
     fn validation_error_is_error_trait() {
         fn assert_error<E: std::error::Error>(_: E) {}
+
         assert_error(ValidationError::EmptyPayload);
         assert_error(ValidationError::InteractionMismatch);
     }

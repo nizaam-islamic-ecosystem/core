@@ -31,9 +31,8 @@ Implementation began with an existing Cargo library skeleton at the repository r
 | 12 | Streaming, Concurrency, Background Tasks     | 12    | verified    |
 | 13 | Retry and Idempotency                        | 13    | verified    |
 | 14 | Internal Events                              | 14    | verified    |
-| 15 | Control Plane                                | 15    | in progress |
-| 16 | Engine SDK                                   | 16    | not started |
-| 17 | Testing and Conformance hardening            | 17    | not started |
+| 15 | Control Plane                                | 15    | verified    |
+| 16 | Testing and Conformance hardening            | 16    | in progress |
 
 Testing is continuous. Phase 16 is the final integration and conformance hardening phase, not the first point at which tests are written.
 
@@ -14350,6 +14349,68 @@ The phase is not complete when only Control Plane tests pass.
 
 All previous Core tests must continue to pass.
 
+### Phase 15 Implementation Checklist
+
+* [x] Implement Control Plane facade
+* [x] Implement communication admission
+* [x] Implement declarative engine registration
+* [x] Implement engine registry
+* [x] Implement independent routing membership
+* [x] Implement immutable membership snapshots
+* [x] Implement membership versioning
+* [x] Implement engine observation storage
+* [x] Implement contract identification and compatibility filtering
+* [x] Implement capability identification and advertisement filtering
+* [x] Implement declarative provider metadata
+* [x] Implement provider compatibility filtering
+* [x] Preserve provider resolution separately from instance routing
+* [x] Implement global capability requirements
+* [x] Implement blocking dependencies
+* [x] Implement non-blocking dependencies
+* [x] Implement conditional dependencies
+* [x] Implement global coordination plans
+* [x] Implement PlanId / PlanVersion separation
+* [x] Implement plan lifecycle validation
+* [x] Implement dependency graph validation
+* [x] Implement deterministic cycle detection
+* [x] Implement immutable coordination snapshots
+* [x] Implement deterministic replanning
+* [x] Implement logical destinations
+* [x] Implement explicit destinations
+* [x] Implement hard destination semantics
+* [x] Implement preferred destination semantics
+* [x] Implement explicit fallback semantics
+* [x] Implement destination eligibility
+* [x] Integrate lifecycle into destination eligibility
+* [x] Integrate health observations into destination eligibility
+* [x] Integrate capability advertisement into destination eligibility
+* [x] Integrate contract compatibility into destination eligibility
+* [x] Implement deterministic routing policy
+* [x] Implement round-robin routing policy
+* [x] Implement weighted routing policy
+* [x] Implement capacity-aware routing policy
+* [x] Implement locality-aware routing policy
+* [x] Keep routing policy stateless
+* [x] Implement immutable per-attempt routing decisions
+* [x] Preserve attempt identity during routing
+* [x] Reject operation/attempt context mismatches
+* [x] Implement resolution composition
+* [x] Implement generic context requirements
+* [x] Implement opaque context packages
+* [x] Preserve operation/provenance/artifact context
+* [x] Reuse existing Universal Client and Transport
+* [x] Implement concrete-instance communication targeting
+* [x] Implement Control Plane failure classification
+* [x] Preserve GlobalError causality and metadata
+* [x] Integrate Runtime lifecycle without creating a second lifecycle system
+* [x] Add source-file unit tests
+* [x] Add Control Plane module-level composition tests
+* [x] Add Control Plane integration tests
+* [x] Add Phase 15 end-to-end tests
+* [x] Add cross-phase conformance coverage
+* [x] Run complete repository verification
+* [x]  Confirm all previously verified phases remain green
+
 ---
 
 ## Phase 16: Testing and Conformance
@@ -16856,41 +16917,48 @@ architecture.
   creating a competing runtime lifecycle state machine.
 * Phase 14 extends previously verified Core mechanisms rather than replacing
   them.
+* **Control Plane remains a coordination layer, not an execution engine.**
+* **Control Plane does not become a workflow engine.**
+* **Control Plane does not own transport.** Communication delegates to the existing `UniversalClient`/Transport layer.
+* **Control Plane does not duplicate Retry.** Retry creates new `AttemptId`s; Control Plane independently routes each attempt.
+* **`OperationId` and `AttemptId` remain separate identities.**
+* **`EngineId` and `EngineInstanceId` remain separate identities.** Routing targets concrete engine instances, not logical engines.
+* **Registry and Membership remain separate concerns.** Registry provides discovery/metadata; Membership provides routing membership and immutable snapshots.
+* **Membership snapshots are immutable.** A snapshot remains stable even if live membership changes afterward.
+* **Control Plane routing is stateless and deterministic.** Routing policies do not maintain cursors, mutable membership state, retry state, or randomness.
+* **Routing policy is separated from destination eligibility.** Eligibility determines which destinations are valid; policy chooses among eligible candidates.
+* **Explicit destination semantics are preserved.** A hard destination cannot fall back, while a preferred destination may fall back.
+* **Destination resolution does not itself select a concrete instance.** Logical destinations remain capability-based until the routing stage.
+* **Capability resolution only verifies capability advertisement.** It does not execute capabilities.
+* **Contract compatibility reuses the canonical Core compatibility system.** No second compatibility algorithm is introduced.
+* **Provider resolution does not execute or route to providers.**
+* **Provider identity remains provider-local.** Phase 15 uses a provider-local `String` rather than introducing a new global `ProviderId` Core primitive.
+* **No separate capability-readiness authority is introduced.** Routing eligibility currently combines lifecycle, readiness, health, capability advertisement, and contract compatibility.
+* **Lifecycle state is consumed, not mutated, by Control Plane.** Only `Serving` is considered routable.
+* **Health is an observation/input to routing eligibility, not a routing authority.**
+* **Observations are maintained separately from membership and registry state.**
+* **Planning remains declarative.** Plans do not contain provider implementations, worker state, retry state, queue state, health state, or domain execution state.
+* **Plan identity, operation identity, and plan version remain distinct concepts.**
+* **Dependency validation includes deterministic cycle detection.**
+* **Replanning is snapshot-based and deterministic.** Replanning compares coordination requirements without selecting providers, destinations, or creating plan identities.
+* **Identical coordination requirements do not trigger unnecessary replanning.**
+* **Dependency requirements are treated semantically as a set.** Duplicate identical requirements do not create false replanning changes.
+* **Context semantics remain opaque to Control Plane.** Provider/consumer layers own interpretation, authority, completeness, freshness, and consistency.
+* **Existing Core context types are reused.** No second systems for security, tracing, deadlines, cancellation, runtime, or provenance are introduced.
+* **Control Plane communication accepts only an already-routed concrete target.**
+* **Communication does not implement transport concerns such as connections, framing, fragmentation, reassembly, or transport retries.**
+* **Routing decisions are immutable once created.**
+* **Routing does not create retry attempts or mutate attempt lifecycle.**
+* **Stale routing decisions cannot override later runtime admission/authorization.**
+* **Security authorization remains outside Control Plane.** Control Plane does not create a second authorization system.
+* **Failure handling wraps and classifies the existing `GlobalError` system rather than creating a second error system.**
+* **The Control Plane facade remains thin and stateless.** It composes admission, replanning, resolution, and routing rather than maintaining another source of planning/routing state.
 
 ## Open Questions
 
 None currently. Concrete trait signatures, provider choices, serialization, async runtime, transport implementation, and eventual crate splitting are deliberately deferred by the plan rather than unresolved architecture. Phase 7's in-memory transport is a verification implementation of the abstract boundary and does not resolve or authorize a concrete production network transport, serialization provider, or async runtime.
 
 ### Current State
-
-Phase 14 is implemented, merged, and verified.
-
-Phases 0 through 14 are now verified.
-
-The Core currently provides:
-
-* foundational identity, operation, and status primitives;
-* universal contracts and payload boundaries;
-* the shared Error System;
-* structured Logging;
-* execution Context and lifecycle infrastructure;
-* Capability registration and dispatch;
-* Transport and universal client/server mechanisms;
-* Engine Runtime;
-* Middleware and Security;
-* Artifact and Provenance systems;
-* Configuration, Health, and Observability;
-* Streaming, Concurrency, and Background Tasks;
-* Retry and Idempotency mechanisms; and
-* the Internal Event subsystem.
-
-Phase 14 provides optional internal notification infrastructure while remaining
-separate from transport, streaming, Control Plane routing, durable messaging,
-workflow execution, and domain semantics.
-
-### Next Step
-
-Proceed to Phase 15: Control Plane.
 
 Phase 15 introduces the communication-focused Control Plane responsible for:
 
@@ -16922,3 +16990,7 @@ Control Plane
 
 Internal Events must not automatically become Control Plane messages, and the
 Control Plane must not replace the existing Event subsystem.
+
+### Next Step
+
+Proceed to Phase 15: Testing and Conformance.

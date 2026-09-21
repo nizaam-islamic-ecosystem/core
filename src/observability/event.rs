@@ -5,12 +5,12 @@
 //! observability inputs; the universal envelope and Event metadata are built
 //! internally.
 
-use crate::contracts::UniversalEvent;
 use crate::contracts::descriptor::{
     ContractDescriptor, EncodedPayload, Interaction, PayloadDescriptor, Version,
 };
 use crate::contracts::envelope::MessageEnvelope;
 use crate::contracts::metadata::{ContractMetadata, Participants};
+use crate::contracts::{UniversalEvent, UniversalEventError};
 use crate::events::EventName;
 use crate::identity::{
     CapabilityId, ContractId, CorrelationId, EngineId, EventId, MessageId, OperationId,
@@ -34,7 +34,7 @@ impl ObservabilityEvent {
         event_type: impl Into<String>,
         scope: impl Into<String>,
         operation_context: OperationContext,
-    ) -> Self {
+    ) -> Result<Self, UniversalEventError> {
         let event_type = event_type.into();
         let scope = scope.into();
 
@@ -66,13 +66,18 @@ impl ObservabilityEvent {
             message_id,
             operation_context,
             metadata,
-            EncodedPayload::new(payload_descriptor, Vec::<u8>::new()),
+            EncodedPayload::new(payload_descriptor, vec![0]),
         );
 
-        let event = UniversalEvent::new(envelope, event_name.to_string(), event_type, scope)
-            .expect("validated observability metadata must produce a valid universal Event");
+        let event = UniversalEvent::from_parts(
+            envelope,
+            event_id,
+            event_name.to_string(),
+            event_type,
+            scope,
+        )?;
 
-        Self { event }
+        Ok(Self { event })
     }
 
     /// Returns the complete universal Event contract.
@@ -142,6 +147,7 @@ mod tests {
             "global",
             operation_context(),
         )
+        .unwrap()
     }
 
     #[test]
@@ -149,7 +155,7 @@ mod tests {
         let event = event("event-1");
 
         assert!(!event.event_id().as_str().is_empty());
-        assert_ne!(event.event_id().as_str(), "event-1");
+        assert_eq!(event.event_id().as_str(), "event-1");
         assert_eq!(event.message_id().as_str(), "observability-message-event-1");
         assert_eq!(event.event_name().as_str(), "observability.event");
         assert_eq!(event.event_type(), "observability");
@@ -175,6 +181,32 @@ mod tests {
     }
 
     #[test]
+    fn rejects_empty_event_type_without_panicking() {
+        let result = ObservabilityEvent::new(
+            EventId::new("event-empty-type").unwrap(),
+            EventName::new("diagnostic.created").unwrap(),
+            "   ",
+            "global",
+            operation_context(),
+        );
+
+        assert_eq!(result, Err(UniversalEventError::EmptyEventType));
+    }
+
+    #[test]
+    fn rejects_empty_event_scope_without_panicking() {
+        let result = ObservabilityEvent::new(
+            EventId::new("event-empty-scope").unwrap(),
+            EventName::new("diagnostic.created").unwrap(),
+            "diagnostic",
+            " \t",
+            operation_context(),
+        );
+
+        assert_eq!(result, Err(UniversalEventError::EmptyEventScope));
+    }
+
+    #[test]
     fn preserves_domain_inputs_in_the_universal_event() {
         let event = ObservabilityEvent::new(
             EventId::new("event-4").unwrap(),
@@ -182,7 +214,8 @@ mod tests {
             "diagnostic",
             "global",
             operation_context(),
-        );
+        )
+        .unwrap();
 
         assert_eq!(event.event_name().as_str(), "diagnostic.created");
         assert_eq!(event.event_type(), "diagnostic");

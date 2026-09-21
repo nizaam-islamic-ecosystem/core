@@ -547,7 +547,7 @@ pub fn eligible_destinations(
 
     for member in input.membership.candidates() {
         if let Some(target) = explicit_target
-            && input.request.is_hard()
+            && !input.request.allows_fallback()
             && member.engine_instance_id() != target
         {
             continue;

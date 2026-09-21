@@ -102,7 +102,7 @@ mod tests {
         .unwrap();
 
         assert!(!event.event_id().as_str().is_empty());
-        assert_ne!(event.event_id(), &event_id);
+        assert_eq!(event.event_id(), &event_id);
         assert_eq!(event.message_id(), &message_id);
         assert_eq!(event.event_name().as_str(), "logging.event");
         assert_eq!(event.event_type(), "diagnostic");

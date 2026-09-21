@@ -71,33 +71,52 @@ pub fn validate_envelope(envelope: &MessageEnvelope) -> Result<(), ValidationErr
 }
 
 pub fn validate_request(request: &UniversalRequest) -> Result<(), ValidationError> {
-    if request
-        .universal_event()
-        .envelope
-        .metadata
-        .descriptor
-        .interaction
-        != Interaction::Request
-    {
+    let event = request.universal_event();
+
+    if event.envelope.metadata.descriptor.interaction != Interaction::Request {
         return Err(ValidationError::InteractionMismatch);
     }
 
-    validate_envelope(&request.universal_event().envelope)
+    validate_wrapper_event_metadata(event, "universal.request", "request")?;
+    validate_envelope(&event.envelope)
 }
 
 pub fn validate_response(response: &UniversalResponse) -> Result<(), ValidationError> {
-    if response
-        .universal_event()
-        .envelope
-        .metadata
-        .descriptor
-        .interaction
-        != Interaction::Response
+    let event = response.universal_event();
+
+    if event.envelope.metadata.descriptor.interaction != Interaction::Response {
+        return Err(ValidationError::InteractionMismatch);
+    }
+
+    validate_wrapper_event_metadata(event, "universal.response", "response")?;
+    validate_envelope(&event.envelope)
+}
+
+fn validate_wrapper_event_metadata(
+    event: &UniversalEvent,
+    expected_event_name: &str,
+    expected_event_type: &str,
+) -> Result<(), ValidationError> {
+    if event.event_name().as_str().trim().is_empty() {
+        return Err(ValidationError::EmptyEventName);
+    }
+
+    if event.event_type().trim().is_empty() {
+        return Err(ValidationError::EmptyEventType);
+    }
+
+    if event.scope().trim().is_empty() {
+        return Err(ValidationError::EmptyEventScope);
+    }
+
+    if event.event_name().as_str() != expected_event_name
+        || event.event_type() != expected_event_type
+        || event.scope() != "global"
     {
         return Err(ValidationError::InteractionMismatch);
     }
 
-    validate_envelope(&response.universal_event().envelope)
+    Ok(())
 }
 
 /// Validates the structural invariants of a universal Event.
@@ -180,6 +199,31 @@ mod tests {
             make_envelope(Interaction::Request),
             crate::status::Status::Success,
         );
+
+        assert_eq!(
+            validate_response(&response),
+            Err(ValidationError::InteractionMismatch)
+        );
+    }
+
+    #[test]
+    fn request_rejects_contradictory_event_metadata() {
+        let mut request = UniversalRequest::new(make_envelope(Interaction::Request));
+        request.event.event_type = "response".into();
+
+        assert_eq!(
+            validate_request(&request),
+            Err(ValidationError::InteractionMismatch)
+        );
+    }
+
+    #[test]
+    fn response_rejects_contradictory_event_metadata() {
+        let mut response = UniversalResponse::new(
+            make_envelope(Interaction::Response),
+            crate::status::Status::Success,
+        );
+        response.event.scope = "engine:test".into();
 
         assert_eq!(
             validate_response(&response),

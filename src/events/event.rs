@@ -135,9 +135,6 @@ impl EventContext {
 /// Error returned when an event cannot be constructed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EventCreationError {
-    /// An event name must contain at least one non-whitespace character.
-    EmptyEventName,
-
     /// An event type must contain at least one non-whitespace character.
     EmptyEventType,
 }
@@ -145,7 +142,6 @@ pub enum EventCreationError {
 impl std::fmt::Display for EventCreationError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::EmptyEventName => formatter.write_str("event name must not be empty"),
             Self::EmptyEventType => formatter.write_str("event type must not be empty"),
         }
     }

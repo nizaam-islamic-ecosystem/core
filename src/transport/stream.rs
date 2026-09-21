@@ -18,6 +18,15 @@ use std::sync::{
 /// Maximum complete wire-frame length, in decimal bytes.
 pub const MAX_FRAME_LENGTH: usize = MAX_FRAME_LENGTH_BYTES;
 
+/// Maximum number of incomplete transport streams retained for one source.
+pub const MAX_REASSEMBLY_STREAMS: usize = 256;
+
+/// Maximum aggregate fragment bytes retained for one source.
+pub const MAX_REASSEMBLY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Maximum number of fragments retained for one incomplete transport stream.
+pub const MAX_REASSEMBLY_FRAGMENTS: usize = 4096;
+
 /// A value used in `Cumulative ACK Index` when no fragment has yet been
 /// cumulatively acknowledged.
 pub const NO_CUMULATIVE_ACK: u32 = u32::MAX;
@@ -92,6 +101,7 @@ pub trait ByteSource: Send + Sync {
 #[derive(Default, Debug)]
 struct ReassemblyState {
     streams: HashMap<u64, IncomingStream>,
+    buffered_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -124,15 +134,16 @@ impl IncomingStream {
             )));
         }
 
-        if header.is_finish()
-            && self
-                .final_index
-                .replace(index)
-                .is_some_and(|old| old != index)
-        {
-            return Err(StreamError::Decode(
-                "multiple conflicting final fragments received".into(),
-            ));
+        if header.is_finish() {
+            if let Some(old) = self.final_index {
+                if old != index {
+                    return Err(StreamError::Decode(
+                        "multiple conflicting final fragments received".into(),
+                    ));
+                }
+            } else {
+                self.final_index = Some(index);
+            }
         }
 
         self.fragments.insert(index, payload);
@@ -301,7 +312,13 @@ impl<'a> MessageStream<'a> {
                 return Ok(None);
             };
 
-            let (header, payload) = framing::decode_frame(&frame).map_err(StreamError::Decode)?;
+            let (header, payload) = match framing::decode_frame(&frame) {
+                Ok(decoded) => decoded,
+                Err(error) => {
+                    self.source_state.unusable.store(true, Ordering::Release);
+                    return Err(StreamError::Decode(error));
+                }
+            };
 
             if header.flags() & FLAG_RESTART != 0 {
                 self.source_state.unusable.store(true, Ordering::Release);
@@ -322,6 +339,7 @@ impl<'a> MessageStream<'a> {
 
             if header.is_ack() {
                 if !payload.is_empty() {
+                    self.source_state.unusable.store(true, Ordering::Release);
                     return Err(StreamError::Decode(
                         "ACK frame must have a zero-length payload".into(),
                     ));
@@ -330,6 +348,7 @@ impl<'a> MessageStream<'a> {
             }
 
             if header.flags() & FLAG_MORE == 0 && !header.is_finish() {
+                self.source_state.unusable.store(true, Ordering::Release);
                 return Err(StreamError::Decode(
                     "data frame must carry FINISH or MORE".into(),
                 ));
@@ -342,12 +361,72 @@ impl<'a> MessageStream<'a> {
                     .lock()
                     .map_err(|_| StreamError::Io("reassembly lock is poisoned".into()))?;
 
+                let stream_id = header.transport_stream_id();
+                let is_new_stream = !state.streams.contains_key(&stream_id);
+
+                if is_new_stream && state.streams.len() >= MAX_REASSEMBLY_STREAMS {
+                    self.source_state.unusable.store(true, Ordering::Release);
+                    return Err(StreamError::Decode(
+                        "maximum concurrent reassembly streams exceeded".into(),
+                    ));
+                }
+
+                if !is_new_stream
+                    && state
+                        .streams
+                        .get(&stream_id)
+                        .is_some_and(|stream| stream.fragments.len() >= MAX_REASSEMBLY_FRAGMENTS)
+                {
+                    self.source_state.unusable.store(true, Ordering::Release);
+                    return Err(StreamError::Decode(
+                        "maximum reassembly fragments per stream exceeded".into(),
+                    ));
+                }
+
+                if payload.len() > MAX_REASSEMBLY_BYTES.saturating_sub(state.buffered_bytes) {
+                    self.source_state.unusable.store(true, Ordering::Release);
+                    return Err(StreamError::Decode(
+                        "maximum aggregate reassembly bytes exceeded".into(),
+                    ));
+                }
+
                 let stream = state
                     .streams
-                    .entry(header.transport_stream_id())
+                    .entry(stream_id)
                     .or_insert_with(IncomingStream::new);
 
-                stream.insert(&header, payload)?
+                let payload_len = payload.len();
+                let result = match stream.insert(&header, payload) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        self.source_state.unusable.store(true, Ordering::Release);
+                        return Err(error);
+                    }
+                };
+
+                state.buffered_bytes = match state.buffered_bytes.checked_add(payload_len) {
+                    Some(total) => total,
+                    None => {
+                        self.source_state.unusable.store(true, Ordering::Release);
+                        return Err(StreamError::Decode(
+                            "reassembly byte accounting overflow".into(),
+                        ));
+                    }
+                };
+
+                if let Some(ref message) = result {
+                    state.buffered_bytes = match state.buffered_bytes.checked_sub(message.len()) {
+                        Some(total) => total,
+                        None => {
+                            self.source_state.unusable.store(true, Ordering::Release);
+                            return Err(StreamError::Decode(
+                                "reassembly byte accounting underflow".into(),
+                            ));
+                        }
+                    };
+                }
+
+                result
             };
 
             if let Some(message) = completed {
@@ -586,6 +665,85 @@ mod tests {
         let error = recreated.recv().unwrap_err();
         assert_eq!(
             error,
+            StreamError::Decode("stream is unusable after a framing protocol violation".into())
+        );
+    }
+
+    #[test]
+    fn conflicting_finish_fragments_preserve_the_first_final_index() {
+        let mut stream = IncomingStream::new();
+
+        let first =
+            MessageHeader::new(FRAMING_VERSION, FLAG_MORE, 1, 1, 0, NO_CUMULATIVE_ACK, 0).unwrap();
+        let final_two =
+            MessageHeader::new(FRAMING_VERSION, FLAG_FINISH, 1, 1, 2, NO_CUMULATIVE_ACK, 0)
+                .unwrap();
+        let conflicting_final_one =
+            MessageHeader::new(FRAMING_VERSION, FLAG_FINISH, 1, 1, 1, NO_CUMULATIVE_ACK, 0)
+                .unwrap();
+
+        assert_eq!(stream.insert(&first, vec![b'a']), Ok(None));
+        assert_eq!(stream.insert(&final_two, vec![b'c']), Ok(None));
+        assert_eq!(
+            stream.insert(&conflicting_final_one, vec![b'b']),
+            Err(StreamError::Decode(
+                "multiple conflicting final fragments received".into()
+            ))
+        );
+        assert_eq!(stream.final_index, Some(2));
+    }
+
+    #[test]
+    fn conflicting_final_fragment_invalidates_the_shared_source() {
+        let channel = TestChannel::new();
+        let (write_end, read_end) = channel.split();
+        let sink_arc = Arc::new(write_end);
+        let source_arc = Arc::new(read_end);
+
+        for (index, flags, byte) in [
+            (0, FLAG_MORE, b'a'),
+            (2, FLAG_FINISH, b'c'),
+            (1, FLAG_FINISH, b'b'),
+        ] {
+            let header =
+                MessageHeader::new(FRAMING_VERSION, flags, 1, 8, index, NO_CUMULATIVE_ACK, 0)
+                    .unwrap();
+            let frame = framing::encode_frame(header, &[byte]).unwrap();
+            sink_arc.write(&frame).unwrap();
+        }
+
+        let stream = MessageStream::new(&*sink_arc, &*source_arc);
+        assert_eq!(
+            stream.recv().unwrap_err(),
+            StreamError::Decode("multiple conflicting final fragments received".into())
+        );
+        assert_eq!(
+            stream.recv().unwrap_err(),
+            StreamError::Decode("stream is unusable after a framing protocol violation".into())
+        );
+    }
+
+    #[test]
+    fn duplicate_fragment_invalidates_the_shared_source() {
+        let channel = TestChannel::new();
+        let (write_end, read_end) = channel.split();
+        let sink_arc = Arc::new(write_end);
+        let source_arc = Arc::new(read_end);
+
+        let header =
+            MessageHeader::new(FRAMING_VERSION, FLAG_MORE, 1, 7, 0, NO_CUMULATIVE_ACK, 0).unwrap();
+        let frame = framing::encode_frame(header, b"x").unwrap();
+
+        sink_arc.write(&frame).unwrap();
+        sink_arc.write(&frame).unwrap();
+
+        let stream = MessageStream::new(&*sink_arc, &*source_arc);
+        assert_eq!(
+            stream.recv().unwrap_err(),
+            StreamError::Decode("duplicate fragment index 0 for transport stream 7".into())
+        );
+        assert_eq!(
+            stream.recv().unwrap_err(),
             StreamError::Decode("stream is unusable after a framing protocol violation".into())
         );
     }

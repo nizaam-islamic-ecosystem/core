@@ -49,6 +49,22 @@
 //!
 //! Therefore "event" at the common message boundary does not erase the
 //! semantic distinction between Request, Response, and Event interactions.
+//!
+//! ## Breaking UniversalEvent contract
+//!
+//! `UniversalEvent::new` requires the envelope plus three explicit semantic
+//! arguments:
+//! `event_name`, `event_type`, and `scope` are explicit semantic metadata.
+//! Consumers must supply all three values; they are not inferred from the
+//! payload or envelope.
+//!
+//! `UniversalRequest` and `UniversalResponse` own the common universal Event
+//! boundary internally. Consumers must access their message envelope through
+//! `request.event.envelope` or `response.event.envelope`, rather than through
+//! the old `request.envelope` or `response.envelope` paths.
+//!
+//! This is a breaking architectural change to the public contract surface.
+//! No backward-compatibility boundary is provided.
 
 use crate::contracts::descriptor::Interaction;
 use crate::contracts::envelope::MessageEnvelope;
@@ -152,6 +168,11 @@ impl<'de> serde::Deserialize<'de> for UniversalEvent {
 impl UniversalEvent {
     /// Creates a universal occurrence wrapper from an existing message
     /// envelope and its semantic metadata.
+    ///
+    /// This constructor requires the consumer to provide `event_name`,
+    /// `event_type`, and `scope` explicitly. This is a breaking architectural
+    /// contract: those values are part of the universal Event boundary and are
+    /// not inferred or accepted through a backward-compatibility path.
     pub fn new(
         envelope: MessageEnvelope,
         event_name: impl Into<String>,
@@ -161,7 +182,12 @@ impl UniversalEvent {
         Self::from_parts(envelope, EventId::generate(), event_name, event_type, scope)
     }
 
-    fn from_parts(
+    /// Constructs a universal Event from a caller-supplied occurrence identity.
+    ///
+    /// This is the crate-internal construction boundary for domain wrappers
+    /// that already own or derive the EventId. [`Self::new`] remains the public
+    /// constructor and generates the occurrence identity automatically.
+    pub(crate) fn from_parts(
         envelope: MessageEnvelope,
         event_id: EventId,
         event_name: impl Into<String>,

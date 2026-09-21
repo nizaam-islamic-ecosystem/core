@@ -302,8 +302,9 @@ fn build_universal_event(
         ),
     };
 
-    UniversalEvent::new(
+    UniversalEvent::from_parts(
         envelope,
+        event_id,
         event_name.to_string(),
         event_type.as_str(),
         event_scope,

@@ -49,10 +49,8 @@ macro_rules! identity {
         impl $name {
             /// Creates an automatically generated identity value.
             ///
-            /// This method is intentionally provided only by identities declared
-            /// through this macro. `EngineId` and `EngineInstanceId` remain owned
-            /// by the engine identity module and therefore retain their explicit
-            /// construction semantics.
+            /// `EngineId` and `EngineInstanceId` also expose `generate()`;
+            /// their explicit constructors remain available as well.
             pub fn generate() -> Self {
                 let value = $crate::identity::generate_identity_value(stringify!($name));
                 Self(value)

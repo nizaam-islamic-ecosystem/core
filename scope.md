@@ -304,6 +304,7 @@ Before declaring a phase complete, the agent must verify the phase against:
 
 The minimum completion verification for every implementation phase is:
 
+```bash
    set -o pipefail
    {
       cargo fmt --all --check &&
@@ -313,6 +314,7 @@ The minimum completion verification for every implementation phase is:
       cargo test --workspace --all-targets &&
       cargo test --workspace --doc
    } 2>&1 | tee cargo-check.log
+```
 
 These checks must be run from the repository root.
 
@@ -354,7 +356,7 @@ Before reporting that a phase is complete, the agent must verify that:
 * the current phase's requirements are satisfied;
 * no future-phase functionality was accidentally implemented as part of
   the current phase.
-
+{
 If any of these conditions cannot be satisfied, the agent must not claim
 the phase is complete.
 
@@ -1742,7 +1744,7 @@ The complete runtime lifecycle, request pipeline, dependency behavior,
 capability visibility, concurrency behavior, and shutdown semantics are covered
 by unit and integration tests.
 
-This incorporates the full discussion rather than just the original Phase 8 description. The original scope establishes Phase 8 as the lifecycle/request-execution integration point, while our discussion fills in the missing behavioral contracts without pulling later-phase responsibilities forward. :contentReference[oaicite:1]{index=1}
+This incorporates the full discussion rather than just the original Phase 8 description. The original scope establishes Phase 8 as the lifecycle/request-execution integration point, while our discussion fills in the missing behavioral contracts without pulling later-phase responsibilities forward.
 
 One deliberate choice here is that **`FAILED` is a failure condition, not another normal lifecycle stage**. That keeps your actual state machine clean:
 

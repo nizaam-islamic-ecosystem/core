@@ -138,7 +138,7 @@ At a high level, Core can be viewed as several layers.
 
 ```mermaid
 flowchart TB
-    API["Engine / SDK-facing APIs"]
+    API["Engine"]
 
     CP["Control Plane"]
     Runtime["Engine Runtime"]

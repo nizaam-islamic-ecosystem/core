@@ -4,6 +4,9 @@ description = "Domain-agnostic Rust infrastructure core for building secure, obs
 version = "1.0.0"
 edition = "2024"
 rust-version = "1.96"
+license = "MIT"
+repository = "https://github.com/nizaam-islamic-ecosystem/core"
+readme = "README.md"
 
 [workspace]
 members = ["."]

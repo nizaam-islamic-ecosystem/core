@@ -196,7 +196,7 @@ fn live_deadline_shorter_than_delay_rejects_after_handler_starts() {
     engine.serving().unwrap();
 
     let context = test_context()
-        .with_deadline(nizaam_core::runtime::Deadline::from_now(Duration::from_millis(5)).unwrap());
+        .with_deadline(nizaam_core::runtime::Deadline::from_now(Duration::from_millis(100)).unwrap());
 
     let result = engine.dispatch(
         &context,

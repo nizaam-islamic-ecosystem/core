@@ -547,9 +547,28 @@ fn e2e_two_sequential_requests_remain_paired_by_their_contexts() {
     let first_result = first_engine
         .dispatch(&first, CAPABILITY, CONTRACT, b"one")
         .unwrap();
+    assert_eq!(
+        engine
+            .last_context(CAPABILITY)
+            .expect("first dispatch must record its context")
+            .operation()
+            .operation
+            .id,
+        first.operation().operation.id
+    );
+
     let second_result = engine
         .dispatch(&second, CAPABILITY, CONTRACT, b"two")
         .unwrap();
+    assert_eq!(
+        engine
+            .last_context(CAPABILITY)
+            .expect("second dispatch must record its context")
+            .operation()
+            .operation
+            .id,
+        second.operation().operation.id
+    );
 
     assert_eq!(first_result.as_bytes(), b"one");
     assert_eq!(second_result.as_bytes(), b"two");

@@ -21,7 +21,8 @@ use nizaam_core::identity::{
     CapabilityId, ContractId, CorrelationId, EngineId, EngineInstanceId, MessageId, OperationId,
 };
 use nizaam_core::operation::{Operation, OperationContext};
-use nizaam_core::runtime::{EngineContext, EngineRuntime, ExecutionPipeline, LifecycleState};
+use nizaam_core::middleware::chain::MiddlewareChainError;
+use nizaam_core::runtime::{EngineContext, EngineRuntime, ExecutionPipeline, LifecycleState, RequestPipelineError};
 use nizaam_core::security::{
     AuthenticationError, AuthenticationRequest, Authenticator, AuthorizationDecision,
     AuthorizationError, AuthorizationRequest, Authorizer, CredentialExtractor, PrincipalId,
@@ -221,7 +222,12 @@ fn authentication_or_authorization_failure_has_no_capability_dispatch() {
             panic!("authorization denial must prevent capability dispatch");
         });
 
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Err(RequestPipelineError::Middleware(
+            MiddlewareChainError::Rejected(ref rejection)
+        )) if rejection.reason() == "authorization denied"
+    ));
     assert_eq!(engine.invocation_count(CAPABILITY), 0);
 }
 

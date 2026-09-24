@@ -48,10 +48,34 @@ fn identity_roles_have_distinct_runtime_type_ids() {
     use std::any::TypeId;
 
     assert_ne!(TypeId::of::<OperationId>(), TypeId::of::<AttemptId>());
-    assert_ne!(TypeId::of::<OperationId>(), TypeId::of::<MessageId>());
-    assert_ne!(TypeId::of::<OperationId>(), TypeId::of::<EventId>());
-    assert_ne!(TypeId::of::<EngineId>(), TypeId::of::<EngineInstanceId>());
-    assert_ne!(TypeId::of::<EngineId>(), TypeId::of::<CapabilityId>());
+
+    assert_ne!(TypeId::of::<MessageId>(), TypeId::of::<OperationId>());
+    assert_ne!(TypeId::of::<MessageId>(), TypeId::of::<AttemptId>());
+
+    assert_ne!(TypeId::of::<EventId>(), TypeId::of::<OperationId>());
+    assert_ne!(TypeId::of::<EventId>(), TypeId::of::<AttemptId>());
+    assert_ne!(TypeId::of::<EventId>(), TypeId::of::<MessageId>());
+
+    assert_ne!(TypeId::of::<EngineId>(), TypeId::of::<OperationId>());
+    assert_ne!(TypeId::of::<EngineId>(), TypeId::of::<AttemptId>());
+    assert_ne!(TypeId::of::<EngineId>(), TypeId::of::<MessageId>());
+    assert_ne!(TypeId::of::<EngineId>(), TypeId::of::<EventId>());
+
+    assert_ne!(TypeId::of::<EngineInstanceId>(), TypeId::of::<OperationId>());
+    assert_ne!(TypeId::of::<EngineInstanceId>(), TypeId::of::<AttemptId>());
+    assert_ne!(TypeId::of::<EngineInstanceId>(), TypeId::of::<MessageId>());
+    assert_ne!(TypeId::of::<EngineInstanceId>(), TypeId::of::<EventId>());
+    assert_ne!(TypeId::of::<EngineInstanceId>(), TypeId::of::<EngineId>());
+
+    assert_ne!(TypeId::of::<CapabilityId>(), TypeId::of::<OperationId>());
+    assert_ne!(TypeId::of::<CapabilityId>(), TypeId::of::<AttemptId>());
+    assert_ne!(TypeId::of::<CapabilityId>(), TypeId::of::<MessageId>());
+    assert_ne!(TypeId::of::<CapabilityId>(), TypeId::of::<EventId>());
+    assert_ne!(TypeId::of::<CapabilityId>(), TypeId::of::<EngineId>());
+    assert_ne!(
+        TypeId::of::<CapabilityId>(),
+        TypeId::of::<EngineInstanceId>()
+    );
 }
 
 #[test]

@@ -343,11 +343,10 @@ fn event_delivery_pressure_keeps_subscriber_delivery_bounded_and_isolated() {
             move |event: &Event| {
                 if event.event_id().as_str() == "stress-event-0" {
                     slow_started_tx.send(()).unwrap();
-                    slow_release_rx
+                    let _ = slow_release_rx
                         .lock()
                         .expect("slow release receiver lock should not be poisoned")
-                        .recv()
-                        .unwrap();
+                        .recv();
                 }
             }
         },
@@ -375,6 +374,24 @@ fn event_delivery_pressure_keeps_subscriber_delivery_bounded_and_isolated() {
 
     let dispatcher =
         DeliveryDispatcher::new(DeliveryConfig::new(1, 2, 8).unwrap(), owner.clone()).unwrap();
+
+    struct SlowReleaseGuard(Option<std::sync::mpsc::Sender<()>>);
+
+    impl SlowReleaseGuard {
+        fn release(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    impl Drop for SlowReleaseGuard {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    let mut slow_release_guard = SlowReleaseGuard(Some(slow_release_tx));
     let slow_handle = dispatcher.register(slow_subscription).unwrap();
     let healthy_handle = dispatcher.register(healthy_subscription).unwrap();
 
@@ -432,8 +449,7 @@ fn event_delivery_pressure_keeps_subscriber_delivery_bounded_and_isolated() {
         "stress-event-1"
     );
 
-    slow_release_tx.send(()).unwrap();
-
+    slow_release_guard.release();
     dispatcher.shutdown();
 }
 

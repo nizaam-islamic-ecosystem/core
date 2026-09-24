@@ -637,9 +637,24 @@ fn security_rejection_does_not_create_a_retry_attempt() {
             panic!("security rejection must prevent execution");
         });
 
-    assert!(result.is_err());
+    let rejection = result.expect_err("authentication rejection must stop the request");
+    assert!(
+        matches!(
+            rejection,
+            nizaam_core::runtime::RequestPipelineError::Middleware(
+                nizaam_core::middleware::chain::MiddlewareChainError::Rejected(ref rejection)
+            ) if rejection.reason() == "authentication credentials are invalid"
+        ),
+        "unexpected security rejection: {rejection:?}"
+    );
 
-    let operation = OperationId::new("security-retry-boundary").unwrap();
+    let operation = request
+        .event
+        .envelope
+        .operation_context
+        .operation
+        .id
+        .clone();
     let attempt = Attempt::new(
         operation,
         AttemptId::new("security-retry-attempt").unwrap(),
@@ -649,7 +664,9 @@ fn security_rejection_does_not_create_a_retry_attempt() {
     attempt.start().unwrap();
     attempt.fail().unwrap();
 
-    let policy = RetryPolicy::new(3, 4).unwrap();
+    let policy = RetryPolicy::new(3, 4)
+        .unwrap()
+        .with_retryable_category(FailureCategory::Authentication);
     let backoff = BackoffPolicy::no_backoff();
     let cancellation = nizaam_core::operation::CancellationToken::new();
     let admission = RetryAdmission::new(&policy, &backoff, &cancellation, None);
@@ -658,14 +675,22 @@ fn security_rejection_does_not_create_a_retry_attempt() {
     let retry = admission.admit_next(RetryAdmissionRequest {
         budget: &mut budget,
         current_attempt: &attempt,
-        category: FailureCategory::Unknown,
-        retryability: Retryability::NonRetryable,
+        category: FailureCategory::Authentication,
+        retryability: Retryability::Retryable,
         next_attempt_id: AttemptId::new("security-retry-successor").unwrap(),
         jitter_source: None,
-        safety_gates: RetrySafetyGates::new(true, true, true, true),
+        safety_gates: RetrySafetyGates::new(false, true, true, true),
     });
 
-    assert!(retry.is_err());
+    assert!(
+        matches!(
+            retry,
+            Err(nizaam_core::retry::RetryAdmissionError::SafetyGate(
+                nizaam_core::retry::RetrySafetyGate::ResourceAdmission
+            ))
+        ),
+        "security rejection must prevent retry admission: {retry:?}"
+    );
     assert_eq!(budget.consumed(), 0);
     assert_eq!(attempt.state(), AttemptLifecycleState::Failed);
 }

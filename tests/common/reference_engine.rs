@@ -176,6 +176,13 @@ impl ReferenceEngine {
                             thread::yield_now();
                         }
 
+                        if context.cancellation().is_cancelled() {
+                            return Err(CapabilityError::Cancelled);
+                        }
+                        if context.is_expired() {
+                            return Err(CapabilityError::DeadlineExpired);
+                        }
+
                         Ok(CapabilityOutcome::new(invocation.payload_bytes().to_vec()))
                     }
                     other => other

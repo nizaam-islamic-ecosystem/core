@@ -92,11 +92,10 @@ fn visual_artifact_identity_integrity_publication_and_provenance() {
         ProvenanceRelation::DerivedFrom,
         target.clone(),
     );
-    let snapshot = record.clone();
     let context = ProvenanceContext::new().with_attribute("stage", "visual-demo");
     assert!(record.is_valid());
+    assert_eq!(record.relation(), ProvenanceRelation::DerivedFrom);
     assert_eq!(context.attribute("stage"), Some("visual-demo"));
-    assert_eq!(record, snapshot);
     println!("  Provenance relation : {:?}", record.relation());
     println!("  Context attribute   : stage=visual-demo");
     show_arrow("Content / integrity", "Historical ProvenanceRecord");

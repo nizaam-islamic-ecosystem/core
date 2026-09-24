@@ -61,7 +61,10 @@ fn identity_roles_have_distinct_runtime_type_ids() {
     assert_ne!(TypeId::of::<EngineId>(), TypeId::of::<MessageId>());
     assert_ne!(TypeId::of::<EngineId>(), TypeId::of::<EventId>());
 
-    assert_ne!(TypeId::of::<EngineInstanceId>(), TypeId::of::<OperationId>());
+    assert_ne!(
+        TypeId::of::<EngineInstanceId>(),
+        TypeId::of::<OperationId>()
+    );
     assert_ne!(TypeId::of::<EngineInstanceId>(), TypeId::of::<AttemptId>());
     assert_ne!(TypeId::of::<EngineInstanceId>(), TypeId::of::<MessageId>());
     assert_ne!(TypeId::of::<EngineInstanceId>(), TypeId::of::<EventId>());

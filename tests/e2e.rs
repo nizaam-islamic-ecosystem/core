@@ -53,10 +53,13 @@ use nizaam_core::operation::{Operation, OperationContext};
 use nizaam_core::runtime::LifecycleState;
 use nizaam_core::transport::InMemoryTransport;
 
-mod common;
+#[path = "common/control_plane.rs"]
+pub mod control_plane;
+#[path = "common/reference_engine.rs"]
+pub mod reference_engine;
 
-use common::control_plane::*;
-use common::reference_engine::{ReferenceBehavior, ReferenceDispatchError, ReferenceEngine};
+use control_plane::*;
+use reference_engine::{ReferenceBehavior, ReferenceDispatchError, ReferenceEngine};
 
 fn e2e_engine_context(request: &UniversalRequest) -> nizaam_core::runtime::EngineContext {
     nizaam_core::runtime::EngineContext::new(request.event.envelope.operation_context.clone())

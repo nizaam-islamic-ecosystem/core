@@ -20,9 +20,11 @@ use nizaam_core::contracts::{
 use nizaam_core::identity::{
     CapabilityId, ContractId, CorrelationId, EngineId, EngineInstanceId, MessageId, OperationId,
 };
-use nizaam_core::operation::{Operation, OperationContext};
 use nizaam_core::middleware::chain::MiddlewareChainError;
-use nizaam_core::runtime::{EngineContext, EngineRuntime, ExecutionPipeline, LifecycleState, RequestPipelineError};
+use nizaam_core::operation::{Operation, OperationContext};
+use nizaam_core::runtime::{
+    EngineContext, EngineRuntime, ExecutionPipeline, LifecycleState, RequestPipelineError,
+};
 use nizaam_core::security::{
     AuthenticationError, AuthenticationRequest, Authenticator, AuthorizationDecision,
     AuthorizationError, AuthorizationRequest, Authorizer, CredentialExtractor, PrincipalId,
@@ -32,9 +34,10 @@ use nizaam_core::status::Status;
 use nizaam_core::streaming::{BackpressureConfig, BackpressurePolicy, Stream};
 use nizaam_core::transport::InMemoryTransport;
 
-mod common;
+#[path = "common/reference_engine.rs"]
+pub mod reference_engine;
 
-use common::reference_engine::{ReferenceBehavior, ReferenceEngine};
+use reference_engine::{ReferenceBehavior, ReferenceEngine};
 
 const CAPABILITY: &str = "integration.capability";
 const CONTRACT: &str = "integration.contract";
@@ -296,6 +299,7 @@ fn health_observation_and_control_plane_membership_are_separate_inputs() {
 #[test]
 fn registration_membership_and_transport_keep_the_same_concrete_target() {
     use nizaam_core::control_plane::{EngineRegistration, Membership};
+
     let engine = EngineId::new("integration-route").unwrap();
     let instance = EngineInstanceId::new("integration-route-instance").unwrap();
 
@@ -314,15 +318,29 @@ fn registration_membership_and_transport_keep_the_same_concrete_target() {
     assert!(membership.contains(&instance));
 
     let transport = InMemoryTransport::new();
-    let seen = Arc::new(Mutex::new(0usize));
+    let seen = Arc::new(Mutex::new(None::<EngineInstanceId>));
     let seen_handler = Arc::clone(&seen);
-    transport.register(engine, instance.clone(), move |_request| {
-        *seen_handler.lock().unwrap() += 1;
-        panic!("transport invocation is intentionally not reached by registration alone");
+    transport.register(engine.clone(), instance.clone(), move |request| {
+        let target = request
+            .event
+            .envelope
+            .metadata
+            .participants
+            .target_instance
+            .clone();
+        *seen_handler.lock().unwrap() = target;
+        UniversalResponse::new(request.event.envelope, Status::Success)
     });
 
-    assert_eq!(*seen.lock().unwrap(), 0);
-    assert!(membership.contains(&instance));
+    let mut request = request("registration-route", b"target-check");
+    request.event.envelope.metadata.participants.target_instance = Some(instance.clone());
+
+    let communication = nizaam_core::control_plane::ControlPlaneCommunication::new(transport);
+    let response =
+        futures::executor::block_on(communication.send_to_engine(&instance, request)).unwrap();
+
+    assert_eq!(response.status, Status::Success);
+    assert_eq!(*seen.lock().unwrap(), Some(instance));
 }
 
 #[test]
@@ -455,16 +473,33 @@ fn streaming_and_runtime_share_operation_ownership() {
 
 #[test]
 fn event_style_observation_does_not_replace_runtime_result() {
-    use nizaam_core::events::{Event, EventName, Scope};
+    use nizaam_core::events::{
+        DeliveryConfig, DeliveryDispatcher, DeliveryOutcome, Event, EventLifecycle, EventName,
+        EventPublisher, EventSubscription, Scope,
+    };
     use nizaam_core::identity::EventId;
+    use nizaam_core::operation::CancellationToken;
+    use std::sync::mpsc;
 
-    let event = Event::new(
-        EventId::new("integration-event").unwrap(),
+    let owner = CancellationToken::new();
+    let lifecycle = Arc::new(EventLifecycle::new());
+    let publisher = EventPublisher::new(Arc::clone(&lifecycle), &owner);
+    publisher.activate().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let subscription = EventSubscription::new(
         EventName::new("integration.execution").unwrap(),
-        "execution",
+        "integration.execution",
         Scope::new("engine:integration").unwrap(),
+        move |event: &Event| {
+            sender.send(event.event_id().clone()).unwrap();
+        },
+        &owner,
     )
     .unwrap();
+    let subscription = publisher.subscribe(subscription).unwrap();
+    let dispatcher =
+        DeliveryDispatcher::new(DeliveryConfig::new(4, 1, 4).unwrap(), owner.clone()).unwrap();
+    let handle = dispatcher.register(subscription).unwrap();
 
     let engine = ReferenceEngine::new(
         EngineId::new("integration-event-engine").unwrap(),
@@ -478,8 +513,28 @@ fn event_style_observation_does_not_replace_runtime_result() {
         .dispatch(&context("event-runtime"), CAPABILITY, CONTRACT, b"event")
         .unwrap();
 
+    let event = Event::new(
+        EventId::new("integration-event").unwrap(),
+        EventName::new("integration.execution").unwrap(),
+        "execution",
+        Scope::new("engine:integration").unwrap(),
+    )
+    .unwrap();
+    let publication = publisher.publish(event).unwrap();
+    assert_eq!(
+        handle.enqueue(Arc::clone(publication.event())).unwrap(),
+        DeliveryOutcome::Accepted
+    );
+
     assert_eq!(result.as_bytes(), b"event");
-    assert_eq!(event.event_type(), "execution");
+    assert_eq!(
+        receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .as_str(),
+        "integration-event"
+    );
+    dispatcher.shutdown();
 }
 
 #[test]
@@ -588,15 +643,46 @@ fn transport_corruption_is_kept_outside_capability_semantics() {
 
 #[test]
 fn event_subscriber_failure_is_not_a_capability_failure() {
-    use nizaam_core::events::{Event, EventName, Scope};
+    use nizaam_core::events::{
+        DeliveryConfig, DeliveryDispatcher, DeliveryOutcome, Event, EventLifecycle, EventName,
+        EventPublisher, EventSubscription, Scope,
+    };
     use nizaam_core::identity::EventId;
-    let event = Event::new(
-        EventId::new("integration-isolated-event").unwrap(),
+    use nizaam_core::operation::CancellationToken;
+    use std::sync::mpsc;
+
+    let owner = CancellationToken::new();
+    let lifecycle = Arc::new(EventLifecycle::new());
+    let publisher = EventPublisher::new(Arc::clone(&lifecycle), &owner);
+    publisher.activate().unwrap();
+
+    let panicking = EventSubscription::new(
         EventName::new("integration.failure").unwrap(),
-        "failure",
+        "integration.failure",
         Scope::new("engine:integration").unwrap(),
+        |_event: &Event| panic!("injected subscriber failure"),
+        &owner,
     )
     .unwrap();
+    let (healthy_tx, healthy_rx) = mpsc::channel();
+    let healthy = EventSubscription::new(
+        EventName::new("integration.failure").unwrap(),
+        "integration.failure",
+        Scope::new("engine:integration").unwrap(),
+        move |event: &Event| {
+            healthy_tx.send(event.event_id().clone()).unwrap();
+        },
+        &owner,
+    )
+    .unwrap();
+    let panicking = publisher.subscribe(panicking).unwrap();
+    let healthy = publisher.subscribe(healthy).unwrap();
+
+    let dispatcher =
+        DeliveryDispatcher::new(DeliveryConfig::new(4, 1, 4).unwrap(), owner.clone()).unwrap();
+    let panicking_handle = dispatcher.register(panicking).unwrap();
+    let healthy_handle = dispatcher.register(healthy).unwrap();
+
     let engine = ReferenceEngine::new(
         EngineId::new("integration-isolation-engine").unwrap(),
         EngineInstanceId::new("integration-isolation-instance").unwrap(),
@@ -608,8 +694,37 @@ fn event_subscriber_failure_is_not_a_capability_failure() {
     let result = engine
         .dispatch(&context("subscriber-failure"), CAPABILITY, CONTRACT, b"ok")
         .unwrap();
+
+    let event = Event::new(
+        EventId::new("integration-isolated-event").unwrap(),
+        EventName::new("integration.failure").unwrap(),
+        "failure",
+        Scope::new("engine:integration").unwrap(),
+    )
+    .unwrap();
+    let publication = publisher.publish(event).unwrap();
+    assert_eq!(
+        panicking_handle
+            .enqueue(Arc::clone(publication.event()))
+            .unwrap(),
+        DeliveryOutcome::Accepted
+    );
+    assert_eq!(
+        healthy_handle
+            .enqueue(Arc::clone(publication.event()))
+            .unwrap(),
+        DeliveryOutcome::Accepted
+    );
+
     assert_eq!(result.as_bytes(), b"ok");
-    assert_eq!(event.event_type(), "failure");
+    assert_eq!(
+        healthy_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .as_str(),
+        "integration-isolated-event"
+    );
+    dispatcher.shutdown();
 }
 
 #[test]

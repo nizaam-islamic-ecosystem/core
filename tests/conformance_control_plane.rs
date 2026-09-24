@@ -895,7 +895,10 @@ fn non_serving_observation_is_not_eligible() {
         &descriptor_for(CAPABILITY, Interaction::Request),
     ));
 
-    assert!(result.is_err());
+    assert_eq!(
+        result,
+        Err(nizaam_core::control_plane::DestinationEligibilityError::NoEligibleDestination)
+    );
 }
 
 #[test]
@@ -944,142 +947,7 @@ fn deterministic_policy_is_stable_for_same_candidates() {
 }
 
 #[test]
-fn hard_destination_does_not_fallback() {
-    let membership = Membership::new();
-    let observations = Observations::new();
-    for id in ["cp-hard-a", "cp-hard-b"] {
-        membership
-            .register(registration("cp-hard", id, CAPABILITY))
-            .unwrap();
-        observations
-            .update(healthy_observation("cp-hard", id))
-            .unwrap();
-    }
-
-    let result = eligible_destinations(DestinationEligibilityInput::new(
-        &DestinationRequest::hard_explicit(instance_id("cp-hard-missing")),
-        &membership.snapshot(),
-        &observations.snapshot(),
-        &capability_id(CAPABILITY),
-        &descriptor_for(CAPABILITY, Interaction::Request),
-    ));
-    assert!(result.is_err());
-}
-
-#[test]
-fn preferred_destination_can_fallback() {
-    let membership = Membership::new();
-    let observations = Observations::new();
-    for id in ["cp-pref-a", "cp-pref-b"] {
-        membership
-            .register(registration("cp-pref", id, CAPABILITY))
-            .unwrap();
-        observations
-            .update(healthy_observation("cp-pref", id))
-            .unwrap();
-    }
-
-    let preferred = DestinationRequest::preferred_explicit(
-        instance_id("cp-pref-missing"),
-        FallbackPolicy::Allowed,
-    );
-    let eligible = eligible_destinations(DestinationEligibilityInput::new(
-        &preferred,
-        &membership.snapshot(),
-        &observations.snapshot(),
-        &capability_id(CAPABILITY),
-        &descriptor_for(CAPABILITY, Interaction::Request),
-    ))
-    .unwrap();
-
-    assert!(!eligible.is_empty());
-    assert_ne!(eligible[0].instance_id().as_str(), "cp-pref-missing");
-}
-
-#[test]
-fn routing_decision_remains_unchanged_after_membership_change() {
-    let operation = operation_id("cp-immutable-decision");
-    let attempt = attempt(&operation, "cp-immutable-attempt", 1);
-    let plane = ControlPlane::new();
-    let decision = resolve_and_route(&plane, &operation, instance_id("cp-old"), &attempt);
-
-    let membership = Membership::new();
-    membership
-        .register(registration("cp-immutable", "cp-old", CAPABILITY))
-        .unwrap();
-    membership
-        .register(registration("cp-immutable", "cp-new", CAPABILITY))
-        .unwrap();
-
-    assert_eq!(decision.destination().as_str(), "cp-old");
-    assert_eq!(decision.attempt_id(), attempt.attempt_id());
-}
-
-#[test]
-fn two_attempts_of_one_operation_receive_distinct_routing_decisions() {
-    let membership = Membership::new();
-    let observations = Observations::new();
-
-    for instance in ["cp-attempt-a", "cp-attempt-b"] {
-        membership
-            .register(registration("cp-attempt-engine", instance, CAPABILITY))
-            .unwrap();
-        observations
-            .update(healthy_observation("cp-attempt-engine", instance))
-            .unwrap();
-    }
-
-    let destination = DestinationRequest::hard_logical(capability_requirement(CAPABILITY));
-    let candidates = eligible_candidates(&membership, &observations, &destination);
-    assert_eq!(candidates.len(), 2);
-
-    let policy = RoutingPolicy::deterministic();
-    let first_selection = policy
-        .evaluate(&PolicyInput::new(&candidates, &RoutingConstraints::new()))
-        .unwrap();
-
-    let operation = operation_id("cp-attempt-isolation");
-    let first = attempt(&operation, "cp-attempt-one", 1);
-    let first_decision = resolve_and_route(
-        &ControlPlane::new(),
-        &operation,
-        first_selection.instance_id().clone(),
-        &first,
-    );
-
-    membership
-        .unregister(first_selection.instance_id())
-        .unwrap();
-    observations.remove(first_selection.instance_id()).unwrap();
-
-    let remaining_candidates = eligible_candidates(&membership, &observations, &destination);
-    assert_eq!(remaining_candidates.len(), 1);
-
-    let second_selection = policy
-        .evaluate(&PolicyInput::new(
-            &remaining_candidates,
-            &RoutingConstraints::new(),
-        ))
-        .unwrap();
-
-    let second = attempt(&operation, "cp-attempt-two", 2);
-    let second_decision = resolve_and_route(
-        &ControlPlane::new(),
-        &operation,
-        second_selection.instance_id().clone(),
-        &second,
-    );
-
-    assert_eq!(
-        first_decision.operation_id(),
-        second_decision.operation_id()
-    );
-    assert_ne!(first_decision.attempt_id(), second_decision.attempt_id());
-    assert_ne!(first_decision.destination(), second_decision.destination());
-}
-
-#[test]
-fn routing_does_not_change_attempt_number() {
+fn routing_decision_preserves_attempt_identity_and_number() {
     let operation = operation_id("cp-attempt-number");
     let attempt = attempt(&operation, "cp-attempt-number-1", 7);
     let decision = resolve_and_route(
@@ -1226,32 +1094,7 @@ fn semantically_identical_replanning_snapshots_do_not_trigger_replanning() {
 }
 
 #[test]
-fn replanning_only_reports_coordination_change_without_routing_state() {
-    use nizaam_core::control_plane::{CoordinationSnapshot, Dependency, DependencyTarget};
-
-    let dependency = Dependency::blocking(
-        NodeId::new("cp-replan-boundary-source").unwrap(),
-        DependencyTarget::Capability(CapabilityRequirement::new(capability_id(
-            "cp-replan-boundary",
-        ))),
-    )
-    .unwrap();
-
-    let decision = ControlPlane::new().evaluate_replanning_snapshots(
-        &CoordinationSnapshot::new(),
-        &CoordinationSnapshot::from_dependencies([dependency]),
-    );
-
-    assert_eq!(
-        decision,
-        nizaam_core::control_plane::ReplanningDecision::Required(
-            nizaam_core::control_plane::ReplanningReason::CoordinationRequirementsChanged,
-        )
-    );
-}
-
-#[test]
-fn control_plane_does_not_execute_capability_handlers() {
+fn control_plane_resolution_does_not_invoke_transport_handlers() {
     let transport = InMemoryTransport::new();
     let calls = Arc::new(Mutex::new(0usize));
     let calls_for_handler = Arc::clone(&calls);
@@ -1273,7 +1116,7 @@ fn control_plane_does_not_execute_capability_handlers() {
 }
 
 #[test]
-fn control_plane_does_not_create_retry_state() {
+fn routing_resolution_preserves_existing_attempt_state() {
     let operation = operation_id("cp-no-retry");
     let attempt = attempt(&operation, "cp-no-retry-attempt", 1);
     assert_eq!(

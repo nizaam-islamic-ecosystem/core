@@ -10,11 +10,12 @@ use nizaam_core::capability::CapabilityError;
 use nizaam_core::identity::{CorrelationId, EngineId, EngineInstanceId, OperationId};
 use nizaam_core::operation::{Operation, OperationContext};
 use nizaam_core::runtime::{EngineContext, LifecycleState, RequestAdmissionError};
-use nizaam_core::streaming::BackpressurePolicy;
+use nizaam_core::streaming::{BackpressurePolicy, StreamItem};
 
-mod common;
+#[path = "common/reference_engine.rs"]
+pub mod reference_engine;
 
-use common::reference_engine::{ReferenceBehavior, ReferenceDispatchError, ReferenceEngine};
+use reference_engine::{ReferenceBehavior, ReferenceDispatchError, ReferenceEngine};
 
 fn new_engine() -> ReferenceEngine {
     ReferenceEngine::new(
@@ -190,13 +191,14 @@ fn live_deadline_shorter_than_delay_rejects_after_handler_starts() {
     engine
         .register_capability(
             "conformance.live-deadline",
-            ReferenceBehavior::Delay(Duration::from_millis(50)),
+            ReferenceBehavior::Delay(Duration::from_millis(500)),
         )
         .unwrap();
     engine.serving().unwrap();
 
-    let context = test_context()
-        .with_deadline(nizaam_core::runtime::Deadline::from_now(Duration::from_millis(100)).unwrap());
+    let context = test_context().with_deadline(
+        nizaam_core::runtime::Deadline::from_now(Duration::from_millis(100)).unwrap(),
+    );
 
     let result = engine.dispatch(
         &context,
@@ -431,4 +433,201 @@ fn fail_once_state_can_be_explicitly_reset() {
             CapabilityError::HandlerFailed(_)
         ))
     ));
+}
+
+#[test]
+fn reference_engine_exercises_all_behaviors_and_boundaries() {
+    fn context(id: &str) -> EngineContext {
+        EngineContext::new(OperationContext::new(Operation::new(
+            OperationId::new(id).expect("test operation id must be valid"),
+            CorrelationId::new(format!("{id}-correlation"))
+                .expect("test correlation id must be valid"),
+        )))
+    }
+
+    let engine = ReferenceEngine::new(
+        EngineId::new("reference-test-engine").expect("test engine id must be valid"),
+        EngineInstanceId::new("reference-test-instance").expect("test instance id must be valid"),
+    );
+
+    assert_eq!(engine.engine_id().as_str(), "reference-test-engine");
+    assert_eq!(engine.instance_id().as_str(), "reference-test-instance");
+    assert_eq!(engine.state(), LifecycleState::Created);
+    assert_eq!(engine.runtime().state(), LifecycleState::Created);
+    assert!(!engine.has_capability("missing.capability"));
+    assert!(
+        !engine.registry().contains(
+            &nizaam_core::identity::CapabilityId::new("missing.capability")
+                .expect("test capability id must be valid")
+        )
+    );
+
+    engine
+        .register_capability("reference.echo", ReferenceBehavior::Echo)
+        .unwrap();
+    engine
+        .register_capability("reference.fail", ReferenceBehavior::Fail)
+        .unwrap();
+    engine
+        .register_capability("reference.fail_once", ReferenceBehavior::FailOnce)
+        .unwrap();
+    engine
+        .register_capability("reference.delay", ReferenceBehavior::Delay(Duration::ZERO))
+        .unwrap();
+    engine
+        .register_capability(
+            "reference.large",
+            ReferenceBehavior::LargePayload(b"large-output".to_vec()),
+        )
+        .unwrap();
+    engine
+        .register_capability(
+            "reference.side_effect",
+            ReferenceBehavior::SideEffect(b"side-effect-output".to_vec()),
+        )
+        .unwrap();
+
+    assert!(engine.has_capability("reference.echo"));
+    assert!(engine.has_capability("reference.fail"));
+    assert!(engine.has_capability("reference.fail_once"));
+    assert!(engine.has_capability("reference.delay"));
+    assert!(engine.has_capability("reference.large"));
+    assert!(engine.has_capability("reference.side_effect"));
+
+    engine.serving().unwrap();
+    assert_eq!(engine.state(), LifecycleState::Serving);
+    assert_eq!(engine.runtime().state(), LifecycleState::Serving);
+
+    let echo_context = context("reference-echo");
+    let echo = engine
+        .dispatch(
+            &echo_context,
+            "reference.echo",
+            "reference.contract",
+            b"echo-payload",
+        )
+        .unwrap();
+    assert_eq!(echo.as_bytes(), b"echo-payload");
+    assert_eq!(engine.invocation_count("reference.echo"), 1);
+    assert_eq!(
+        engine
+            .last_context("reference.echo")
+            .expect("echo context must be recorded")
+            .operation()
+            .operation
+            .id
+            .as_str(),
+        "reference-echo"
+    );
+
+    let fail = engine.dispatch(
+        &context("reference-fail"),
+        "reference.fail",
+        "reference.contract",
+        b"fail-payload",
+    );
+    match fail {
+        Err(ReferenceDispatchError::Capability(CapabilityError::HandlerFailed(message))) => {
+            assert_eq!(message, "reference engine failure");
+        }
+        other => panic!("expected reference capability failure, got {other:?}"),
+    }
+    assert_eq!(engine.invocation_count("reference.fail"), 1);
+
+    let first_fail_once = engine.dispatch(
+        &context("reference-fail-once"),
+        "reference.fail_once",
+        "reference.contract",
+        b"first",
+    );
+    match first_fail_once {
+        Err(ReferenceDispatchError::Capability(CapabilityError::HandlerFailed(message))) => {
+            assert_eq!(message, "reference engine fail-once");
+        }
+        other => panic!("expected first fail-once error, got {other:?}"),
+    }
+
+    let second_fail_once = engine
+        .dispatch(
+            &context("reference-fail-once"),
+            "reference.fail_once",
+            "reference.contract",
+            b"second",
+        )
+        .unwrap();
+    assert_eq!(second_fail_once.as_bytes(), b"second");
+    assert_eq!(engine.invocation_count("reference.fail_once"), 2);
+
+    engine.reset_fail_once("reference.fail_once");
+    let reset_fail_once = engine.dispatch(
+        &context("reference-fail-once"),
+        "reference.fail_once",
+        "reference.contract",
+        b"after-reset",
+    );
+    assert!(matches!(
+        reset_fail_once,
+        Err(ReferenceDispatchError::Capability(
+            CapabilityError::HandlerFailed(_)
+        ))
+    ));
+
+    let delayed = engine
+        .dispatch(
+            &context("reference-delay"),
+            "reference.delay",
+            "reference.contract",
+            b"delay-payload",
+        )
+        .unwrap();
+    assert_eq!(delayed.as_bytes(), b"delay-payload");
+
+    let large = engine
+        .dispatch(
+            &context("reference-large"),
+            "reference.large",
+            "reference.contract",
+            b"ignored-input",
+        )
+        .unwrap();
+    assert_eq!(large.as_bytes(), b"large-output");
+
+    let side_effect = engine
+        .dispatch(
+            &context("reference-side-effect"),
+            "reference.side_effect",
+            "reference.contract",
+            b"ignored-input",
+        )
+        .unwrap();
+    assert_eq!(side_effect.as_bytes(), b"side-effect-output");
+    assert_eq!(engine.side_effect_count("reference.side_effect"), 1);
+
+    let stream_context = context("reference-stream");
+    let stream = engine
+        .open_stream::<u32>(&stream_context, 2, BackpressurePolicy::Reject)
+        .unwrap();
+    stream.open().unwrap();
+    let consumer = stream.consumer().unwrap();
+
+    stream.publish(StreamItem::partial(0, 1)).unwrap();
+    stream.publish(StreamItem::final_item(1, 1)).unwrap();
+    assert_eq!(consumer.next_item().unwrap().unwrap().sequence(), 0);
+    assert_eq!(consumer.next_item().unwrap().unwrap().sequence(), 1);
+
+    assert!(engine.shutdown().unwrap());
+    assert_eq!(engine.state(), LifecycleState::Stopped);
+
+    let admission = engine.dispatch(
+        &context("reference-after-shutdown"),
+        "reference.echo",
+        "reference.contract",
+        b"rejected",
+    );
+    match admission {
+        Err(ReferenceDispatchError::Admission(error)) => {
+            let _ = format!("{error:?}");
+        }
+        other => panic!("expected admission rejection after shutdown, got {other:?}"),
+    }
 }

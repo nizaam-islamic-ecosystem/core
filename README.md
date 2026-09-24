@@ -69,7 +69,6 @@ Core intentionally does **not** contain domain meaning such as Quran, Hadith, Ar
     - [Run the test suite](#run-the-test-suite)
     - [Run tests without changing the working tree](#run-tests-without-changing-the-working-tree)
     - [Check the project](#check-the-project)
-  - [Development Guidelines](#development-guidelines)
   - [License](#license)
 
 ---
@@ -1052,21 +1051,34 @@ The repository is a Rust library crate.
 │   ├── prelude.rs
 │   └── status.rs
 └── tests/
+    ├── architecture.rs
     ├── artifact.rs
     ├── capability.rs
     ├── communication.rs
+    ├── compile_fail.rs
     ├── concurrency.rs
     ├── configuration.rs
     ├── conformance.rs
+    ├── conformance_control_plane.rs
+    ├── conformance_core.rs
+    ├── conformance_engine.rs
+    ├── conformance_events.rs
+    ├── conformance_retry.rs
+    ├── conformance_security.rs
+    ├── conformance_streaming.rs
+    ├── conformance_transport.rs
     ├── context.rs
     ├── contracts.rs
     ├── control_plane.rs
     ├── core_pipeline.rs
+    ├── e2e.rs
     ├── errors.rs
     ├── events.rs
+    ├── fault_injection.rs
     ├── foundations.rs
     ├── health.rs
     ├── idempotency.rs
+    ├── integration.rs
     ├── lifecycle.rs
     ├── logging.rs
     ├── observability.rs
@@ -1080,7 +1092,25 @@ The repository is a Rust library crate.
     ├── runtime.rs
     ├── security.rs
     ├── streaming.rs
-    └── tasks.rs
+    ├── stress.rs
+    ├── tasks.rs
+    ├── visual.rs
+    └── visual/
+        ├── artifacts_provenance.rs
+        ├── concurrency_resources.rs
+        ├── configuration_context.rs
+        ├── control_plane.rs
+        ├── dummy.json
+        ├── engine_communication.rs
+        ├── events_observability.rs
+        ├── fault_recovery.rs
+        ├── full_system.rs
+        ├── lifecycle_runtime.rs
+        ├── message_framing.rs
+        ├── retry_idempotency.rs
+        ├── security.rs
+        ├── streaming.rs
+        └── support.rs
 ```
 
 The public library target is named `nizaam_core`, while the Cargo package remains `core`.
@@ -1094,19 +1124,32 @@ Testing is part of the project throughout development. It is not deferred until 
 The repository currently contains:
 
 - unit tests inside the implementation modules;
-- integration tests under `tests/`;
-- subsystem-specific tests;
+- public integration tests under `tests/`;
+- subsystem and cross-phase integration tests;
+- architectural conformance tests;
+- security, transport, streaming, retry/idempotency, Control Plane, and event conformance tests;
+- fault-injection and bounded stress tests;
 - end-to-end tests for completed phases;
-- Control Plane tests;
-- conformance-oriented tests.
+- a sequentially runnable visual test suite with a `dummy.json` transport-framing fixture.
 
-The current source snapshot contains approximately:
+The latest repository verification run executed:
 
-- **1,576** unit tests inside `src/`;
-- **410** integration tests under `tests/`;
-- **1,986** test functions in total.
+- **1,576** unit tests from `src/`;
+- **735** integration tests from `tests/`;
+- **0** doc-tests;
 
-These counts describe the checked-in test sources and are not a claim that every test currently passes on every machine.
+for a total of **2,311 passing tests with 0 failures**.
+
+For the visual architecture demonstrations, run:
+
+```bash
+cargo test --test visual -- --nocapture --test-threads=1
+```
+
+Running the visual suite sequentially keeps each demonstration readable. The
+message-framing demonstration uses the repository's `tests/visual/dummy.json`
+fixture and shows that its 11.18 MiB payload fits within the current
+20,000,000-byte maximum frame size without unnecessary fragmentation.
 
 ## Architecture Principles
 
@@ -1283,33 +1326,38 @@ Changes should preserve existing contracts unless a deliberate compatibility dec
 
 ## Current Status
 
-The implementation currently contains the Core foundation through the completed Control Plane work.
+The implementation contains the completed Nizaam Core foundation through
+Phase 16 Testing and Conformance.
 
 The major implementation phases represented in the repository are:
 
 | Phase | Area | Status |
 | ---: | --- | --- |
-| 0 | Workspace and library foundation | Implemented |
-| 1 | Identity, result primitives, operation model | Implemented |
-| 2 | Universal Contract Layer | Implemented |
-| 3 | Error System | Implemented |
-| 4 | Logging System | Implemented |
-| 5 | Context execution infrastructure | Implemented |
-| 6 | Capability System | Implemented |
-| 7 | Transport and universal client/server | Implemented |
-| 8 | Engine Runtime | Implemented |
-| 9 | Middleware and Security | Implemented |
-| 10 | Artifact and Provenance | Implemented |
-| 11 | Observability, Health, Configuration | Implemented |
-| 12 | Streaming, Concurrency, Background Tasks | Implemented |
-| 13 | Retry and Idempotency | Implemented |
-| 14 | Internal Events | Implemented |
-| 15 | Control Plane | Implemented |
-| 16 | Testing and Conformance | In progress |
+| 0 | Workspace and library foundation | Verified |
+| 1 | Identity, result primitives, operation model | Verified |
+| 2 | Universal Contract Layer | Verified |
+| 3 | Error System | Verified |
+| 4 | Logging System | Verified |
+| 5 | Context execution infrastructure | Verified |
+| 6 | Capability System | Verified |
+| 7 | Transport and universal client/server | Verified |
+| 8 | Engine Runtime | Verified |
+| 9 | Middleware and Security | Verified |
+| 10 | Artifact and Provenance | Verified |
+| 11 | Observability, Health, Configuration | Verified |
+| 12 | Streaming, Concurrency, Background Tasks | Verified |
+| 13 | Retry and Idempotency | Verified |
+| 14 | Internal Events | Verified |
+| 15 | Control Plane | Verified |
+| 16 | Testing and Conformance | Verified |
 
-Phase 16 focuses on final verification and hardening rather than introducing another production subsystem.
+Phase 16 is the final Core verification and hardening phase. It does not
+introduce another production subsystem. The latest verification evidence
+contains **2,311 passing tests with 0 failures**, including architecture,
+conformance, fault-injection, stress, end-to-end, and visual coverage.
 
----
+The next development stage is the Engine layer built on top of these Core
+contracts and boundaries.
 
 ## Getting Started
 
@@ -1354,23 +1402,6 @@ The library target is:
 ```text
 nizaam_core
 ```
-
----
-
-## Development Guidelines
-
-When adding functionality:
-
-1. Identify the correct existing subsystem.
-2. Check whether Core already provides the required mechanism.
-3. Preserve the established ownership boundary.
-4. Prefer existing identity, error, context, lifecycle, and compatibility types.
-5. Add focused unit tests for local behavior.
-6. Add integration/conformance tests for public behavior.
-7. Avoid introducing domain semantics into Core.
-8. Avoid duplicate infrastructure.
-9. Keep architectural decisions explicit.
-10. For Phase 16 work, keep production-code changes out of `src/` unless a genuine implementation flaw is independently identified.
 
 ---
 

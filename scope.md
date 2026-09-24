@@ -922,21 +922,13 @@ Transport framing metadata is encoded in binary form. The framing protocol is tr
 Each transport frame contains a fixed 48-byte binary header followed by the frame payload:
 
 ```text
-┌──────────────────────────────────────────────────────┐
-│ Version            │ 1 byte                         │
-├────────────────────┼─────────────────────────────────┤
-│ Flags              │ 1 byte                         │
-├────────────────────┼─────────────────────────────────┤
-│ Payload Length     │ 4 bytes                        │
-├────────────────────┴─────────────────────────────────┤
-│ Transport Message ID │ 8 bytes                      │
-├──────────────────────┼───────────────────────────────┤
-│ Fragment Index       │ 4 bytes                      │
-└──────────────────────┴───────────────────────────────┘
-│                                                      │
-│ Frame Payload                                        │
-│                                                      │
-└──────────────────────────────────────────────────────┘
+48-byte fixed header
+
+0       1       2       4       8              16        20        24                      32                      40                 48
++-------+-------+-------+-------+---------------+---------+---------+-----------------------+-----------------------+------------------+
+|Version| Flags |Header |Payload| Transport     |Fragment |Cum. ACK | SACK Bitmap (8 bytes) | XXH3-64 (8 bytes)     |Reserved (8 bytes)|
+|       |       |Length |Length | Stream ID     | Index   | Index   |                       |                       |                  |
++-------+-------+-------+-------+---------------+---------+---------+-------+-------+-------+-------+---------------+---------+--------+
 ```
 
 All multi-byte numeric framing fields use big-endian encoding.

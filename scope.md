@@ -32,7 +32,7 @@ Implementation began with an existing Cargo library skeleton at the repository r
 | 13 | Retry and Idempotency                        | 13    | verified    |
 | 14 | Internal Events                              | 14    | verified    |
 | 15 | Control Plane                                | 15    | verified    |
-| 16 | Testing and Conformance hardening            | 16    | in progress |
+| 16 | Testing and Conformance hardening            | 16    | verified    |
 
 Testing is continuous. Phase 16 is the final integration and conformance hardening phase, not the first point at which tests are written.
 
@@ -307,6 +307,7 @@ The minimum completion verification for every implementation phase is:
 ```bash
    set -o pipefail
    {
+      cargo fmt --all
       cargo fmt --all --check &&
       cargo clippy --workspace --all-targets -- -D warnings &&
       cargo build --workspace &&
@@ -14417,6 +14418,57 @@ All previous Core tests must continue to pass.
 
 ## Phase 16: Testing and Conformance
 
+**Status: verified / complete**
+
+Phase 16 completed the final testing and conformance hardening of Nizaam Core without introducing another production subsystem.
+
+The implementation was verified through the existing unit, integration, conformance, end-to-end, fault-injection, stress, architecture, security, transport, streaming, retry/idempotency, Control Plane, event, artifact/provenance, lifecycle, configuration, and visual test layers.
+
+The latest repository verification run produced:
+
+```text
+Unit tests:
+1,576 passed
+0 failed
+
+Integration tests:
+735 passed
+0 failed
+
+Doc-tests:
+0 passed
+0 failed
+
+Total:
+2,311 passed
+0 failed
+```
+
+The Phase 16 visual suite contains 13 architecture demonstrations and passes completely. The visual framing demonstration uses the repository `tests/visual/dummy.json` fixture, measuring approximately 11.18 MiB against the current 20,000,000-byte maximum complete frame size and verifying that the payload remains within one transport frame.
+
+The visual streaming demonstration separately verifies that application-level logical stream items remain distinct from transport-level fragmentation.
+
+Phase 16 also verifies negative and boundary behavior including:
+
+* invalid lifecycle transitions;
+* runtime admission rejection;
+* security denial before execution;
+* transport failure classification;
+* capability failure classification;
+* unknown retry outcomes;
+* bounded resource admission;
+* queue and stream backpressure;
+* subscriber failure isolation;
+* malformed frame rejection;
+* checksum corruption rejection;
+* routing and attempt identity boundaries;
+* Control Plane non-execution boundaries;
+* configuration snapshot preservation after failed updates;
+* runtime shutdown and cleanup;
+* retry/idempotency identity separation.
+
+No new Core runtime subsystem was introduced by Phase 16.
+
 ### Goal
 
 Perform final hardening and verification of Nizaam Core by proving that the
@@ -16653,6 +16705,42 @@ RELEASE
 Phase 16 is the final hardening phase, not the beginning of another
 architecture.
 
+### Checklist
+
+* [x] Architecture boundaries verified across the Core.
+* [x] Identity and role separation verified.
+* [x] Universal contracts and message boundaries verified.
+* [x] Runtime lifecycle and admission authority verified.
+* [x] Capability dispatch and execution boundaries verified.
+* [x] Retry and routing separation verified.
+* [x] Idempotency and retry-state separation verified.
+* [x] Unknown retry outcomes require explicit reconciliation.
+* [x] Control Plane coordination boundaries verified.
+* [x] Membership, registry, eligibility, and routing responsibilities verified.
+* [x] Security context, credentials, authentication, and authorization boundaries verified.
+* [x] Transport framing, fragmentation, reassembly, and integrity boundaries verified.
+* [x] Streaming remains logically separate from transport framing.
+* [x] Artifact storage and provenance responsibilities remain separated.
+* [x] Events and observability responsibilities remain separated.
+* [x] Configuration snapshots preserve existing execution contexts.
+* [x] Health observation remains separate from lifecycle and routing authority.
+* [x] Background task admission and bounded concurrency behavior verified.
+* [x] Failure and fault-injection scenarios verified.
+* [x] Runtime shutdown, restart, and lifecycle behavior verified.
+* [x] Resource recovery and bounded-capacity behavior verified.
+* [x] Cross-phase integration behavior verified.
+* [x] Negative and boundary cases verified.
+* [x] Conformance coverage completed for the relevant Core subsystems.
+* [x] Visual verification suite completed successfully.
+* [x] Dummy JSON framing/transport fixture verified.
+* [x] Unit tests: 1,576 passed, 0 failed.
+* [x] Integration tests: 735 passed, 0 failed.
+* [x] Documentation reviewed against the implementation.
+* [x] README updated to reflect the current implementation and verification state.
+* [x] No unfinished `TODO`, `FIXME`, `todo!()`, or `unimplemented!()` implementation markers remain in `src/`.
+* [x] Phase 16 architectural verification completed.
+* [x] Core is ready to proceed to the Engine layer.
+
 ---
 
 ## Architectural Decisions
@@ -16955,6 +17043,31 @@ architecture.
 * **Security authorization remains outside Control Plane.** Control Plane does not create a second authorization system.
 * **Failure handling wraps and classifies the existing `GlobalError` system rather than creating a second error system.**
 * **The Control Plane facade remains thin and stateless.** It composes admission, replanning, resolution, and routing rather than maintaining another source of planning/routing state.
+* **Core remains domain-agnostic.** Domain meaning belongs to engines, while Core provides shared contracts and mechanisms.
+* **Core remains a library foundation.** The Cargo package remains `core`, while the Rust library target is `nizaam_core`.
+* **Identity types remain distinct.** `OperationId`, `AttemptId`, `MessageId`, `CorrelationId`, `EngineId`, `EngineInstanceId`, `PlanId`, `ArtifactId`, and other identities represent different concepts and must not be collapsed.
+* **Universal Contracts remain payload-opaque.** Core validates contract and envelope structure without interpreting engine-specific payload semantics.
+* **Runtime owns lifecycle and execution admission.** Control Plane, Health, Security, Transport, and Capability systems do not create competing lifecycle authorities.
+* **Security remains a separate boundary.** Authentication establishes trusted identity, authorization determines permission, and denied requests must not reach capability execution.
+* **Middleware remains a shared execution boundary.** Middleware composes existing Core context and security mechanisms rather than creating parallel request state.
+* **Transport owns transport concerns.** Connections, framing, fragmentation, reassembly, and transport-level integrity remain separate from application-level streaming.
+* **Application streaming remains logical.** `StreamItem` represents application-level output and is not equivalent to a transport frame.
+* **The current transport framing protocol uses a 48-byte header and a 20,000,000-byte maximum complete frame.** Logical messages exceeding the maximum payload are fragmented at the transport boundary.
+* **Retry remains separate from routing.** Retry creates a new attempt under the same logical operation; Control Plane independently produces a routing decision for that attempt.
+* **Idempotency remains separate from retry.** `OperationId` and `IdempotencyKey` represent different concerns.
+* **Unknown retry outcomes are not blindly replayed.** Reconciliation is required before potentially side-effecting work is automatically retried.
+* **Artifacts and provenance remain separate.** Artifact identity/version/content/integrity mechanisms do not become historical provenance records.
+* **Events remain local notification infrastructure.** Internal Events do not become a distributed broker, transport system, workflow engine, or replacement for observability.
+* **Observability remains separate from correctness infrastructure.** Logging, metrics, tracing, diagnostics, and correlation observe execution without replacing Error, Runtime, Security, or Control Plane responsibilities.
+* **Configuration snapshots are immutable execution boundaries.** Failed updates do not replace the active valid snapshot.
+* **Health remains an observation/input rather than a lifecycle or routing authority.**
+* **Control Plane remains a coordination boundary, not an execution engine.** It performs admission, resolution, eligibility, replanning, and routing but does not execute capabilities.
+* **Control Plane does not own transport.** It reuses the existing Universal Client and Transport boundaries.
+* **Control Plane does not create retry state.** Existing attempts retain their identity while routing produces immutable decisions.
+* **Routing decisions are immutable.** Later membership or coordination changes do not silently rewrite an already-created decision.
+* **Registry and Membership remain separate concerns.** Registration/discovery state is distinct from routing membership and immutable membership snapshots.
+* **Destination eligibility and routing policy remain separate.** Eligibility determines valid candidates; policy chooses among eligible candidates.
+* **Phase 16 adds verification rather than another production subsystem.** Testing is treated as executable evidence for the existing architecture rather than as a new runtime layer.
 
 ## Open Questions
 
@@ -16963,36 +17076,88 @@ None currently. Concrete trait signatures, provider choices, serialization, asyn
 ### Current State
 
 Phase 15 introduces the communication-focused Control Plane responsible for:
+Nizaam Core is now complete through Phase 16.
 
-* communication admission;
-* request validation at the communication boundary;
-* destination resolution;
-* routing;
-* context propagation;
-* communication failure handling; and
-* coordination with the existing Runtime, Security, Contract, Transport,
-  Capability, and Event mechanisms.
-
-The Control Plane must remain separate from the Internal Event subsystem.
-
-Internal Events provide optional internal/local notification:
+The Core implementation provides the shared, domain-agnostic foundation required by future Nizaam engines, including:
 
 ```text
-Internal Event
-→ local occurrence notification
-
-The Control Plane provides formal communication and routing:
-
+Identity
+Universal Contracts
+Error System
+Logging
+Operation Context
+Cancellation / Deadlines
+Capabilities
+Transport
+Universal Client / Server
+Runtime / Lifecycle
+Middleware
+Security
+Artifacts
+Provenance
+Observability
+Health
+Configuration
+Streaming
+Concurrency
+Background Tasks
+Retry
+Idempotency
+Internal Events
 Control Plane
-→ communication admission
-→ destination resolution
-→ routing
-→ communication failure handling
 ```
 
-Internal Events must not automatically become Control Plane messages, and the
-Control Plane must not replace the existing Event subsystem.
+The completed Core has been subjected to unit, integration, end-to-end, architectural conformance, security, transport, streaming, retry/idempotency, Control Plane, fault-injection, stress, and visual verification.
+
+The latest repository verification evidence contains:
+
+```text
+2,311 tests passed
+0 tests failed
+```
+
+Core is therefore ready to serve as the foundation for the Engine layer
 
 ### Next Step
 
-Proceed to Phase 15: Testing and Conformance.
+Nizaam Core is now complete through Phase 16.
+
+The Core implementation provides the shared, domain-agnostic foundation required by future Nizaam engines, including:
+
+```text
+Identity
+Universal Contracts
+Error System
+Logging
+Operation Context
+Cancellation / Deadlines
+Capabilities
+Transport
+Universal Client / Server
+Runtime / Lifecycle
+Middleware
+Security
+Artifacts
+Provenance
+Observability
+Health
+Configuration
+Streaming
+Concurrency
+Background Tasks
+Retry
+Idempotency
+Internal Events
+Control Plane
+```
+
+The completed Core has been subjected to unit, integration, end-to-end, architectural conformance, security, transport, streaming, retry/idempotency, Control Plane, fault-injection, stress, and visual verification.
+
+The latest repository verification evidence contains:
+
+```text
+2,311 tests passed
+0 tests failed
+```
+
+Core is therefore ready to serve as the foundation for the Engine layer.

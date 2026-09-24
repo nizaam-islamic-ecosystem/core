@@ -1,6 +1,7 @@
 [package]
-name = "core"
-version = "0.1.0"
+name = "nizaam-core"
+description = "Domain-agnostic Rust infrastructure core for building secure, observable, reliable, and extensible Nizaam engines."
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.96"
 

@@ -11,72 +11,28 @@
 //! their owning modules so their boundaries stay explicit.
 
 pub use crate::capability::{
-    CapabilityDefinition,
-    CapabilityDefinitionError,
-    CapabilityDispatchResult,
-    CapabilityEntry,
-    CapabilityError,
-    CapabilityHandler,
-    CapabilityInvocation,
-    CapabilityOutcome,
-    CapabilityRegistry,
-    RegistryError,
-    dispatch,
+    CapabilityDefinition, CapabilityDefinitionError, CapabilityDispatchResult, CapabilityEntry,
+    CapabilityError, CapabilityHandler, CapabilityInvocation, CapabilityOutcome,
+    CapabilityRegistry, RegistryError, dispatch,
 };
 
 pub use crate::contracts::{
-    ContractDescriptor,
-    ContractMetadata,
-    EncodedPayload,
-    EncodingError,
-    ExecutionMetadata,
-    Interaction,
-    InvalidDescriptor,
-    MessageEnvelope,
-    Participants,
-    PayloadCodec,
-    PayloadDescriptor,
-    RawPayloadCodec,
-    RequirementsMetadata,
-    UniversalEvent,
-    UniversalEventError,
-    UniversalRequest,
-    UniversalResponse,
-    Version,
+    ContractDescriptor, ContractMetadata, EncodedPayload, EncodingError, ExecutionMetadata,
+    Interaction, InvalidDescriptor, MessageEnvelope, Participants, PayloadCodec, PayloadDescriptor,
+    RawPayloadCodec, RequirementsMetadata, UniversalEvent, UniversalEventError, UniversalRequest,
+    UniversalResponse, Version,
 };
 
 pub use crate::error::{ErrorClass, ErrorCode, ErrorDefinition, ErrorOwner, Severity};
 
 pub use crate::identity::{
-    ArtifactId,
-    AttemptId,
-    CapabilityId,
-    ContractId,
-    CorrelationId,
-    EngineId,
-    EngineInstanceId,
-    EventId,
-    MessageId,
-    NodeId,
-    OperationId,
-    PlanId,
+    ArtifactId, AttemptId, CapabilityId, ContractId, CorrelationId, EngineId, EngineInstanceId,
+    EventId, MessageId, NodeId, OperationId, PlanId,
 };
 
 pub use crate::logging::{
-    DispatchError,
-    DispatchOutcome,
-    InstanceError,
-    LogContext,
-    LogEvent,
-    LogEventType,
-    LogLevel,
-    LogMetadata,
-    LogScope,
-    LogSink,
-    LogSource,
-    LogValidationError,
-    LoggingInstance,
-    LoggingSystem,
+    DispatchError, DispatchOutcome, InstanceError, LogContext, LogEvent, LogEventType, LogLevel,
+    LogMetadata, LogScope, LogSink, LogSource, LogValidationError, LoggingInstance, LoggingSystem,
 };
 
 pub use crate::operation::{CancellationToken, Deadline, Operation, OperationContext};

@@ -41,15 +41,13 @@ fn stream_is_created_with_explicit_operation_ownership() {
     )
     .unwrap();
 
-    assert!(!stream.owner().operation_id().as_str().is_empty());
-    assert!(
-        !stream
-            .context()
-            .operation()
-            .operation
-            .id
-            .as_str()
-            .is_empty()
+    assert_eq!(
+        stream.owner().operation_id(),
+        &context.operation().operation.id
+    );
+    assert_eq!(
+        stream.context().operation().operation.id,
+        context.operation().operation.id
     );
 }
 
@@ -184,8 +182,8 @@ fn dropping_the_only_consumer_cancels_an_open_stream() {
 
 #[test]
 fn deadline_reaches_a_waiting_producer() {
-    let context = context("deadline-wait")
-        .with_deadline(Deadline::from_now(Duration::from_millis(100)).unwrap());
+    let context =
+        context("deadline-wait").with_deadline(Deadline::from_now(Duration::from_secs(1)).unwrap());
     let stream: Stream<u8> = Stream::new(
         &context,
         BackpressureConfig::new(1, BackpressurePolicy::Wait).unwrap(),
@@ -231,14 +229,26 @@ fn wait_backpressure_blocks_until_capacity_is_released() {
 
     let producer = stream.clone();
     let (started_tx, started_rx) = mpsc::channel();
+    let (completed_tx, completed_rx) = mpsc::channel();
     let handle = std::thread::spawn(move || {
         started_tx.send(()).unwrap();
-        producer.publish(StreamItem::final_item(1, 2))
+        let result = producer.publish(StreamItem::final_item(1, 2));
+        completed_tx.send(result).unwrap();
     });
 
     started_rx.recv().unwrap();
+    assert!(
+        completed_rx
+            .recv_timeout(Duration::from_millis(25))
+            .is_err()
+    );
+
     assert_eq!(consumer.next_item().unwrap().unwrap().payload(), &1);
-    assert_eq!(handle.join().unwrap(), Ok(()));
+    assert_eq!(
+        completed_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        Ok(())
+    );
+    handle.join().unwrap();
     assert_eq!(consumer.next_item().unwrap().unwrap().payload(), &2);
 }
 

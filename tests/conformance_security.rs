@@ -6,9 +6,12 @@ use nizaam_core::{
         Participants, PayloadDescriptor, UniversalRequest, UniversalResponse, Version,
     },
     control_plane::{
-        ControlPlane, ControlPlaneCommunication, ResolutionInput, ResolvedCapability,
-        ResolvedContract, ResolvedRouting, RoutingStrategy,
+        ControlPlane, ControlPlaneCommunication, DestinationEligibilityInput, DestinationRequest,
+        EngineObservation, EngineRegistration, Membership, Observations, ResolutionInput,
+        ResolvedCapability, ResolvedContract, ResolvedRouting, RoutingStrategy,
+        eligible_destinations,
     },
+    health::{HealthReport, LivenessReport, ReadinessReport},
     identity::{
         AttemptId, CapabilityId, ContractId, CorrelationId, EngineId, EngineInstanceId, MessageId,
         OperationId,
@@ -609,12 +612,11 @@ fn security_rejection_does_not_enter_control_plane_or_transport() {
 
 #[test]
 fn security_rejection_does_not_create_a_retry_attempt() {
-    let attempt = Attempt::new(
-        OperationId::new("security-retry-boundary").unwrap(),
-        AttemptId::new("security-retry-attempt").unwrap(),
-        1,
-    )
-    .unwrap();
+    use nizaam_core::retry::{
+        BackoffPolicy, FailureCategory, RetryAdmission, RetryAdmissionRequest, RetryBudget,
+        RetryPolicy, RetrySafetyGates,
+    };
+    use nizaam_core::status::Retryability;
 
     let pipeline = ExecutionPipeline::new().with_middleware(SecurityMiddleware::new(
         StaticAuthenticator {
@@ -636,7 +638,36 @@ fn security_rejection_does_not_create_a_retry_attempt() {
         });
 
     assert!(result.is_err());
-    assert_eq!(attempt.state(), AttemptLifecycleState::Created);
+
+    let operation = OperationId::new("security-retry-boundary").unwrap();
+    let attempt = Attempt::new(
+        operation,
+        AttemptId::new("security-retry-attempt").unwrap(),
+        1,
+    )
+    .unwrap();
+    attempt.start().unwrap();
+    attempt.fail().unwrap();
+
+    let policy = RetryPolicy::new(3, 4).unwrap();
+    let backoff = BackoffPolicy::no_backoff();
+    let cancellation = nizaam_core::operation::CancellationToken::new();
+    let admission = RetryAdmission::new(&policy, &backoff, &cancellation, None);
+    let mut budget = RetryBudget::new(2);
+
+    let retry = admission.admit_next(RetryAdmissionRequest {
+        budget: &mut budget,
+        current_attempt: &attempt,
+        category: FailureCategory::Unknown,
+        retryability: Retryability::NonRetryable,
+        next_attempt_id: AttemptId::new("security-retry-successor").unwrap(),
+        jitter_source: None,
+        safety_gates: RetrySafetyGates::new(true, true, true, true),
+    });
+
+    assert!(retry.is_err());
+    assert_eq!(budget.consumed(), 0);
+    assert_eq!(attempt.state(), AttemptLifecycleState::Failed);
 }
 
 #[test]
@@ -682,9 +713,30 @@ fn stale_routing_decision_cannot_override_runtime_admission() {
     ] {
         runtime.transition(state).unwrap();
     }
-
     assert_eq!(runtime.admit_request(), Ok(()));
+
+    let operation = OperationId::new("security-stale-route").unwrap();
+    let attempt = Attempt::new(
+        operation.clone(),
+        AttemptId::new("security-stale-attempt").unwrap(),
+        1,
+    )
+    .unwrap();
+    let resolution = ControlPlane::new().resolve(ResolutionInput::new(
+        operation,
+        ResolvedContract::new(ContractId::new("security.stale.contract").unwrap(), "1.0.0"),
+        ResolvedCapability::new(CapabilityId::new("security.stale").unwrap()),
+        ResolvedRouting::new(
+            EngineInstanceId::new("security-runtime-instance").unwrap(),
+            RoutingStrategy::Deterministic,
+        ),
+    ));
+    let decision = ControlPlane::new()
+        .route_resolved(&resolution, &attempt)
+        .unwrap();
+
     runtime.transition(LifecycleState::Draining).unwrap();
+    assert_eq!(decision.destination().as_str(), "security-runtime-instance");
     assert_eq!(
         runtime.admit_request(),
         Err(nizaam_core::runtime::RequestAdmissionError::NotServing(
@@ -730,6 +782,92 @@ fn explicit_destination_does_not_bypass_security_middleware() {
 
 #[test]
 fn preferred_fallback_does_not_bypass_security_boundary() {
+    let membership = Membership::new();
+    let observations = Observations::new();
+
+    let preferred = EngineInstanceId::new("security-preferred").unwrap();
+    let fallback = EngineInstanceId::new("security-fallback").unwrap();
+    let engine = EngineId::new("security-fallback-engine").unwrap();
+    let capability = CapabilityId::new("security.fallback").unwrap();
+
+    let definition = nizaam_core::capability::CapabilityDefinition::new(
+        capability.clone(),
+        engine.clone(),
+        "security fallback capability",
+    )
+    .unwrap();
+
+    membership
+        .register(
+            EngineRegistration::new(engine.clone(), fallback.clone())
+                .with_capability(definition)
+                .unwrap()
+                .with_contract(
+                    request(
+                        "security-fallback-registration",
+                        "security.fallback",
+                        b"payload",
+                    )
+                    .event
+                    .envelope
+                    .metadata
+                    .descriptor,
+                )
+                .with_endpoint(
+                    nizaam_core::control_plane::Endpoint::new("memory://security-fallback")
+                        .unwrap(),
+                )
+                .with_runtime_metadata(
+                    nizaam_core::control_plane::RuntimeRegistrationMetadata::new()
+                        .with_lifecycle(LifecycleState::Serving)
+                        .with_readiness(ReadinessReport::from_lifecycle(LifecycleState::Serving)),
+                ),
+        )
+        .unwrap();
+
+    let health = HealthReport::new(
+        engine,
+        LifecycleState::Serving,
+        LivenessReport::healthy(),
+        ReadinessReport::from_lifecycle(LifecycleState::Serving),
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    observations
+        .update(
+            EngineObservation::new(
+                EngineId::new("security-fallback-engine").unwrap(),
+                fallback.clone(),
+                health,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    let destination = DestinationRequest::preferred_explicit(
+        preferred,
+        nizaam_core::control_plane::FallbackPolicy::Allowed,
+    );
+    let eligible = eligible_destinations(DestinationEligibilityInput::new(
+        &destination,
+        &membership.snapshot(),
+        &observations.snapshot(),
+        &capability,
+        &request(
+            "security-fallback-contract",
+            "security.fallback",
+            b"payload",
+        )
+        .event
+        .envelope
+        .metadata
+        .descriptor,
+    ))
+    .unwrap();
+    assert_eq!(eligible.len(), 1);
+    assert_eq!(eligible[0].instance_id(), &fallback);
+
     let pipeline = ExecutionPipeline::new().with_middleware(SecurityMiddleware::new(
         StaticAuthenticator {
             result: Ok(user("fallback-user")),
@@ -742,10 +880,17 @@ fn preferred_fallback_does_not_bypass_security_boundary() {
 
     let mut context = context("security-fallback");
     let mut request = request("security-fallback-message", "security.fallback", b"payload");
+    request.event.envelope.metadata.participants = request
+        .event
+        .envelope
+        .metadata
+        .participants
+        .clone()
+        .with_target_instance(fallback);
 
     let result: Result<UniversalResponse, nizaam_core::runtime::RequestPipelineError<Status>> =
         pipeline.run_request(&mut context, &mut request, |_context, _request| {
-            panic!("routing fallback must not bypass authorization");
+            panic!("fallback resolution must not bypass authorization");
         });
 
     assert!(result.is_err());

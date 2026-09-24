@@ -28,7 +28,7 @@ fn visual_logical_streaming_and_transport_fragmentation_are_separate() {
     println!("  capacity  : {}", stream.capacity());
     assert_eq!(stream.capacity(), 2);
     assert_eq!(
-        &main_context.operation().operation.id,
+        stream.owner().operation_id(),
         &main_context.operation().operation.id
     );
     success("stream is attached to one operation context");

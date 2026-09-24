@@ -896,9 +896,9 @@ Implemented the Phase 7 communication boundary across transport, client, server,
 
 * transport abstractions with `Transport`, `TransportError`, and `TransportResult`;
 * connection abstractions with `Connection`, `ConnectionState`, `ClientConnection`, `ClientConnectionFactory`, and client connection state handling;
-* binary `MessageHeader` framing with the required fixed 20-byte header and big-endian numeric fields;
+* binary `MessageHeader` framing with the required fixed 48-byte header and big-endian numeric fields;
 * bounded `MessageStream` framing over `ByteSink` and `ByteSource`;
-* bounded frame handling with `MAX_FRAME_LENGTH`;
+* bounded frame handling with `MAX_FRAME_LENGTH_BYTES` for the complete frame and `MAX_PAYLOAD_LENGTH` for the frame payload;
 * logical-message fragmentation and reassembly for payloads larger than one transport frame;
 * fragment index and final-fragment validation, including rejection of invalid or unexpected frame sequences;
 * a provider-neutral `InMemoryTransport` implementation used to exercise the transport contract;
@@ -919,7 +919,7 @@ A logical request, response, or event is a logical message. A logical message ma
 
 Transport framing metadata is encoded in binary form. The framing protocol is transport focused and does not interpret engine specific payload semantics.
 
-Each transport frame contains a fixed 20-byte binary header followed by the frame payload:
+Each transport frame contains a fixed 48-byte binary header followed by the frame payload:
 
 ```text
 ┌──────────────────────────────────────────────────────┐
@@ -941,7 +941,7 @@ Each transport frame contains a fixed 20-byte binary header followed by the fram
 
 All multi-byte numeric framing fields use big-endian encoding.
 
-The 20-byte header is transport metadata and is not part of the logical payload.
+The 48-byte header is transport metadata and is not part of the logical payload.
 
 `Version` identifies the framing protocol version.
 
@@ -957,9 +957,9 @@ The transport header must remain minimal and transport focused. Information alre
 
 The frame payload remains opaque bytes. Core must not interpret, modify, or depend on the semantic meaning of engine payloads.
 
-`MAX_FRAME_LENGTH` limits the payload size of an individual transport frame, not the size of a complete logical message.
+`MAX_FRAME_LENGTH_BYTES` limits the complete size of an individual transport frame to 20,000,000 bytes. `MAX_PAYLOAD_LENGTH` limits the payload size of that frame to 19,999,952 bytes.
 
-A logical message whose payload is larger than `MAX_FRAME_LENGTH` MUST be fragmented into multiple transport frames and reassembled by the receiving side.
+A logical message whose payload is larger than `MAX_PAYLOAD_LENGTH` MUST be fragmented into multiple transport frames and reassembled by the receiving side.
 
 The transport protocol MUST NOT require a logical message to fit within a single transport frame.
 
@@ -15320,16 +15320,19 @@ payload integrity
 The conformance suite MUST preserve the distinction:
 
 ```text
-4-byte frame header
+48-byte frame header
 ≠
-4-byte total message limit
+20,000,000-byte complete frame limit
 ```
 
 and:
 
 ```text
-MAX_FRAME_LENGTH
-→ payload limit for one frame
+MAX_PAYLOAD_LENGTH
+→ 19,999,952-byte payload limit for one frame
+
+MAX_FRAME_LENGTH_BYTES
+→ 20,000,000-byte complete frame limit
 ```
 
 rather than the complete logical message.
@@ -16772,9 +16775,9 @@ architecture.
 * `FunctionHandler<F>` adapter and `arc_handler()` helper allow plain functions to be registered as capability handlers without requiring explicit trait implementation.
 * Capability definitions carry metadata (`CapabilityId`, `EngineId`, name, description, `Version`) but not payload schemas; those remain engine owned.
 * Phase 7 introduces a shared provider-neutral transport boundary through the `Transport`, `Connection`, `ByteSink`, `ByteSource`, and `MessageStream` abstractions.
-* Transport framing uses a fixed 20-byte binary header with big-endian multi-byte fields. Transport metadata remains separate from the logical universal message payload.
+* Transport framing uses a fixed 48-byte binary header with big-endian multi-byte fields. Transport metadata remains separate from the logical universal message payload.
 * Transport message identity is distinct from the Core `MessageId`; transport-level message IDs belong to the framing layer and logical message identity remains part of the universal contract.
-* Individual transport frames are bounded by `MAX_FRAME_LENGTH`; logical messages may exceed one frame and are fragmented and reassembled without changing the logical payload.
+* Individual transport frames are bounded by `MAX_FRAME_LENGTH_BYTES` at 20,000,000 bytes, with `MAX_PAYLOAD_LENGTH` at 19,999,952 bytes for the frame payload; logical messages may exceed one frame and are fragmented and reassembled without changing the logical payload.
 * Fragmentation requires contiguous zero-based fragment ordering beginning at index zero, with explicit final-fragment signaling. Duplicate, missing, or unexpected fragment sequences are protocol errors, and Phase 7 does not provide retransmission or retry at the framing layer.
 * Complete reassembled logical messages are bounded separately from individual frames to prevent unbounded reassembly.
 * Transport treats frame payloads as opaque bytes and does not interpret engine-specific payload semantics, contract meaning, operation context, or higher-level message metadata.
@@ -17052,7 +17055,7 @@ architecture.
 * **Middleware remains a shared execution boundary.** Middleware composes existing Core context and security mechanisms rather than creating parallel request state.
 * **Transport owns transport concerns.** Connections, framing, fragmentation, reassembly, and transport-level integrity remain separate from application-level streaming.
 * **Application streaming remains logical.** `StreamItem` represents application-level output and is not equivalent to a transport frame.
-* **The current transport framing protocol uses a 48-byte header and a 20,000,000-byte maximum complete frame.** Logical messages exceeding the maximum payload are fragmented at the transport boundary.
+* **The current transport framing protocol uses a 48-byte header, `MAX_FRAME_LENGTH_BYTES` of 20,000,000 bytes for the complete frame, and `MAX_PAYLOAD_LENGTH` of 19,999,952 bytes for the frame payload.** Logical messages whose payload exceeds `MAX_PAYLOAD_LENGTH` are fragmented at the transport boundary.
 * **Retry remains separate from routing.** Retry creates a new attempt under the same logical operation; Control Plane independently produces a routing decision for that attempt.
 * **Idempotency remains separate from retry.** `OperationId` and `IdempotencyKey` represent different concerns.
 * **Unknown retry outcomes are not blindly replayed.** Reconciliation is required before potentially side-effecting work is automatically retried.
@@ -17075,7 +17078,6 @@ None currently. Concrete trait signatures, provider choices, serialization, asyn
 
 ### Current State
 
-Phase 15 introduces the communication-focused Control Plane responsible for:
 Nizaam Core is now complete through Phase 16.
 
 The Core implementation provides the shared, domain-agnostic foundation required by future Nizaam engines, including:

@@ -610,7 +610,23 @@ fn retry_after_response_loss_can_protect_one_logical_side_effect() {
 fn retry_creates_a_new_control_plane_routing_decision_for_the_new_attempt() {
     let operation = operation_id("retry-routing-conformance");
     let first = attempt(&operation, "retry-routing-a1", 1);
-    let second = attempt(&operation, "retry-routing-a2", 2);
+    first.start().unwrap();
+    first.fail().unwrap();
+
+    let mut budget = RetryBudget::new(1);
+    let cancellation = CancellationToken::new();
+    let second = admission(&retryable_policy(), &cancellation, None)
+        .admit_next(RetryAdmissionRequest {
+            budget: &mut budget,
+            current_attempt: &first,
+            category: FailureCategory::Transient,
+            retryability: Retryability::Retryable,
+            next_attempt_id: attempt_id("retry-routing-a2"),
+            jitter_source: None,
+            safety_gates: gates(),
+        })
+        .unwrap()
+        .0;
 
     let contract =
         ResolvedContract::new(ContractId::new("retry.routing.contract").unwrap(), "1.0.0");
@@ -627,7 +643,7 @@ fn retry_creates_a_new_control_plane_routing_decision_for_the_new_attempt() {
         ),
     ));
     let second_resolution = ControlPlane::new().resolve(ResolutionInput::new(
-        operation.clone(),
+        operation,
         contract,
         capability,
         ResolvedRouting::new(
@@ -648,7 +664,9 @@ fn retry_creates_a_new_control_plane_routing_decision_for_the_new_attempt() {
         second_decision.operation_id()
     );
     assert_ne!(first_decision.attempt_id(), second_decision.attempt_id());
+    assert_eq!(second_decision.attempt_id(), second.attempt_id());
     assert_ne!(first_decision.destination(), second_decision.destination());
+    assert_eq!(budget.consumed(), 1);
 }
 
 #[test]

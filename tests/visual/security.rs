@@ -97,6 +97,14 @@ impl CredentialExtractor for Credentials {
     }
 }
 
+#[derive(Clone)]
+struct InvalidCredentials;
+impl CredentialExtractor for InvalidCredentials {
+    fn extract(&self, _context: &EngineContext, _request: &UniversalRequest) -> Option<Vec<u8>> {
+        Some(b"invalid-token".to_vec())
+    }
+}
+
 #[test]
 fn visual_security_boundary() {
     section("NIZAAM CORE — SECURITY");
@@ -137,15 +145,26 @@ fn visual_security_boundary() {
     assert_eq!(ctx.security().unwrap().calling_service(), Some(&calling));
     success("calling-service identity remains available after re-authentication");
 
-    step(3, "authorization denial stops before execution");
-    let middleware = SecurityMiddleware::new(Auth, Deny, Credentials);
-    let mut ctx = context();
-    let mut req = request("visual.read");
-    assert!(matches!(
-        middleware.on_request(&mut ctx, &mut req),
-        MiddlewareResult::Reject(_)
-    ));
+    step(
+        3,
+        "authentication failure is distinct from authorization denial",
+    );
+    let authorization_middleware = SecurityMiddleware::new(Auth, Deny, Credentials);
+    let mut authorization_ctx = context();
+    let mut authorization_req = request("visual.read");
+    let authorization_result =
+        authorization_middleware.on_request(&mut authorization_ctx, &mut authorization_req);
+    assert!(matches!(authorization_result, MiddlewareResult::Reject(_)));
+
+    let authentication_middleware = SecurityMiddleware::new(Auth, Allow, InvalidCredentials);
+    let mut authentication_ctx = context();
+    let mut authentication_req = request("visual.read");
+    let authentication_result =
+        authentication_middleware.on_request(&mut authentication_ctx, &mut authentication_req);
+    assert!(matches!(authentication_result, MiddlewareResult::Reject(_)));
+
     println!("  authorization : Deny");
+    println!("  authentication: InvalidCredentials");
     println!("  capability    : NOT EXECUTED");
-    success("authorization denial is distinct from authentication failure and blocks execution");
+    success("authentication failure and authorization denial both block execution");
 }

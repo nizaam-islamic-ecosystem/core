@@ -330,43 +330,111 @@ fn event_delivery_pressure_keeps_subscriber_delivery_bounded_and_isolated() {
     let owner = CancellationToken::new();
     let publisher = EventPublisher::new(Arc::clone(&lifecycle), &owner);
     publisher.activate().unwrap();
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let subscription = EventSubscription::new(
+
+    let (slow_started_tx, slow_started_rx) = std::sync::mpsc::channel();
+    let (slow_release_tx, slow_release_rx) = std::sync::mpsc::channel();
+    let slow_release_rx = Arc::new(Mutex::new(slow_release_rx));
+    let slow_subscription = EventSubscription::new(
         EventName::new("stress.event").unwrap(),
         "stress.event",
         Scope::new("engine:stress").unwrap(),
-        move |event: &Event| {
-            sender.send(event.event_id().as_str().to_owned()).unwrap();
+        {
+            let slow_release_rx = Arc::clone(&slow_release_rx);
+            move |event: &Event| {
+                if event.event_id().as_str() == "stress-event-0" {
+                    slow_started_tx.send(()).unwrap();
+                    slow_release_rx
+                        .lock()
+                        .expect("slow release receiver lock should not be poisoned")
+                        .recv()
+                        .unwrap();
+                }
+            }
         },
         &owner,
     )
     .unwrap();
-    let subscription = publisher.subscribe(subscription).unwrap();
-    let dispatcher =
-        DeliveryDispatcher::new(DeliveryConfig::new(8, 1, 8).unwrap(), owner.clone()).unwrap();
-    let handle = dispatcher.register(subscription).unwrap();
+    let slow_subscription = publisher.subscribe(slow_subscription).unwrap();
 
-    let mut accepted = 0;
-    for index in 0..6 {
-        let event = Event::new(
+    let (healthy_tx, healthy_rx) = std::sync::mpsc::channel();
+    let (healthy_started_tx, healthy_started_rx) = std::sync::mpsc::channel();
+    let healthy_subscription = EventSubscription::new(
+        EventName::new("stress.event").unwrap(),
+        "stress.event",
+        Scope::new("engine:stress").unwrap(),
+        move |event: &Event| {
+            healthy_started_tx.send(()).unwrap();
+            healthy_tx
+                .send(event.event_id().as_str().to_owned())
+                .unwrap();
+        },
+        &owner,
+    )
+    .unwrap();
+    let healthy_subscription = publisher.subscribe(healthy_subscription).unwrap();
+
+    let dispatcher =
+        DeliveryDispatcher::new(DeliveryConfig::new(1, 2, 8).unwrap(), owner.clone()).unwrap();
+    let slow_handle = dispatcher.register(slow_subscription).unwrap();
+    let healthy_handle = dispatcher.register(healthy_subscription).unwrap();
+
+    let event = |index: usize| {
+        Event::new(
             EventId::new(format!("stress-event-{index}")).unwrap(),
             EventName::new("stress.event").unwrap(),
             "stress.event",
             Scope::new("engine:stress").unwrap(),
         )
+        .unwrap()
+    };
+
+    let first = publisher.publish(event(0)).unwrap();
+    assert_eq!(
+        slow_handle.enqueue(Arc::clone(first.event())).unwrap(),
+        DeliveryOutcome::Accepted
+    );
+    assert_eq!(
+        healthy_handle.enqueue(Arc::clone(first.event())).unwrap(),
+        DeliveryOutcome::Accepted
+    );
+    slow_started_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
         .unwrap();
-        let publication = publisher.publish(event).unwrap();
-        if handle.enqueue(Arc::clone(publication.event())).unwrap() == DeliveryOutcome::Accepted {
-            accepted += 1;
-        }
-    }
-    for _ in 0..accepted {
-        receiver
+
+    let second = publisher.publish(event(1)).unwrap();
+    let slow_second = slow_handle.enqueue(Arc::clone(second.event())).unwrap();
+
+    let third = publisher.publish(event(2)).unwrap();
+    let slow_third = slow_handle.enqueue(Arc::clone(third.event())).unwrap();
+
+    assert_eq!(slow_second, DeliveryOutcome::Accepted);
+    assert_eq!(slow_third, DeliveryOutcome::Dropped);
+
+    assert_eq!(
+        healthy_rx
             .recv_timeout(std::time::Duration::from_secs(1))
-            .unwrap();
-    }
+            .unwrap(),
+        "stress-event-0"
+    );
+    healthy_started_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+
+    assert_eq!(
+        healthy_handle.enqueue(Arc::clone(second.event())).unwrap(),
+        DeliveryOutcome::Accepted
+    );
+
+    assert_eq!(
+        healthy_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+        "stress-event-1"
+    );
+
+    slow_release_tx.send(()).unwrap();
+
     dispatcher.shutdown();
-    assert!(accepted <= 6);
 }
 
 #[test]

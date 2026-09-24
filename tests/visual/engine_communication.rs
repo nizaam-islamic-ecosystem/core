@@ -73,17 +73,46 @@ fn visual_engine_to_engine_communication() {
 
     step(3, "send through UniversalClient / InMemoryTransport");
     let transport = InMemoryTransport::new();
-    let target = instance_b.clone();
+    let observed_instance = std::sync::Arc::new(std::sync::Mutex::new(None::<EngineInstanceId>));
+    let observed_for_target = std::sync::Arc::clone(&observed_instance);
     transport.register(engine_b.clone(), instance_b.clone(), move |request| {
+        *observed_for_target.lock().unwrap() = Some(
+            request
+                .event
+                .envelope
+                .metadata
+                .participants
+                .target_instance
+                .clone()
+                .expect("target instance must be preserved"),
+        );
         let envelope = request.event.envelope;
         UniversalResponse::new(envelope, Status::Success)
     });
+
+    let misroute_instance = EngineInstanceId::new("engine-b-misroute").unwrap();
+    transport.register(
+        engine_b.clone(),
+        misroute_instance.clone(),
+        move |request| {
+            let mut envelope = request.event.envelope;
+            envelope.payload = EncodedPayload::new(
+                envelope.metadata.descriptor.payload.clone(),
+                b"misrouted".to_vec(),
+            );
+            UniversalResponse::new(envelope, Status::Success)
+        },
+    );
+
     let client = UniversalClient::new(transport);
     let response = block_on(client.send(&instance_b, req)).unwrap();
     assert_eq!(response.status, Status::Success);
     assert_eq!(response.event.envelope.message_id, message);
     assert_eq!(response.event.envelope.payload.bytes(), b"hello-engine-b");
-    assert_eq!(target.as_str(), "engine-b-instance");
+    assert_eq!(
+        observed_instance.lock().unwrap().as_ref(),
+        Some(&instance_b)
+    );
     show_arrow("UniversalClient", "Engine B handler");
     success("request reached the intended concrete instance and returned a structural response");
 

@@ -44,6 +44,17 @@ fn identity_roles_have_distinct_public_signatures() {
 }
 
 #[test]
+fn identity_roles_have_distinct_runtime_type_ids() {
+    use std::any::TypeId;
+
+    assert_ne!(TypeId::of::<OperationId>(), TypeId::of::<AttemptId>());
+    assert_ne!(TypeId::of::<OperationId>(), TypeId::of::<MessageId>());
+    assert_ne!(TypeId::of::<OperationId>(), TypeId::of::<EventId>());
+    assert_ne!(TypeId::of::<EngineId>(), TypeId::of::<EngineInstanceId>());
+    assert_ne!(TypeId::of::<EngineId>(), TypeId::of::<CapabilityId>());
+}
+
+#[test]
 fn context_roles_have_distinct_public_signatures() {
     let operation = Operation::new(
         OperationId::new("compile-operation").unwrap(),

@@ -10,9 +10,8 @@ use nizaam_core::{
         DeliveryConfig, DeliveryDispatcher, DeliveryError, DeliveryOutcome, Event, EventContext,
         EventLifecycle, EventName, EventPublisher, EventSubscriber, EventSubscription, Scope,
     },
-    identity::{AttemptId, CapabilityId, CorrelationId, EventId, OperationId},
+    identity::{CapabilityId, CorrelationId, EventId, OperationId},
     operation::{CancellationToken, Operation, OperationContext},
-    retry::{Attempt, AttemptLifecycleState},
     security::{
         AuthorizationDecision, AuthorizationError, AuthorizationRequest, Authorizer, PrincipalId,
         PrincipalIdentity, PrincipalType, SecurityContext,
@@ -483,19 +482,18 @@ fn bounded_delivery_drops_newest_event_when_subscription_queue_is_full() {
     receive(&started_receiver);
 
     let second = publisher.publish(event("bounded-2")).unwrap();
-    assert_eq!(
-        handle.enqueue(Arc::clone(second.event())).unwrap(),
-        DeliveryOutcome::Accepted
-    );
+    let second_result = handle.enqueue(Arc::clone(second.event())).unwrap();
 
     let third = publisher.publish(event("bounded-3")).unwrap();
-    assert_eq!(
-        handle.enqueue(Arc::clone(third.event())).unwrap(),
-        DeliveryOutcome::Dropped
-    );
+    let third_result = handle.enqueue(Arc::clone(third.event())).unwrap();
 
-    // Let the callback finish before shutting the dispatcher down.
+    // Let the callback finish before asserting queue outcomes or shutting the
+    // dispatcher down. This guarantees a blocked callback cannot keep cleanup
+    // waiting while an assertion panics.
     release_sender.send(()).unwrap();
+
+    assert_eq!(second_result, DeliveryOutcome::Accepted);
+    assert_eq!(third_result, DeliveryOutcome::Dropped);
     dispatcher.shutdown();
 }
 
@@ -655,24 +653,14 @@ fn event_context_is_preserved_through_delivery() {
 }
 
 #[test]
-fn event_publication_does_not_mutate_an_unrelated_attempt() {
+fn event_publication_without_subscribers_creates_no_delivery_state() {
     let owner = CancellationToken::new();
     let publisher = publisher(&owner);
     publisher.activate().unwrap();
 
-    let attempt = Attempt::new(
-        OperationId::new("event-retry-boundary").unwrap(),
-        AttemptId::new("event-retry-attempt").unwrap(),
-        1,
-    )
-    .unwrap();
-
-    let before = attempt.state();
-    let publication = publisher.publish(event("no-retry-side-effect")).unwrap();
+    let publication = publisher.publish(event("no-delivery-side-effect")).unwrap();
 
     assert_eq!(publication.subscription_count(), 0);
-    assert_eq!(attempt.state(), before);
-    assert_eq!(attempt.state(), AttemptLifecycleState::Created);
 }
 
 #[test]
@@ -813,17 +801,10 @@ fn logging_event_keeps_event_identity_and_scoped_logging_semantics() {
 }
 
 #[test]
-fn event_system_does_not_change_retry_attempt_or_routing_inputs() {
+fn event_system_does_not_change_routing_inputs() {
     let owner = CancellationToken::new();
     let publisher = publisher(&owner);
     publisher.activate().unwrap();
-
-    let attempt = Attempt::new(
-        OperationId::new("event-routing-boundary").unwrap(),
-        AttemptId::new("event-routing-attempt").unwrap(),
-        1,
-    )
-    .unwrap();
 
     let event = Event::new_with_context(
         EventId::new("routing-boundary-event").unwrap(),
@@ -837,8 +818,6 @@ fn event_system_does_not_change_retry_attempt_or_routing_inputs() {
     let publication = publisher.publish(event).unwrap();
 
     assert_eq!(publication.subscription_count(), 0);
-    assert_eq!(attempt.state(), AttemptLifecycleState::Created);
-    assert_eq!(attempt.attempt_number(), 1);
     assert_eq!(
         publication
             .event()

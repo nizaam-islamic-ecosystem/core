@@ -98,11 +98,19 @@ fn visual_events_and_observability_lineage() {
             .unwrap(),
         )
         .unwrap();
+    assert_eq!(publication.subscription_count(), 1);
     let delivery = handle.enqueue(Arc::clone(publication.event())).unwrap();
     assert_eq!(delivery, DeliveryOutcome::Accepted);
+    assert_eq!(
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap()
+            .as_str(),
+        "visual-event-2"
+    );
     assert!(second.is_cancelled());
     println!("  cancelled subscription state: {:?}", second.state());
-    success("subscription cancellation is local to its lifecycle");
+    success("cancelled subscription is excluded while healthy delivery remains active");
     dispatcher.shutdown();
     separator();
 }

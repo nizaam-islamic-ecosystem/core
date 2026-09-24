@@ -430,13 +430,27 @@ fn malformed_frame_makes_message_stream_source_unusable() {
 
 #[test]
 fn message_stream_round_trip_preserves_a_logical_message_across_fragments() {
-    let payload = b"phase16 transport logical message".to_vec();
+    let payload = vec![b'x'; MAX_PAYLOAD_LENGTH + 1];
     let sink = MemorySink::default();
     let input = MemorySource::new(Vec::new());
     let sender = MessageStream::new(&sink, &input);
 
     sender.send(&payload).unwrap();
     let encoded = sink.take();
+
+    let mut offset = 0;
+    let mut frame_count = 0;
+    while offset < encoded.len() {
+        assert!(encoded.len() - offset >= HEADER_LENGTH);
+        let header = MessageHeader::deserialize(&encoded[offset..offset + HEADER_LENGTH]).unwrap();
+        let frame_length = HEADER_LENGTH + header.payload_length() as usize;
+        assert!(encoded.len() - offset >= frame_length);
+        framing::decode_frame(&encoded[offset..offset + frame_length]).unwrap();
+        offset += frame_length;
+        frame_count += 1;
+    }
+
+    assert!(frame_count > 1);
 
     let receive_sink = MemorySink::default();
     let source = MemorySource::new(encoded);

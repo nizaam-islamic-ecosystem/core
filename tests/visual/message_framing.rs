@@ -8,9 +8,12 @@ use nizaam_core::transport::framing::{
 fn visual_message_framing_and_reassembly() {
     section("NIZAAM CORE — MESSAGE FRAMING");
     step(1, "48-byte header");
-    let payload = std::fs::read("tests/visual/dummy.json").expect(
-        "tests/visual/dummy.json must exist at the repository root for the visual framing test",
-    );
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("visual")
+        .join("dummy.json");
+    let payload = std::fs::read(&fixture)
+        .expect("tests/visual/dummy.json must exist under the Cargo manifest directory");
     let header = MessageHeader::new(
         FRAMING_VERSION,
         FLAG_FINISH,

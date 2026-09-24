@@ -15,24 +15,64 @@ use nizaam_core::config::validation::{
 };
 use nizaam_core::contracts::{
     ContractDescriptor, ContractMetadata, EncodedPayload, Interaction, MessageEnvelope,
-    Participants, PayloadDescriptor, UniversalRequest, Version,
+    Participants, PayloadDescriptor, UniversalRequest, UniversalResponse, Version,
 };
 use nizaam_core::identity::{
     CapabilityId, ContractId, CorrelationId, EngineId, EngineInstanceId, MessageId, OperationId,
 };
 use nizaam_core::operation::{Operation, OperationContext};
-use nizaam_core::runtime::{EngineContext, EngineRuntime, LifecycleState};
-use nizaam_core::security::{PrincipalId, PrincipalIdentity, PrincipalType, SecurityContext};
+use nizaam_core::runtime::{EngineContext, EngineRuntime, ExecutionPipeline, LifecycleState};
+use nizaam_core::security::{
+    AuthenticationError, AuthenticationRequest, Authenticator, AuthorizationDecision,
+    AuthorizationError, AuthorizationRequest, Authorizer, CredentialExtractor, PrincipalId,
+    PrincipalIdentity, PrincipalType, SecurityContext, SecurityMiddleware,
+};
+use nizaam_core::status::Status;
 use nizaam_core::streaming::{BackpressureConfig, BackpressurePolicy, Stream};
 use nizaam_core::transport::InMemoryTransport;
 
-#[path = "conformance_engine.rs"]
-mod conformance_engine;
+mod common;
 
-use conformance_engine::{ReferenceBehavior, ReferenceEngine};
+use common::reference_engine::{ReferenceBehavior, ReferenceEngine};
 
 const CAPABILITY: &str = "integration.capability";
 const CONTRACT: &str = "integration.contract";
+
+#[derive(Debug)]
+struct IntegrationAuthenticator;
+
+impl Authenticator for IntegrationAuthenticator {
+    fn authenticate(
+        &self,
+        _request: &AuthenticationRequest<'_>,
+    ) -> Result<PrincipalIdentity, AuthenticationError> {
+        Ok(PrincipalIdentity::new(
+            PrincipalType::User,
+            PrincipalId::new("integration-user").unwrap(),
+        ))
+    }
+}
+
+#[derive(Debug)]
+struct IntegrationDenyAuthorizer;
+
+impl Authorizer for IntegrationDenyAuthorizer {
+    fn authorize(
+        &self,
+        _request: &AuthorizationRequest<'_>,
+    ) -> Result<AuthorizationDecision, AuthorizationError> {
+        Ok(AuthorizationDecision::Deny)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct IntegrationCredentials;
+
+impl CredentialExtractor for IntegrationCredentials {
+    fn extract(&self, _context: &EngineContext, _request: &UniversalRequest) -> Option<Vec<u8>> {
+        Some(b"integration-token".to_vec())
+    }
+}
 
 fn operation_context(id: &str) -> OperationContext {
     OperationContext::new(Operation::new(
@@ -162,11 +202,26 @@ fn authentication_or_authorization_failure_has_no_capability_dispatch() {
         .unwrap();
     engine.serving().unwrap();
 
-    let ctx = context("security-negative");
-    // No security context is installed. The runtime/capability path is never
-    // presented as an authorization implementation, so the integration
-    // boundary records the pre-dispatch security gate explicitly.
-    assert!(ctx.security().is_none());
+    let mut context = context("security-negative");
+    let mut request = request("security-negative", b"payload");
+    let pipeline = ExecutionPipeline::new().with_middleware(SecurityMiddleware::new(
+        IntegrationAuthenticator,
+        IntegrationDenyAuthorizer,
+        IntegrationCredentials,
+    ));
+
+    let result: Result<UniversalResponse, nizaam_core::runtime::RequestPipelineError<Status>> =
+        pipeline.run_request(&mut context, &mut request, |context, request| {
+            let _ = engine.dispatch(
+                context,
+                CAPABILITY,
+                CONTRACT,
+                request.event.envelope.payload.bytes(),
+            );
+            panic!("authorization denial must prevent capability dispatch");
+        });
+
+    assert!(result.is_err());
     assert_eq!(engine.invocation_count(CAPABILITY), 0);
 }
 

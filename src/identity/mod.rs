@@ -7,7 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static ID_GENERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn generate_identity_value(type_name: &str) -> String {
+#[doc(hidden)]
+pub fn generate_identity_value(type_name: &str) -> String {
     let counter = ID_GENERATION_COUNTER.fetch_add(1, Ordering::Relaxed);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -40,6 +41,7 @@ impl fmt::Display for InvalidIdentity {
 
 impl std::error::Error for InvalidIdentity {}
 
+#[macro_export]
 macro_rules! identity {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
@@ -56,7 +58,9 @@ macro_rules! identity {
                 Self(value)
             }
 
-            pub fn new(value: impl Into<String>) -> Result<Self, $crate::identity::InvalidIdentity> {
+            pub fn new(
+                value: impl Into<String>,
+            ) -> Result<Self, $crate::identity::InvalidIdentity> {
                 let value = value.into();
                 if value.trim().is_empty() {
                     return Err($crate::identity::InvalidIdentity);
@@ -76,7 +80,10 @@ macro_rules! identity {
         }
 
         impl ::core::fmt::Display for $name {
-            fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            fn fmt(
+                &self,
+                formatter: &mut ::core::fmt::Formatter<'_>,
+            ) -> ::core::fmt::Result {
                 formatter.write_str(self.as_str())
             }
         }
@@ -126,6 +133,7 @@ pub use event::EventId;
 pub use message::{CorrelationId, MessageId};
 pub use operation::OperationId;
 pub use plan::{AttemptId, NodeId, PlanId};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +302,7 @@ mod tests {
         fn check<T: AsRef<str>>(id: T, expected: &str) {
             assert_eq!(id.as_ref(), expected);
         }
+
         check(ArtifactId::new("a").unwrap(), "a");
         check(CapabilityId::new("c").unwrap(), "c");
         check(ContractId::new("ct").unwrap(), "ct");

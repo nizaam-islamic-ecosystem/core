@@ -14335,6 +14335,7 @@ Minimum repository-wide verification:
 ```bash
 set -o pipefail
 {
+  cargo fmt --all
   cargo fmt --all --check &&
   cargo clippy --workspace --all-targets -- -D warnings &&
   cargo build --workspace &&
